@@ -1,0 +1,40 @@
+# 过程式任务编排（chart 模式的 playbook）
+- name: 部署 demo-app
+  hosts: appservers
+  tasks:
+    - name: 采集 facts
+      setup:
+
+    - name: 内置变量演示（强制注入，任何 chart 都可用）
+      shell: 'echo self={{ .inventory_hostname }} hosts={{ len .play_hosts }} peer={{ (index .hosts "local1").address }}'
+
+    - name: 创建应用目录
+      file:
+        path: "{{ .global.workdir }}"
+        state: directory
+        mode: "0755"
+
+    - name: 安装 JDK（子 chart）
+      chart: jdk
+      vars:
+        mirror: https://mirrors.example.com/java
+
+    - name: 下发应用配置（templates/ + helpers 渲染）
+      template:
+        src: templates/app.conf.tpl
+        dest: "{{ .global.workdir }}/app.conf"
+        mode: "0644"
+      notify: 重载应用
+
+    - name: 部署实例（loop + 条件）
+      shell: 'echo "instance {{ .item }} of {{ .app.replicas }} up" > {{ .global.workdir }}/i{{ .item }}.status'
+      loop: ["1", "2"]
+      when: '{{ if ge .app.replicas 2 }}yes{{ end }}'
+
+    - name: 验证
+      shell: 'cat {{ .global.workdir }}/app.conf | head -2'
+      register: verify
+
+  handlers:
+    - name: 重载应用
+      shell: 'echo reloaded $(date +%s) >> {{ .global.workdir }}/reload.log'

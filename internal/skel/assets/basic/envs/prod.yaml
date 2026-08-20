@@ -1,0 +1,4 @@
+# 生产环境覆盖（wdp run ./__NAME__ -f envs/prod.yaml）
+global:
+  env: prod
+  workdir: /opt/prod/__NAME__

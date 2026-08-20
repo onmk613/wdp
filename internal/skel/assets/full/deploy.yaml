@@ -1,0 +1,144 @@
+# 全能力参考：策略分批/hook/delegate_to/run_once/loop_control/block-rescue/
+# 动态分组/子 chart 版本约束/输出控制 均有可运行示例。
+# 本地演练（零风险预演）：wdp run ./__NAME__ --check --diff -i <(echo 'all: {hosts: {local: {conn: local}}}')
+- name: 部署 __NAME__（金丝雀 + 健康门 + 自动回滚）
+  hosts: all
+  strategy:
+    type: canary          # 首批 1 台金丝雀，其余按 batch 分批
+    batch: "50%"
+    gate:                 # 每批完成且 handlers flush 后的健康门
+      shell: 'true'       # 示例门恒过；实际写 curl -sf http://localhost:8080/health
+      retries: 2
+      delay: 1
+    auto_rollback: true   # 批次失败或门未过 → 回滚该批文件类变更
+  tasks:
+    - name: 采集 facts
+      setup:
+
+    - name: 按系统家族动态分组（下一 play 用 os_* 通配引用）
+      group_by: 'os_{{ .os.family }}'
+
+    - name: 安装开始标记（hook=pre_install：主任务前执行；run_once+委托控制端）
+      shell: 'echo "__NAME__ install start at $(date +%s)"'
+      hook: pre_install
+      run_once: true
+      delegate_to: localhost
+      register: install_mark
+      output: oneline
+
+    - name: Linux 系统层（block 容错：失败转 rescue 不阻断部署）
+      block:
+        - name: 创建应用组
+          group:
+            name: "{{ .app.name }}"
+            state: present
+          become: true
+
+        - name: 创建系统用户（幂等：探测漂移才 usermod）
+          user:
+            name: "{{ .app.name }}"
+            group: "{{ .app.name }}"
+            shell: /usr/sbin/nologin
+            system: true
+          become: true
+
+        - name: systemd 单元（daemon-reload + 状态管理）
+          systemd_unit:
+            name: "{{ .app.name }}.service"
+            content: |
+              [Unit]
+              Description=__NAME__ demo unit
+              [Service]
+              Type=oneshot
+              ExecStart=/bin/true
+              [Install]
+              WantedBy=multi-user.target
+            enabled: true
+            state: stopped
+          become: true
+          notify: 重载 systemd
+      rescue:
+        - name: 系统段失败兜底（示例环境无 systemd/无 root 时走这里）
+          shell: 'echo "system 段跳过: {{ .block_failed_msgs }}"'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+
+    - name: 应用目录
+      file:
+        path: "{{ .global.workdir }}"
+        state: directory
+        mode: "0755"
+
+    - name: 基础组件子 chart（版本约束引用：common@1.x）
+      chart: common@1.x
+      vars:
+        component: base
+
+    - name: 下发配置（helpers + sprig：to_yaml/dict/now/date/indent）
+      template:
+        src: templates/app.conf.tpl
+        dest: "{{ .global.workdir }}/app.conf"
+        mode: "0644"
+      notify: 重载应用
+
+    - name: 配置追加管理行（lineinfile 幂等）
+      lineinfile:
+        path: "{{ .global.workdir }}/app.conf"
+        line: "# managed by wdp {{ .app.name }}"
+        create: true
+
+    - name: 解包制品（unarchive：creates 幂等守卫）
+      unarchive:
+        src: files/payload.tar.gz
+        dest: "{{ .global.workdir }}/payload"
+        creates: "{{ .global.workdir }}/payload/VERSION"
+
+    - name: 逐实例初始化（loop + loop_control.loop_var + output 控制）
+      shell: 'echo "instance {{ .idx }} of {{ .app.replicas }} ready"'
+      loop: ["1", "2"]
+      loop_control:
+        loop_var: idx
+      output: oneline
+
+    - name: 在线制品下载（get_url + sha256 校验幂等；probe_url 为空时跳过）
+      get_url:
+        url: "{{ .probe_url }}"
+        dest: "{{ .global.workdir }}/artifact.bin"
+        sha256: "{{ .probe_sha256 }}"
+      when: '{{ ne .probe_url "" }}'
+
+    - name: 等待依赖就绪（wait_for：文件存在；端口探测用 port:）
+      wait_for:
+        path: /etc/hosts
+        timeout: 10
+
+    - name: 读取产物状态（stat 结果直接进入变量域 .stat.*）
+      stat:
+        path: "{{ .global.workdir }}/app.conf"
+        get_checksum: false
+
+    - name: 状态引用与 until 轮询
+      shell: 'echo "exists={{ .stat.exists }}"'
+      until: '{{ if eq .result.rc 0 }}ok{{ end }}'
+      retries: 2
+      delay: 1
+
+    - name: 部署完成通知（hook=post_install：本 play 主任务全部成功后执行）
+      shell: 'echo "__NAME__ deployed"'
+      hook: post_install
+      run_once: true
+      delegate_to: localhost
+
+  handlers:
+    - name: 重载应用
+      shell: 'echo reload $(date +%s) >> {{ .global.workdir }}/reload.log'
+    - name: 重载 systemd
+      systemd_unit:
+        name: "{{ .app.name }}.service"
+        daemon_reload: true
+
+- name: 按动态组差异化（hosts 通配引用 group_by 建的 os_* 组）
+  hosts: "os_*"
+  tasks:
+    - name: 家族专属提示（run_once：整组只跑一次）
+      shell: 'echo "family={{ .os.family }} members={{ len .play_hosts }}"'
+      run_once: true

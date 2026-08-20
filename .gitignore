@@ -1,0 +1,8 @@
+bin/
+.v2/
+.v3/
+*.test
+bin/
+fetched/
+*.test
+nohup.out

@@ -1,0 +1,19 @@
+[Unit]
+Description=wdp agent (remote execution agent)
+After=network.target
+
+[Service]
+# 对外监听必须配置认证（无 token/mTLS 的对外监听会拒绝启动）。
+# 首次部署先生成 token 并落盘（agent 启动读取后自动删除该文件）：
+#   install -d -m 0750 /etc/wdp
+#   install -m 0600 /dev/null /etc/wdp/agent.token
+#   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > /etc/wdp/agent.token
+# 控制端 inventory 用同一 token（token / token_env）连接。
+ExecStart=/usr/local/bin/wdp agent --listen 0.0.0.0:7602 --token-file /etc/wdp/agent.token
+Restart=always
+RestartSec=3
+# 建议以 root 运行以便提权操作；如不需要可改为普通用户
+User=root
+
+[Install]
+WantedBy=multi-user.target

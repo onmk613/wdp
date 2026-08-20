@@ -1,0 +1,7 @@
+# 生产覆盖（wdp run ./__NAME__ -f envs/prod.yaml）
+app:
+  replicas: 4
+
+global:
+  env: prod
+  workdir: /opt/prod/__NAME__

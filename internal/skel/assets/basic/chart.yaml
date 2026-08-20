@@ -1,0 +1,9 @@
+name: __NAME__
+version: 0.1.0
+description: __NAME__ 应用包（wdp new 生成的最小骨架，可直接填写使用）
+
+# 必须由调用方提供的 values 点路径（缺失即报错；不需要可删）
+required: [app.name, global.env]
+
+# 目标机 release marker 目录（部署成功写 release.json，uninstall 后清除）
+marker_dir: /var/lib/wdp

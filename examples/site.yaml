@@ -1,0 +1,45 @@
+# playbook 示例：模板渲染 -> 分发 -> 执行 -> 回拉 -> handler
+- name: wdp 演示
+  hosts: webservers
+  vars:
+    greeting: hello wdp
+  tasks:
+    - name: 采集 facts
+      setup:
+
+    - name: 创建工作目录
+      file:
+        path: "{{ .workdir }}"
+        state: directory
+        mode: "0755"
+
+    - name: 渲染配置文件
+      template:
+        src: app.conf.tpl
+        dest: "{{ .workdir }}/app.conf"
+        mode: "0644"
+      notify: 打印完成
+
+    - name: 写入状态文件
+      copy:
+        content: "installed at {{ .greeting }}\n"
+        dest: "{{ .workdir }}/state.txt"
+      register: st
+
+    - name: 查看结果
+      shell: cat {{ .workdir }}/state.txt && uname -s
+      register: cat_out
+
+    - name: 条件执行（仅在变更时）
+      shell: 'echo "state changed: {{ .st.changed }}"'
+      when: "{{ .st.changed }}"
+
+    - name: 回拉文件
+      fetch:
+        src: "{{ .workdir }}/app.conf"
+        dest: ./fetched
+        flat: true
+
+  handlers:
+    - name: 打印完成
+      shell: echo "config deployed on {{ .inventory_hostname }}"

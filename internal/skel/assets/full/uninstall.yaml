@@ -1,0 +1,44 @@
+# 卸载清单（wdp run ./__NAME__ --phase uninstall）
+- name: 卸载 __NAME__
+  hosts: all
+  tasks:
+    - name: 采集 facts（系统层卸载的条件判断依据）
+      setup:
+
+    - name: 删除应用目录
+      file:
+        path: "{{ .global.workdir }}"
+        state: absent
+
+    - name: 卸载前快照提示（hook=pre_uninstall：卸载动作前执行）
+      shell: 'echo "uninstalling __NAME__ from {{ len .play_hosts }} hosts"'
+      hook: pre_uninstall
+      run_once: true
+
+    - name: 移除 systemd 单元（先停用再删除单元文件）
+      block:
+        - name: 停止并禁用服务
+          service:
+            name: "{{ .app.name }}.service"
+            state: stopped
+            enabled: false
+          become: true
+          ignore_errors: true
+        - name: 删除单元文件
+          file:
+            path: "/etc/systemd/system/{{ .app.name }}.service"
+            state: absent
+          become: true
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+
+    - name: 删除系统用户与组（卸载后保留数据的场景可删除本段）
+      user:
+        name: "{{ .app.name }}"
+        state: absent
+      become: true
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+
+    - name: 卸载完成通知（hook=post_uninstall）
+      shell: 'echo "__NAME__ uninstalled"'
+      hook: post_uninstall
+      run_once: true

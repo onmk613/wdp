@@ -1,0 +1,4 @@
+appservers:
+  hosts:
+    # 本机演示（可换成 ssh/agent 主机）
+    local1: {conn: local}

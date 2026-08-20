@@ -1,0 +1,9 @@
+# 子 chart：单 play；hosts/become 继承父 play
+# 作用域隔离：只看到 父values的jdk子树 + global + 引用vars，看不到兄弟键（如 app）
+- hosts: all
+  tasks:
+    - name: 输出安装参数
+      shell: 'echo "install jdk {{ .version }} to {{ .home }} from {{ .mirror | default "default-mirror" }}"'
+
+    - name: 记录指纹（使用子 chart 自己的 helpers）
+      shell: 'echo "{{ include "jdk.pkg" . }}" > {{ .global.workdir }}/.jdk'

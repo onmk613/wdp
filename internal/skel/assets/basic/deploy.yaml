@@ -1,0 +1,28 @@
+# 过程式任务编排（chart 模式的 playbook）
+- name: 部署 __NAME__
+  hosts: all
+  tasks:
+    - name: 采集 facts（os/内存/磁盘等并入变量域）
+      setup:
+
+    - name: 创建应用目录
+      file:
+        path: "{{ .global.workdir }}"
+        state: directory
+        mode: "0755"
+
+    - name: 下发配置（templates/ 模板 + helpers 渲染）
+      template:
+        src: templates/app.conf.tpl
+        dest: "{{ .global.workdir }}/app.conf"
+        mode: "0644"
+      notify: 重载应用
+
+    - name: 验证部署
+      shell: 'head -2 {{ .global.workdir }}/app.conf'
+      register: verify
+      output: oneline
+
+  handlers:
+    - name: 重载应用
+      shell: 'echo reloaded $(date +%s) >> {{ .global.workdir }}/reload.log'

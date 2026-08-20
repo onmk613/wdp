@@ -1,0 +1,26 @@
+# 压测 playbook：与 scripts/gen-inventory.sh 配合
+#   ./scripts/gen-inventory.sh 1000 > /tmp/bench-inv.yaml
+#   time ./bin/wdp run examples/bench/bench.yaml -i /tmp/bench-inv.yaml --forks 200
+- name: 压测
+  hosts: bench
+  tasks:
+    - name: 轻任务
+      shell: "true"
+
+    - name: 输出任务
+      shell: "echo ok"
+
+    - name: 文件分发
+      copy:
+        content: "bench\n"
+        dest: "/tmp/.wdp-bench-{{ .inventory_hostname }}"
+      notify: 清理
+
+    - name: 幂等复检
+      copy:
+        content: "bench\n"
+        dest: "/tmp/.wdp-bench-{{ .inventory_hostname }}"
+
+  handlers:
+    - name: 清理
+      shell: "rm -f /tmp/.wdp-bench-{{ .inventory_hostname }}"

@@ -1,0 +1,9 @@
+# 状态探测（wdp run ./chart-demo --phase status）：只读检查
+- name: demo-app 状态
+  hosts: appservers
+  tasks:
+    - name: release marker
+      shell: 'cat /tmp/wdp-chart-demo-marker/demo-app/release.json 2>/dev/null || echo "未部署"'
+
+    - name: 应用文件
+      shell: 'ls -la {{ .global.workdir }}/ 2>/dev/null | head -5 || echo "目录不存在"'

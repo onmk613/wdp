@@ -1,0 +1,3 @@
+# 子 chart 默认值（被父 values 的 jdk: 子树深合并覆盖）
+version: "11"
+home: /opt/jdk

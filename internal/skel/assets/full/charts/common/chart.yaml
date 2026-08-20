@@ -1,0 +1,3 @@
+name: common
+version: 1.0.0
+description: 通用基础组件子 chart（父 chart 以 common@1.x 版本约束引用）

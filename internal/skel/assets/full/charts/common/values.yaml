@@ -1,0 +1,3 @@
+# 子 chart 默认值（父 values 的 common: 子树深合并覆盖）
+component: base
+home: /opt/wdp-common

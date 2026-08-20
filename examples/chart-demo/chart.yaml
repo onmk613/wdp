@@ -1,0 +1,9 @@
+name: demo-app
+version: 0.2.0
+description: wdp chart 示例：完整应用包（生命周期 + 内置变量 + required）
+
+# 必须由调用方提供的 values 点路径（缺失即报错，-f envs/*.yaml 或 --set 提供）
+required: [app.name, global.env, global.workdir]
+
+# 目标机 release marker 目录（部署成功后写 release.json；uninstall 后清除）
+marker_dir: /tmp/wdp-chart-demo-marker

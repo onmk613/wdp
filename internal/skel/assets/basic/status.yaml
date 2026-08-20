@@ -1,0 +1,13 @@
+# 状态探测（wdp run ./__NAME__ --phase status）：只读检查
+- name: __NAME__ 状态
+  hosts: all
+  tasks:
+    - name: release marker
+      shell: 'cat /var/lib/wdp/__NAME__/release.json 2>/dev/null || echo "未部署"'
+
+    - name: 应用文件（stat 结果在变量域 .stat.*）
+      stat:
+        path: "{{ .global.workdir }}/app.conf"
+
+    - name: 汇报
+      shell: 'echo "app.conf exists={{ .stat.exists }}"'

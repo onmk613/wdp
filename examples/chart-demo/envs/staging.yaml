@@ -1,0 +1,8 @@
+# 预发环境覆盖
+app:
+  port: 8081
+  replicas: 2
+
+global:
+  env: staging
+  workdir: /tmp/wdp-chart-staging

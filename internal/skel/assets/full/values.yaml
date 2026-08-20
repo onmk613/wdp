@@ -1,0 +1,12 @@
+# 第 1 层默认值
+app:
+  name: __NAME__
+  replicas: 2
+
+global:
+  env: dev
+  workdir: /opt/__NAME__
+
+# 演示开关（get_url 需要真实制品地址时填充，空则跳过在线下载任务）
+probe_url: ""
+probe_sha256: ""

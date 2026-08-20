@@ -1,0 +1,13 @@
+# 第 1 层：默认值（envs/*.yaml 与 --set 在此之上深合并）
+app:
+  name: demo
+  port: 8080
+  replicas: 1
+  debug: true
+
+jdk:
+  version: "17"
+
+global:
+  env: dev
+  workdir: /tmp/wdp-chart-demo

@@ -1,0 +1,8 @@
+# 卸载清单（wdp run ./__NAME__ --phase uninstall）：deploy 的逆操作
+- name: 卸载 __NAME__
+  hosts: all
+  tasks:
+    - name: 删除应用目录
+      file:
+        path: "{{ .global.workdir }}"
+        state: absent

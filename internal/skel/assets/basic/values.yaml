@@ -1,0 +1,8 @@
+# 第 1 层默认值：envs/*.yaml（-f）与 --set 在此之上深合并
+app:
+  name: __NAME__
+  port: 8080
+
+global:
+  env: dev
+  workdir: /opt/__NAME__

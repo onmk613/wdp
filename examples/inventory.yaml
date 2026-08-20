@@ -1,0 +1,39 @@
+# 主机清单示例
+#
+# 连接参数键（保留键）：host / port / user / password / key_path / conn / agent_url
+# 其余键一律视为主机变量。
+
+all:
+  vars:
+    workdir: /tmp/wdp-demo
+
+webservers:
+  hosts:
+    # SSH 连接（目标机仅需 POSIX sh）
+    web-ssh:
+      host: 10.0.0.11
+      port: 22
+      user: root
+
+    # agent 连接（目标机常驻 wdp agent）
+    web-agent:
+      conn: agent
+      host: 127.0.0.1
+      agent_url: http://127.0.0.1:7602
+
+    # 本地连接（演练/测试用）
+    web-local:
+      conn: local
+
+  vars:
+    app_name: demo-app
+    nginx_port: 8080
+
+# dbservers:
+#   hosts:
+#     db1: {host: 10.0.1.10}
+#
+# prod:
+#   children: [webservers, dbservers]
+#   vars:
+#     tier: production

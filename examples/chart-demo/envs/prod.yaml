@@ -1,0 +1,12 @@
+# 生产环境覆盖（第 2 层：wdp run ./chart-demo -f envs/prod.yaml）
+app:
+  port: 9090
+  replicas: 3
+  debug: false
+
+jdk:
+  version: "21"
+
+global:
+  env: prod
+  workdir: /tmp/wdp-chart-prod

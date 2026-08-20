@@ -1,0 +1,3 @@
+name: jdk
+version: 1.0.0
+description: 可复用的 JDK 安装子 chart

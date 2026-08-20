@@ -1,0 +1,9 @@
+name: __NAME__
+version: 0.1.0
+description: __NAME__ 全能力参考应用包（wdp new --full 生成：每项能力都有可运行示例）
+
+# 必须由调用方提供的 values 点路径（默认值已内置，可按需收紧）
+required: [app.name, global.env, global.workdir]
+
+# 目标机 release marker 目录
+marker_dir: /var/lib/wdp
