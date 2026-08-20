@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"wdp/internal/config"
+	"wdp/internal/i18n"
 )
 
 // resetGlobals 恢复全局 flag 变量到内置默认（config.Current 由各自测试显式加载）。
@@ -94,5 +97,52 @@ func TestConfigMissingFile(t *testing.T) {
 	}
 	if gForks != 5 || len(gInventories) != 1 || gInventories[0] != "inventory.yaml" || gVerbosity != 0 || gNoColor {
 		t.Fatalf("缺省应保持内置默认: forks=%d inv=%v", gForks, gInventories)
+	}
+}
+
+// TestRootHelpGrouped 根帮助按命令组分类展示（部署/应用包/安全/代理/运维/其它），
+// 且每个命令都归属某个组。
+func TestRootHelpGrouped(t *testing.T) {
+	i18n.Resolve("en") // 断言英文组标题，与语言无关的稳定性
+	root := NewRootCmd()
+	var buf bytes.Buffer
+	root.SetOut(&buf)
+	root.SetErr(io.Discard)
+	if err := root.Help(); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+
+	// 组标题全部出现
+	for _, title := range []string{
+		"Deployment Commands:", "Chart & Package Commands:", "Security & Trust Commands:",
+		"Agent Commands:", "Operations & Records Commands:", "Other Commands:",
+	} {
+		if !strings.Contains(out, title) {
+			t.Fatalf("帮助缺少分组标题 %q:\n%s", title, out)
+		}
+	}
+	// 无未分组命令（"Additional Commands" 不应出现）
+	if strings.Contains(out, "Additional Commands") {
+		t.Fatalf("存在未分组命令:\n%s", out)
+	}
+
+	// 组 ↔ 命令归属断言
+	want := map[string]string{
+		"run": groupDeploy, "adhoc": groupDeploy,
+		"new": groupChart, "template": groupChart, "lint": groupChart, "package": groupChart,
+		"ca": groupSecurity, "key": groupSecurity,
+		"agent":   groupAgent,
+		"release": groupOps, "modules": groupOps,
+		"version": groupOther,
+	}
+	for _, c := range root.Commands() {
+		gid, ok := want[c.Name()]
+		if !ok {
+			continue // help/completion 等框架命令
+		}
+		if c.GroupID != gid {
+			t.Fatalf("命令 %s 分组 %q，期望 %q", c.Name(), c.GroupID, gid)
+		}
 	}
 }

@@ -1,5 +1,7 @@
 package cli
 
+// 代理命令组（--help 的 Agent Commands）：目标机常驻 agent。
+
 import (
 	"fmt"
 
@@ -7,10 +9,7 @@ import (
 
 	"wdp/internal/agent"
 	"wdp/internal/config"
-	"wdp/internal/fmtutil"
 	"wdp/internal/i18n"
-	"wdp/internal/module"
-	"wdp/internal/skel"
 )
 
 // newAgentCmd 构造 `wdp agent`：目标机常驻服务。
@@ -75,32 +74,4 @@ func newAgentCmd() *cobra.Command {
 		i18n.T("explicitly allow unauthenticated non-loopback listen (trusted LAN only)",
 			"显式允许无认证对外监听（仅限可信内网）"))
 	return cmd
-}
-
-// newModulesCmd 构造 `wdp modules`。
-func newModulesCmd() *cobra.Command {
-	return &cobra.Command{
-		Use: "modules [module]",
-		Short: i18n.T("list built-in modules (with a module name, print parameter docs and example)",
-			"列出内置模块（带模块名时输出参数文档与示例）"),
-		Args: cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			out := cmd.OutOrStdout()
-			if len(args) == 1 {
-				snippet, err := skel.ModuleSnippet(args[0])
-				if err != nil {
-					return err
-				}
-				fmt.Fprint(out, snippet)
-				return nil
-			}
-			tb := outPrinter(cmd).NewTable(i18n.T("MODULE", "模块"), i18n.T("DESCRIPTION", "说明"))
-			for _, name := range module.Names() {
-				m, _ := module.Get(name)
-				tb.AddRow(fmtutil.C(name), fmtutil.C(m.Desc()))
-			}
-			tb.Render()
-			return nil
-		},
-	}
 }

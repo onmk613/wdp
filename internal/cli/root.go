@@ -23,6 +23,18 @@ import (
 	_ "wdp/internal/connection/sshconn"
 )
 
+// 命令分组（`wdp --help` 按组分类展示；GroupID 在命令挂载时统一设置）。
+// 分组同时对应源码文件布局：run.go（部署）· new.go/chartcmd.go（应用包）·
+// ca.go/key.go（安全与信任）· agent.go（代理）· ops.go（运维与记录）。
+const (
+	groupDeploy   = "deploy"
+	groupChart    = "chart"
+	groupSecurity = "security"
+	groupAgent    = "agent"
+	groupOps      = "ops"
+	groupOther    = "other"
+)
+
 // Version 是 wdp 版本（var 以便构建时 -ldflags "-X wdp/internal/cli.Version=…" 注入）。
 var Version = "0.2.0"
 
@@ -133,19 +145,37 @@ func NewRootCmd() *cobra.Command {
 		return nil
 	}
 
+	// 命令分组声明（顺序即 --help 中的展示顺序）
+	root.AddGroup(
+		&cobra.Group{ID: groupDeploy, Title: i18n.T("Deployment Commands:", "部署命令:")},
+		&cobra.Group{ID: groupChart, Title: i18n.T("Chart & Package Commands:", "应用包命令:")},
+		&cobra.Group{ID: groupSecurity, Title: i18n.T("Security & Trust Commands:", "安全与信任命令:")},
+		&cobra.Group{ID: groupAgent, Title: i18n.T("Agent Commands:", "代理命令:")},
+		&cobra.Group{ID: groupOps, Title: i18n.T("Operations & Records Commands:", "运维与记录命令:")},
+		&cobra.Group{ID: groupOther, Title: i18n.T("Other Commands:", "其它命令:")},
+	)
+	// help / completion 归入"其它"
+	root.SetHelpCommandGroupID(groupOther)
+	root.SetCompletionCommandGroupID(groupOther)
+
+	// grouped 挂载命令到指定分组
+	grouped := func(gid string, c *cobra.Command) *cobra.Command {
+		c.GroupID = gid
+		return c
+	}
 	root.AddCommand(
-		newRunCmd(),
-		newAdhocCmd(),
-		newNewCmd(),
-		newAgentCmd(),
-		newTemplateCmd(),
-		newLintCmd(),
-		newPackageCmd(),
-		newModulesCmd(),
-		newCACmd(),
-		newKeyCmd(),
-		newReleaseCmd(),
-		newVersionCmd(),
+		grouped(groupDeploy, newRunCmd()),
+		grouped(groupDeploy, newAdhocCmd()),
+		grouped(groupChart, newNewCmd()),
+		grouped(groupChart, newTemplateCmd()),
+		grouped(groupChart, newLintCmd()),
+		grouped(groupChart, newPackageCmd()),
+		grouped(groupSecurity, newCACmd()),
+		grouped(groupSecurity, newKeyCmd()),
+		grouped(groupAgent, newAgentCmd()),
+		grouped(groupOps, newReleaseCmd()),
+		grouped(groupOps, newModulesCmd()),
+		grouped(groupOther, newVersionCmd()),
 	)
 	root.SetVersionTemplate("wdp {{printf \"%s\" .Version}}\n")
 	root.Version = Version

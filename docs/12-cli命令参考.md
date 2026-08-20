@@ -17,6 +17,17 @@
 
 未显式指定的 flag 回退 wdp.cfg（见[配置文件](02-配置文件.md)）。
 
+## 命令分组（`wdp --help` 分类展示）
+
+| 分组 | 命令 |
+|---|---|
+| 部署命令 | `run`、`adhoc` |
+| 应用包命令 | `new`、`template`、`lint`、`package` |
+| 安全与信任命令 | `ca`、`key` |
+| 代理命令 | `agent` |
+| 运维与记录命令 | `release`、`modules` |
+| 其它命令 | `version`（另有框架自带的 `help`、`completion`） |
+
 ## wdp run
 
 ```
