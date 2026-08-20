@@ -1,0 +1,213 @@
+# 内置模块全集演示：19 个内置模块逐一使用（chart 脚本模块见 ../webstack）
+#
+# 演练（零风险预演）：
+#   wdp run examples/features/modules.yaml -i examples/features/local.yaml --check --diff
+# 真实执行（本机 local 通道，Linux 守卫任务在 macOS 上自动跳过）：
+#   wdp run examples/features/modules.yaml -i examples/features/local.yaml
+# 复跑验证幂等：file/copy/template/unarchive/lineinfile 等应收敛为 ok/skipped。
+#
+# 系统级模块（package/user/group/service/systemd_unit）读 /etc/os-release 判定家族，
+# 在非 Linux 目标（如 macOS 演练机）上由 when 守卫跳过；alpine 无 systemd 单独排除。
+- name: 内置模块全集
+  hosts: all
+  vars:
+    # workdir 是 inventory 里的主机变量（每台主机独立目录，见 local.yaml）；
+    # local 演练时 4 台"主机"共处一台机器，按主机名隔离模拟各自独立的文件系统
+    demo_app: features-demo
+    demo_port: 18080
+    # get_url 演示开关：填真实制品地址（含 sha256）后该任务生效
+    artifact_url: ""
+    artifact_sha256: ""
+  tasks:
+    # ---------- 1. setup：采集 facts（.os/.cpus/.memory_mb/.disk…） ----------
+    - name: setup 采集 facts
+      setup:
+
+    # ---------- 2. file：目录/软链/touch/absent（先建目录供后续任务使用） ----------
+    - name: file 创建目录
+      file:
+        path: "{{ .workdir }}"
+        state: directory
+        mode: "0755"
+
+    - name: file 版本软链
+      file:
+        src: "{{ .workdir }}/sample.conf"
+        dest: "{{ .workdir }}/current.conf"
+        state: link
+
+    # ---------- 3/4. shell / command：远端执行（幂等守卫 creates/removes/chdir） ----------
+    - name: shell 简写执行
+      shell: 'echo "hello from {{ .inventory_hostname }}"'
+
+    - name: command map 形式（creates 守卫：产物存在即跳过）
+      command:
+        cmd: 'sh -c "echo built > {{ .workdir }}/.built"'
+        creates: "{{ .workdir }}/.built"
+
+    - name: shell chdir 前置目录
+      shell:
+        cmd: 'pwd > cwd.txt'
+        chdir: "{{ .workdir }}"
+
+    # ---------- 5. script：上传本地脚本执行 ----------
+    - name: script 上传并执行脚本
+      script: scripts/report.sh --site demo
+
+    # ---------- 6. copy：分发文件/字面量（sha256 幂等） ----------
+    - name: copy src 本地文件
+      copy:
+        src: files/sample.conf
+        dest: "{{ .workdir }}/sample.conf"
+        mode: "0644"
+
+    - name: copy content 字面量（backup 覆盖前备份）
+      copy:
+        content: "rendered by wdp at {{ .demo_app }}\n"
+        dest: "{{ .workdir }}/content.txt"
+        backup: true
+
+    # ---------- 7. fetch：拉取远端文件回控制端（check 演练时文件未落地 → stat 守卫跳过） ----------
+    - name: stat 探测可回拉文件
+      stat:
+        path: "{{ .workdir }}/sample.conf"
+
+    - name: fetch 回拉文件（flat 拍平）
+      fetch:
+        src: "{{ .workdir }}/sample.conf"
+        dest: /tmp/wdp-features-fetched
+        flat: true
+      when: '{{ .stat.exists }}'
+
+    # ---------- 8. template：本地渲染后分发 ----------
+    - name: template 渲染分发
+      template:
+        src: templates/app.conf.tpl
+        dest: "{{ .workdir }}/app.conf"
+        mode: "0644"
+      notify: 演示 handler
+
+    # ---------- 9. package：跨发行版包管理（仅 Linux） ----------
+    - name: package 安装（Linux 守卫）
+      package:
+        name: [curl]
+        state: present
+      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      become: true
+
+    # ---------- 10. service：systemd 状态管理（systemd 家族） ----------
+    - name: service 状态管理（Linux 非 alpine 守卫）
+      service:
+        name: cron
+        state: started
+        enabled: true
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      become: true
+
+    # ---------- 11/12. user / group：系统用户组（漂移探测幂等，仅 Linux） ----------
+    - name: group 创建组
+      group:
+        name: demogrp
+        system: true
+      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      become: true
+
+    - name: user 创建用户
+      user:
+        name: demouser
+        group: demogrp
+        shell: /usr/sbin/nologin
+        system: true
+      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      become: true
+
+    # ---------- 13. systemd_unit：下发单元 + daemon-reload + 状态 ----------
+    - name: systemd_unit 部署单元（Linux 非 alpine 守卫）
+      systemd_unit:
+        name: wdp-demo.service
+        content: |
+          [Unit]
+          Description=wdp demo oneshot unit
+          [Service]
+          Type=oneshot
+          ExecStart=/bin/true
+          [Install]
+          WantedBy=multi-user.target
+        enabled: true
+        state: stopped
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      become: true
+
+    # ---------- 14. unarchive：解包制品（creates 幂等守卫） ----------
+    - name: unarchive 解包制品
+      unarchive:
+        src: files/mod-payload.tar.gz
+        dest: "{{ .workdir }}/payload"
+        creates: "{{ .workdir }}/payload/VERSION"
+
+    # ---------- 15. get_url：下载制品（url 为空时跳过） ----------
+    - name: get_url 下载制品（sha256 校验幂等）
+      get_url:
+        url: "{{ .artifact_url }}"
+        dest: "{{ .workdir }}/artifact.bin"
+        sha256: "{{ .artifact_sha256 }}"
+        mode: "0755"
+      when: '{{ ne .artifact_url "" }}'
+
+    # ---------- 16. lineinfile：行级配置管理 ----------
+    - name: lineinfile 确保行存在（create 缺失即建）
+      lineinfile:
+        path: "{{ .workdir }}/app.conf"
+        line: "# managed by wdp"
+        create: true
+
+    - name: lineinfile 正则替换行（check 演练文件未落地 → create 兜底）
+      lineinfile:
+        path: "{{ .workdir }}/app.conf"
+        regexp: '^port = .*$'
+        line: "port = {{ .demo_port }}"
+        create: true
+
+    # ---------- 17. wait_for：等待就绪（控制端视角） ----------
+    - name: wait_for 等待文件出现
+      wait_for:
+        path: "{{ .workdir }}/app.conf"
+        timeout: 10
+
+    - name: wait_for 等待端口空闲（state=absent：关闭才满足）
+      wait_for:
+        host: 127.0.0.1
+        port: 1
+        state: absent
+        timeout: 5
+
+    # ---------- 18. stat：文件元数据 → .stat.* 变量 ----------
+    - name: stat 探测产物
+      stat:
+        path: "{{ .workdir }}/payload/VERSION"
+
+    - name: 引用 stat 结果
+      shell: 'echo "payload exists={{ .stat.exists }} mode={{ .stat.mode }} size={{ .stat.size }}B"'
+
+    # ---------- 19. group_by：按 facts 动态建组 ----------
+    - name: group_by 按系统家族建组
+      group_by: 'os_{{ .os.family }}'
+
+    - name: 清理演示用户（保持演练机干净；真实部署不需要）
+      user:
+        name: demouser
+        state: absent
+      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      become: true
+
+  handlers:
+    - name: 演示 handler
+      shell: 'echo "handler flushed on {{ .inventory_hostname }}"'
+
+# group_by 建立的动态组用通配 hosts 引用（macOS 演练机为 os_unknown 组）
+- name: 动态组差异化任务
+  hosts: "os_*"
+  tasks:
+    - name: 家族专属动作（run_once 整组一次）
+      shell: 'echo "family branch for {{ .os.family }}, members={{ len .play_hosts }}"'
+      run_once: true

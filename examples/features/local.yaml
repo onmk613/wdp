@@ -1,0 +1,13 @@
+# features/ 通用演练清单：4 台本机主机（conn: local，无需任何远端）
+# 多台主机让 serial/strategy 的分批、run_once 的单次执行、play_hosts 等语义可见。
+#
+# workdir 是每台主机独立的主机变量：local 演练时 4 台"主机"共处一台机器，
+# 目录按主机名隔离以模拟各自独立的文件系统（play vars 里的模板不会二次渲染，
+# 需要按主机取值时用主机变量——这也是本清单的演示点之一）。
+# 真实环境替换为 ssh/agent 主机即可，playbook 无需改动。
+all:
+  hosts:
+    l1: {conn: local, workdir: /tmp/wdp-features/l1, role: primary}
+    l2: {conn: local, workdir: /tmp/wdp-features/l2, role: replica}
+    l3: {conn: local, workdir: /tmp/wdp-features/l3, role: replica}
+    l4: {conn: local, workdir: /tmp/wdp-features/l4, role: replica}

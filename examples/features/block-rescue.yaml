@@ -1,0 +1,74 @@
+# block / rescue / always 容错组：失败转 rescue、always 恒执行、支持嵌套。
+#
+# 演练（真实执行，本机 local 通道）：
+#   wdp run examples/features/block-rescue.yaml -i examples/features/local.yaml
+# 观察：外层 block 第一个任务必失败 → rescue 打印失败信息 → always 汇报；
+#       内层嵌套 block 演示"局部失败局部救"；ignore_errors 是 rescue 的例外。
+- name: block 容错演示
+  hosts: all
+  vars:
+    workdir: /tmp/wdp-features-block
+  tasks:
+    # ---------- 基本形态：block 失败 → rescue → always ----------
+    - name: 外层容错组
+      block:
+        - name: 前置准备
+          file:
+            path: "{{ .workdir }}"
+            state: directory
+
+        - name: 必失败任务（模拟部署故障）
+          shell: 'echo "boom" >&2; exit 7'
+
+        - name: 不可达任务（上一任务失败后不再执行）
+          shell: 'echo "never runs"'
+      rescue:
+        # block_failed / block_failed_msgs 是 rescue 内置的失败上下文
+        - name: 救援：打印失败信息
+          shell: 'echo "rescued: {{ .block_failed }} msgs={{ .block_failed_msgs }}"'
+
+        # ---------- 嵌套 block：局部失败局部救 ----------
+        - name: 嵌套容错组（rescue 内再试一次）
+          block:
+            - name: 重试任务（模拟成功）
+              shell: 'echo "retry ok"'
+            - name: 二次失败（嵌套层内部消化）
+              shell: 'exit 1'
+          rescue:
+            - name: 嵌套救援
+              shell: 'echo "nested rescued"'
+      always:
+        # 无论成功失败恒执行（通知/清理的惯用位置）
+        - name: 收尾汇报
+          shell: 'echo "always runs on {{ .inventory_hostname }}"'
+
+    # rescue 成功则整组视为已恢复：后续任务照常执行
+    - name: 组后任务（rescue 成功后继续）
+      shell: 'echo "play continues"'
+
+    # ---------- ignore_errors 是 rescue 的例外：不触发 rescue ----------
+    - name: 容错组中的 ignore_errors
+      block:
+        - name: 失败但被忽略（不转 rescue）
+          shell: 'exit 9'
+          ignore_errors: true
+        - name: 紧随任务（正常执行）
+          shell: 'echo "after ignored failure"'
+      rescue:
+        - name: 不会执行到的救援
+          shell: 'echo "should not run"'
+
+    # ---------- always-only 组：无 rescue，失败直接上抛 ----------
+    - name: 失败上抛组（演示 always 依然执行）
+      block:
+        - name: 必失败任务
+          shell: 'exit 5'
+      always:
+        - name: 清理（失败上抛前恒执行）
+          file:
+            path: "{{ .workdir }}"
+            state: absent
+      ignore_errors: true   # 演示用：阻止失败终止 play，便于观察 always 行为
+
+    - name: 演示收尾
+      shell: 'echo "done"'

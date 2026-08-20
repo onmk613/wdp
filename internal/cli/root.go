@@ -1,9 +1,3 @@
-// Package cli 基于 cobra 实现命令行界面。
-// 全局参数通过 PersistentFlags 声明一次，全部子命令自动继承。
-//
-// 双语输出：--lang / WDP_LANG 决定 CLI 帮助、模块文档与提示文案的语言
-// （auto = 按时区与 locale 自动检测）。语言在命令树构造前解析
-// （见 resolveLangEarly），因此 --help 输出同样跟随所选语言。
 package cli
 
 import (
@@ -16,27 +10,23 @@ import (
 	"wdp/internal/config"
 	"wdp/internal/i18n"
 
-	// 注册连接工厂（ssh / agent / local / push）
+	// ssh / agent / local / push
 	_ "wdp/internal/connection/agentconn"
 	_ "wdp/internal/connection/localconn"
 	_ "wdp/internal/connection/pushagent"
 	_ "wdp/internal/connection/sshconn"
 )
 
-// 命令分组（`wdp --help` 按组分类展示；GroupID 在命令挂载时统一设置）。
-// 分组同时对应源码文件布局：run.go（部署）· new.go/chartcmd.go（应用包）·
-// ca.go/key.go（安全与信任）· agent.go（代理）· ops.go（运维与记录）。
-const (
-	groupDeploy   = "deploy"
-	groupChart    = "chart"
-	groupSecurity = "security"
-	groupAgent    = "agent"
-	groupOps      = "ops"
-	groupOther    = "other"
+var (
+	Version   = "0.0.1"
+	Commit    = "none"
+	BuildDate = "unknown"
+	GoVersion = "unknown"
 )
 
-// Version 是 wdp 版本（var 以便构建时 -ldflags "-X wdp/internal/cli.Version=…" 注入）。
-var Version = "0.0.1"
+func version() string {
+	return fmt.Sprintf("%s \ngolang %s \ncommit %s\nbuilt %s", Version, GoVersion, Commit, BuildDate)
+}
 
 // 全局选项（由 PersistentFlags 绑定；未显式指定时默认值可被 wdp.cfg 覆盖）。
 var (
@@ -50,6 +40,17 @@ var (
 	gNoColor     bool
 	gOutput      string // console | json
 	gLang        string // auto | zh | en
+)
+
+// 命令分组（`wdp --help` 按组分类展示；GroupID 在命令挂载时统一设置）。
+// 分组同时对应源码文件布局：run.go（部署）· new.go/chartcmd.go（应用包）·
+// ca.go/key.go（安全与信任）· agent.go（代理）· ops.go（运维与记录）。
+const (
+	groupDeploy   = "deploy"
+	groupChart    = "chart"
+	groupSecurity = "security"
+	groupAgent    = "agent"
+	groupOps      = "ops"
 )
 
 // LangEnv 是语言覆盖环境变量（优先级低于 --lang）。
@@ -77,14 +78,16 @@ func resolveLangEarly() {
 	i18n.Resolve(pref)
 }
 
-// NewRootCmd 构造根命令与子命令树。
+// NewRootCmd 构造根命令与子命令树
 func NewRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "wdp",
-		Short:         i18n.T("wdp — an automation & deployment tool", "wdp — 一个自动化部署工具"),
+		Short:         "wdp — an automation & deployment tool",
 		SilenceUsage:  true,
 		SilenceErrors: true,
+		Version:       version(),
 	}
+
 	pf := root.PersistentFlags()
 	pf.StringVar(&gConfig, "config", config.DefaultPath,
 		i18n.T("config file path (TOML, default "+config.DefaultPath+" in current dir)",
@@ -147,16 +150,12 @@ func NewRootCmd() *cobra.Command {
 
 	// 命令分组声明（顺序即 --help 中的展示顺序）
 	root.AddGroup(
-		&cobra.Group{ID: groupDeploy, Title: i18n.T("Deployment Commands:", "部署命令:")},
-		&cobra.Group{ID: groupChart, Title: i18n.T("Chart & Package Commands:", "应用包命令:")},
-		&cobra.Group{ID: groupSecurity, Title: i18n.T("Security & Trust Commands:", "安全与信任命令:")},
-		&cobra.Group{ID: groupAgent, Title: i18n.T("Agent Commands:", "代理命令:")},
-		&cobra.Group{ID: groupOps, Title: i18n.T("Operations & Records Commands:", "运维与记录命令:")},
-		&cobra.Group{ID: groupOther, Title: i18n.T("Other Commands:", "其它命令:")},
+		&cobra.Group{ID: groupDeploy, Title: "Deployment"},
+		&cobra.Group{ID: groupChart, Title: "Package"},
+		&cobra.Group{ID: groupSecurity, Title: "Security"},
+		&cobra.Group{ID: groupAgent, Title: "Agent"},
+		&cobra.Group{ID: groupOps, Title: "Operations"},
 	)
-	// help / completion 归入"其它"
-	root.SetHelpCommandGroupID(groupOther)
-	root.SetCompletionCommandGroupID(groupOther)
 
 	// grouped 挂载命令到指定分组
 	grouped := func(gid string, c *cobra.Command) *cobra.Command {
@@ -175,10 +174,7 @@ func NewRootCmd() *cobra.Command {
 		grouped(groupAgent, newAgentCmd()),
 		grouped(groupOps, newReleaseCmd()),
 		grouped(groupOps, newModulesCmd()),
-		grouped(groupOther, newVersionCmd()),
 	)
-	root.SetVersionTemplate("wdp {{printf \"%s\" .Version}}\n")
-	root.Version = Version
 	return root
 }
 
@@ -191,16 +187,4 @@ func Execute() int {
 		return 1
 	}
 	return 0
-}
-
-// newVersionCmd 构造 `wdp version`。
-func newVersionCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "version",
-		Short: i18n.T("print version", "输出版本"),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintln(cmd.OutOrStdout(), "wdp", Version)
-			return nil
-		},
-	}
 }

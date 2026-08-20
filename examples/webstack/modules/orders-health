@@ -1,0 +1,26 @@
+#!/bin/sh
+# chart 脚本模块：orders-api 健康自检（内置注册表未命中时按 modules/ 目录约定发现）
+#
+# 契约：
+#   参数经 WDP_MODULE_ARGS 注入（JSON 对象字符串），简写参数走 WDP_FREE_FORM；
+#   stdout 输出 {"changed":..,"failed":..,"msg":".."} 时按声明判定，否则 rc==0 即变更。
+#   check 模式默认跳过脚本模块（chart.yaml 未声明 check_mode: supported）——
+#   脚本是外部代码，--check 不保证预演安全；如需只读预演，脚本判 WDP_CHECK=1
+#   自行返回预估结果并在 chart.yaml 声明支持。
+#
+# 用法（deploy.yaml）：
+#   - name: 应用自检
+#     orders-health:
+#       path: "{{ .global.workdir }}/shared/app.conf"
+path=$(printf '%s' "${WDP_MODULE_ARGS:-}" | sed -n 's/.*"path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+if [ "$WDP_CHECK" = "1" ]; then
+  printf '{"changed": false, "failed": false, "msg": "[check] 将自检 %s"}\n' "${path:-<default>}"
+  exit 0
+fi
+
+if [ -n "$path" ] && [ -f "$path" ]; then
+  printf '{"changed": false, "failed": false, "msg": "healthy: %s"}\n' "$path"
+else
+  printf '{"changed": false, "failed": true, "msg": "not ready: %s missing"}\n' "${path:-<no path>}"
+fi

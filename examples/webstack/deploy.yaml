@@ -1,0 +1,129 @@
+# webstack 主编排：应用金丝雀发布（策略/门/回滚）+ lb 反代部署（子 chart）
+#
+# 完整生命周期相位：
+#   wdp run examples/webstack -i examples/webstack/inventory.yaml -f examples/webstack/envs/prod.yaml
+#   wdp run examples/webstack --phase status   …
+#   wdp run examples/webstack --phase uninstall
+# 零风险预演：加 --check --diff（脚本模块默认跳过，系统层任务按守卫预估）
+
+- name: orders-api 金丝雀发布（健康门 + 自动回滚）
+  hosts: appservers
+  strategy:
+    type: canary          # 首批 1 台金丝雀，其余按 batch 分批
+    batch: "50%"
+    gate:                 # 每批完成且 handlers flush 后的健康门
+      shell: 'test -f {{ .global.workdir }}/current/.ready'
+      retries: 3
+      delay: 2
+    auto_rollback: true   # 批次失败或门未过 → 回滚该批文件类变更并终止
+  tasks:
+    - name: 采集 facts
+      setup:
+
+    # ---------- hook: pre_install —— 主任务序列之前 ----------
+    - name: 数据迁移（仅首次执行，幂等由脚本内 marker 保证）
+      script: scripts/migrate.sh {{ .global.workdir }}
+      hook: pre_install
+
+    # ---------- 系统层：common 子 chart（版本约束引用） ----------
+    - name: 系统层准备（用户/组/目录骨架）
+      chart: common@1.x
+
+    # ---------- 版本化发布：制品解包 → 共享配置 → current 软链 ----------
+    - name: 解包制品到版本目录（creates 守卫幂等）
+      unarchive:
+        src: files/orders-api-{{ .app.version }}.tar.gz
+        dest: "{{ .global.workdir }}/releases/{{ .app.version }}"
+        creates: "{{ .global.workdir }}/releases/{{ .app.version }}/bin/orders-api"
+
+    - name: 在线热修制品（可选：artifact_url 为空时跳过）
+      get_url:
+        url: "{{ .artifact_url }}"
+        dest: "{{ .global.workdir }}/releases/{{ .app.version }}/bin/orders-api"
+        sha256: "{{ .artifact_sha256 }}"
+        mode: "0755"
+      when: '{{ ne .artifact_url "" }}'
+
+    - name: 渲染应用配置（复杂 values → shared/app.conf）
+      template:
+        src: templates/app.conf.tpl
+        dest: "{{ .global.workdir }}/shared/app.conf"
+        mode: "0644"
+      notify: 重启 orders-api
+
+    - name: 追加管理标记行（lineinfile 幂等）
+      lineinfile:
+        path: "{{ .global.workdir }}/shared/app.conf"
+        line: '# managed by wdp {{ include "webstack.fullname" . }}'
+        create: true
+
+    - name: 切换 current 软链（原子指向新版本）
+      file:
+        src: "{{ .global.workdir }}/releases/{{ .app.version }}"
+        dest: "{{ .global.workdir }}/current"
+        state: link
+
+    # ---------- systemd 服务化（Linux 守卫；单元内容变更自动 daemon-reload） ----------
+    - name: 部署 systemd 单元并启动
+      systemd_unit:
+        name: "{{ .app.name }}.service"
+        src: templates/orders-api.service.tpl
+        state: restarted
+        enabled: true
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      become: true
+      notify: 重启 orders-api
+
+    # ---------- 健康门判据：就绪标记（真实场景由服务启动逻辑写入） ----------
+    - name: 写就绪标记（gate 检查点）
+      file:
+        path: "{{ .global.workdir }}/current/.ready"
+        state: touch
+
+    - name: 等待应用端口就绪（控制端视角；仅服务真实启动的 Linux 环境）
+      wait_for:
+        host: "{{ (index .hosts .inventory_hostname).address }}"
+        port: "{{ .app.port }}"
+        timeout: 30
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+
+    # ---------- 脚本模块：chart 自带健康自检（check 模式默认跳过） ----------
+    - name: 应用自检（modules/orders-health）
+      orders-health:
+        path: "{{ .global.workdir }}/shared/app.conf"
+
+    # ---------- 验证：stat + until 轮询 ----------
+    - name: 探测配置产物
+      stat:
+        path: "{{ .global.workdir }}/shared/app.conf"
+
+    - name: 轮询直到配置可读（.result 引用当轮结果）
+      shell: 'head -1 {{ .global.workdir }}/shared/app.conf'
+      until: '{{ if eq .result.rc 0 }}ok{{ end }}'
+      retries: 3
+      delay: 1
+      output: oneline
+
+    # ---------- hook: post_install —— play 全部成功（含 handlers）后 ----------
+    - name: 发布完成通知
+      shell: 'echo "{{ include "webstack.fullname" . }} {{ .app.version }} deployed to {{ len .play_hosts }} hosts"'
+      hook: post_install
+      run_once: true
+      delegate_to: localhost
+
+  handlers:
+    - name: 重启 orders-api
+      systemd_unit:
+        name: "{{ .app.name }}.service"
+        state: restarted
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      become: true
+
+- name: lb 反向代理部署（nginx 子 chart 展开）
+  hosts: lb
+  tasks:
+    - name: 采集 facts
+      setup:
+
+    - name: nginx 组件（安装/配置/服务，upstream 自动发现 appservers）
+      chart: nginx@2.x

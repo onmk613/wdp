@@ -1,0 +1,45 @@
+# 状态探测（wdp run examples/webstack --phase status）：只读相位，零变更
+- name: webstack 应用状态
+  hosts: appservers
+  tasks:
+    - name: 采集 facts（后续 Linux 守卫的判断依据）
+      setup:
+
+    - name: release marker（部署版本与 values 摘要；uninstall 后自动清除）
+      shell: 'cat /tmp/wdp-webstack-marker/webstack/release.json 2>/dev/null || echo "未部署"'
+
+    - name: current 指向（readlink 只读）
+      shell: 'readlink {{ .global.workdir }}/current 2>/dev/null || echo "无 current 链接"'
+
+    - name: 探测共享配置（stat 结果在 .stat.*）
+      stat:
+        path: "{{ .global.workdir }}/shared/app.conf"
+
+    - name: 配置内容摘要
+      shell: 'grep -E "^(fullname|release|env) " {{ .global.workdir }}/shared/app.conf 2>/dev/null || echo "无配置"'
+      when: '{{ .stat.exists }}'
+
+    - name: 版本目录清单
+      shell: 'ls -1 {{ .global.workdir }}/releases/ 2>/dev/null || echo "目录不存在"'
+      output: oneline
+
+    - name: 服务运行状态（只读探测，Linux 守卫）
+      shell: 'systemctl is-active {{ .app.name }}.service 2>/dev/null || echo "非 systemd 环境"'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+
+    - name: 应用自检（脚本模块，仅 status 相位真实执行）
+      orders-health:
+        path: "{{ .global.workdir }}/shared/app.conf"
+
+- name: lb nginx 状态
+  hosts: lb
+  tasks:
+    - name: 采集 facts
+      setup:
+
+    - name: 反代配置渲染结果（前 20 行）
+      shell: 'head -20 {{ .nginx.conf_dir }}/webstack.conf 2>/dev/null || echo "未部署"'
+
+    - name: nginx 服务状态（只读探测，Linux 守卫）
+      shell: 'systemctl is-active nginx 2>/dev/null || echo "非 systemd 环境"'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'

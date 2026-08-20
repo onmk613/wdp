@@ -1,0 +1,3 @@
+# group_vars/webservers.yaml：webservers 组变量（与 inventory.yaml 组内 vars 深合并，
+# 文件与内联 vars 同为组级——同键时内联声明后者覆盖，按文件加载顺序）
+nginx_worker_processes: 4

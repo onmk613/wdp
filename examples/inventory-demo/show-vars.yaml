@@ -1,0 +1,22 @@
+# 变量合并与优先级可视化：每台主机打印自己的合并结果
+#
+# 演练：
+#   wdp run examples/inventory-demo/show-vars.yaml -i examples/inventory-demo/inventory.yaml
+#
+# 预期（未加 inventory-prod.yaml 时）：
+#   env=dev（all.vars）company=example-corp（group_vars/all.yaml）
+#   nginx_port：web1=8081（host_vars 覆盖组变量）、web2=8080（组变量）
+#   tier=web/db（各组变量）、node_id 仅 web1 有
+#   db1 还有 production 组的 alert_channel（children 组变量对成员生效）
+- name: 打印合并变量
+  hosts: all
+  tasks:
+    - name: 变量全景
+      shell: >-
+        echo "host={{ .inventory_hostname }} env={{ .env }} company={{ .company }}
+        tier={{ .tier }} port={{ dig "nginx_port" "-" . }}
+        node_id={{ dig "node_id" "-" . }} canary={{ dig "canary" false . }}
+        groups={{ join .group_names "," }}"
+
+    - name: children 组变量与缺省值（dig 取可选键）
+      shell: 'echo "alert={{ dig "alert_channel" "无" . }} log={{ .log_level }}"'

@@ -1,25 +1,26 @@
 #!/bin/sh
-# wdp 编译脚本
-#
+
 # 用法:
 #   ./build.sh                    编译当前环境架构        → bin/wdp
 #   ./build.sh all                交叉编译全架构          → bin/wdp-<os>-<arch>[.exe]
 #   ./build.sh linux/amd64 …      编译指定目标（可多个）  → bin/wdp-<os>-<arch>
 #   每次编译产物均记录 SHA256 到 bin/SHA256SUMS（同名录去重更新）
-#
-# 缩小处理:
-#   -trimpath            去除本机路径信息
-#   -ldflags "-s -w"     去除符号表与 DWARF 调试信息（约减 30%）
-#   CGO_ENABLED=0        纯静态，无 libc 依赖
-#
-# 版本注入: git 短哈希（无 git 时用日期），wdp version 可见。
+
 set -e
 
 cd "$(dirname "$0")"
 mkdir -p bin
 
-VERSION=$(git rev-parse --short HEAD 2>/dev/null || date +%Y%m%d)
-LDFLAGS="-s -w -X wdp/internal/cli.Version=${VERSION}"
+VERSION=${VERSION:-$(git describe --tags --always 2>/dev/null || echo "dev")}
+COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "none")
+DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+GOVERSION=$(go version | awk '{print $3}')
+
+LDFLAGS="-s -w \
+  -X 'wdp/internal/cli.Version=${VERSION}' \
+  -X 'wdp/internal/cli.Commit=${COMMIT}' \
+  -X 'wdp/internal/cli.BuildDate=${DATE}' \
+  -X 'wdp/internal/cli.GoVersion=${GOVERSION}'"
 
 ALL_TARGETS="linux/amd64 linux/arm64 darwin/arm64 windows/amd64"
 

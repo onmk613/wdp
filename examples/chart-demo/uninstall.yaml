@@ -1,13 +1,9 @@
 # 卸载清单（wdp run ./chart-demo --phase uninstall）：deploy 的逆操作
+# release marker 由 uninstall 成功后自动清除，无需手工处理
 - name: 卸载 demo-app
   hosts: appservers
   tasks:
-    - name: 删除应用文件
-      file:
-        path: "{{ .global.workdir }}"
-        state: absent
-
-    - name: 删除 JDK 指纹（子 chart 部署产物）
+    - name: 删除应用目录（含子 chart 部署产物 .jdk 指纹等）
       file:
         path: "{{ .global.workdir }}"
         state: absent

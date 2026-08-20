@@ -98,9 +98,10 @@ func printTasks(out io.Writer, tasks []*model.Task, domain map[string]any, eng *
 	for _, t := range tasks {
 		fmt.Fprintf(out, "%s- %s (%s)\n", indent, t.Label(), moduleLabel(t))
 		if t.ChartRef != "" {
-			sub := ch.FindSub(t.ChartRef)
-			if sub == nil {
-				fmt.Fprintf(out, "%s    !! 子 chart 不存在\n", indent)
+			// 与执行/lint 统一走 ResolveSub：支持版本约束引用（common@1.x）
+			sub, err := ch.ResolveSub(t.ChartRef)
+			if err != nil {
+				fmt.Fprintf(out, "%s    !! %s\n", indent, err.Error())
 				continue
 			}
 			scope := subScopePreview(sub, domain)

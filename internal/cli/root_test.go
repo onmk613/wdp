@@ -53,7 +53,7 @@ func TestConfigAppliesToFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	resetGlobals()
-	if err := execRoot(t, "--config", cfg, "version"); err != nil {
+	if err := execRoot(t, "--config", cfg, "modules"); err != nil {
 		t.Fatal(err)
 	}
 	if gInventories == nil || gInventories[0] != "hosts/prod.yaml" || gForks != 20 || gTaskTimeout != 300 {
@@ -70,7 +70,7 @@ func TestExplicitFlagBeatsConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	resetGlobals()
-	if err := execRoot(t, "--config", cfg, "--forks", "8", "-i", "other.yaml", "version"); err != nil {
+	if err := execRoot(t, "--config", cfg, "--forks", "8", "-i", "other.yaml", "modules"); err != nil {
 		t.Fatal(err)
 	}
 	if gForks != 8 || gInventories[0] != "other.yaml" {
@@ -85,14 +85,14 @@ func TestExplicitFlagBeatsConfig(t *testing.T) {
 func TestConfigMissingFile(t *testing.T) {
 	// 显式 --config 指向不存在的文件：报错
 	resetGlobals()
-	if err := execRoot(t, "--config", "/nonexistent/wdp.cfg", "version"); err == nil {
+	if err := execRoot(t, "--config", "/nonexistent/wdp.cfg", "modules"); err == nil {
 		t.Fatal("显式指定的配置文件不存在应报错")
 	}
 
 	// 默认路径不存在：静默跳过，保持内置默认
 	resetGlobals()
 	t.Chdir(t.TempDir()) // cwd 无 wdp.cfg
-	if err := execRoot(t, "version"); err != nil {
+	if err := execRoot(t, "modules"); err != nil {
 		t.Fatal(err)
 	}
 	if gForks != 5 || len(gInventories) != 1 || gInventories[0] != "inventory.yaml" || gVerbosity != 0 || gNoColor {
@@ -113,10 +113,10 @@ func TestRootHelpGrouped(t *testing.T) {
 	}
 	out := buf.String()
 
-	// 组标题全部出现
+	// 组标题全部出现（version 已由 cobra 内置 --version 提供，不再有 other 组）
 	for _, title := range []string{
 		"Deployment Commands:", "Chart & Package Commands:", "Security & Trust Commands:",
-		"Agent Commands:", "Operations & Records Commands:", "Other Commands:",
+		"Agent Commands:", "Operations & Records Commands:",
 	} {
 		if !strings.Contains(out, title) {
 			t.Fatalf("帮助缺少分组标题 %q:\n%s", title, out)
@@ -134,7 +134,6 @@ func TestRootHelpGrouped(t *testing.T) {
 		"ca": groupSecurity, "key": groupSecurity,
 		"agent":   groupAgent,
 		"release": groupOps, "modules": groupOps,
-		"version": groupOther,
 	}
 	for _, c := range root.Commands() {
 		gid, ok := want[c.Name()]

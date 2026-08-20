@@ -7,6 +7,10 @@ Helm 风格 chart 打包与多环境精准部署。
 > 📖 **完整用户文档见 [docs/](docs/README.md)**：快速开始、inventory 与主机分组、
 > playbook 全语法、19 个内置模块手册、chart 应用包与生命周期、values 与模板函数、
 > 输出控制、check/diff 预演、CLI 全量参考、最佳实践与 FAQ。
+>
+> 🧪 **可运行示例见 [examples/](examples/README.md)**：特性矩阵（19 模块/任务控制/
+> 策略回滚/动态分组）、inventory 变量体系、以及代表性应用 webstack
+> （金丝雀 + 健康门 + 自动回滚 + 子 chart + hook + 脚本模块的复杂配置部署全要素）。
 
 ## 设计要点
 

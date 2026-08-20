@@ -1,0 +1,154 @@
+# 任务级控制属性全集：when/loop/register/notify/tags/environment/ignore_errors/
+# retries+until/timeout/changed_when/failed_when/delegate_to/run_once/output/no_log
+#
+# 演练：
+#   wdp run examples/features/task-controls.yaml -i examples/features/local.yaml
+# 进阶玩法：
+#   --tags install                        只跑带 install 标签的任务
+#   --start-at-task "until 轮询（.result 引用当轮结果）"   从指定任务断点续跑（调试利器）
+#   --limit 'l1,l2'                       收窄主机范围
+#   -v                                    逐主机全量输出（-vv 含 loop 逐项）
+- name: 任务控制属性
+  hosts: all
+  vars:
+    workdir: /tmp/wdp-features-controls
+    threshold: 2
+  environment:            # play 级环境变量（任务级可覆盖同名项）
+    WDP_DEMO: play-level
+  tasks:
+    # ---------- when：单条件 / 列表 AND ----------
+    - name: when 单条件（仅 l1 执行）
+      shell: 'echo "primary node"'
+      when: '{{ eq .inventory_hostname "l1" }}'
+
+    - name: when 列表（AND 语义）
+      shell: 'echo "both conditions met"'
+      when:
+        - '{{ ne .inventory_hostname "" }}'
+        - '{{ ge (len .play_hosts) 2 }}'
+
+    # ---------- loop / with_items / loop_control ----------
+    - name: loop 逐项（register 含 results 逐项数组）
+      shell: 'echo "instance {{ .item }}"'
+      loop: ["1", "2"]
+      register: inst
+
+    - name: with_items 别名
+      shell: 'echo "item {{ .item }}"'
+      with_items: [a, b]
+
+    - name: map 项循环（逐字段引用）
+      shell: 'echo "{{ .item.name }}={{ .item.value }}"'
+      loop:
+        - {name: cpu, value: "2"}
+        - {name: mem, value: "4G"}
+
+    - name: 自定义循环变量名（改名后默认 .item 不再注入）
+      shell: 'echo "layer {{ .idx }}"'
+      loop: [x, y]
+      loop_control: {loop_var: idx}
+
+    - name: 动态列表（单模板元素渲染结果为列表语法时展开为多项）
+      shell: 'echo "dynamic {{ .item }}"'
+      loop: '{{ to_json (list "p" "q") }}'
+
+    # ---------- register：结果进入变量域（跨批次/跨 play 延续） ----------
+    - name: register 基本用法
+      shell: 'echo captured'
+      register: cap
+
+    - name: 引用 register（stdout/rc/changed…）
+      shell: 'echo "prev rc={{ .cap.rc }} stdout={{ .cap.stdout }} items={{ len .inst.results }}"'
+
+    # ---------- notify + handlers：变更时触发，批次末尾 flush ----------
+    - name: 触发 handler 的任务（复跑幂等 → 不再触发）
+      copy:
+        content: "notify demo\n"
+        dest: "{{ .workdir }}/.notify-demo"
+      notify: 汇报变更
+
+    # ---------- tags：任务筛选 ----------
+    - name: 带 install 标签的任务
+      shell: 'echo "install step"'
+      tags: [install]
+
+    - name: 带 debug 标签的任务
+      shell: 'echo "debug step"'
+      tags: [debug]
+
+    # ---------- environment：任务级环境变量 ----------
+    - name: 读环境变量（play 级 WDP_DEMO）
+      shell: 'echo "env=$WDP_DEMO"'
+
+    - name: 任务级覆盖环境变量
+      shell: 'echo "env=$WDP_DEMO"'
+      environment: {WDP_DEMO: task-level}
+
+    # ---------- ignore_errors：失败不中断 ----------
+    - name: 容错任务（预期失败但继续）
+      shell: 'exit 3'
+      ignore_errors: true
+      register: tolerant
+
+    - name: 引用容错结果
+      shell: 'echo "tolerant rc={{ .tolerant.rc }}"'
+
+    # ---------- until / retries / delay：轮询直到满足 ----------
+    - name: until 轮询（.result 引用当轮结果）
+      shell: 'echo "attempt output"'
+      until: '{{ if eq .result.rc 0 }}ok{{ end }}'
+      retries: 3
+      delay: 1
+
+    # ---------- timeout：任务超时秒（0/-1 不限） ----------
+    - name: timeout 演示（正常完成远未触及超时）
+      shell: 'echo done'
+      timeout: 30
+
+    # ---------- changed_when / failed_when：覆盖判定 ----------
+    - name: changed_when（命令本身恒 changed，改判为未变更）
+      shell: 'echo "side-effect free"'
+      changed_when: '{{ false }}'
+
+    - name: failed_when（退出码非零但业务上算成功）
+      shell: 'exit 1'
+      failed_when: '{{ false }}'
+      register: soft
+
+    # ---------- delegate_to：委托执行（变量域仍是本机） ----------
+    - name: 委托到控制端本地执行
+      shell: 'echo "run on controller for {{ .inventory_hostname }}"'
+      delegate_to: localhost
+
+    # ---------- run_once：整批只跑一次，结果复制到全部主机 ----------
+    - name: 单次执行（如集群初始化）
+      shell: 'echo "init once for {{ len .play_hosts }} hosts"'
+      run_once: true
+      register: once
+
+    # ---------- output / no_log：展示控制（register 始终拿完整数据） ----------
+    - name: 噪音任务只看尾部
+      shell: 'seq 1 100'
+      output: tail=3
+
+    - name: 静默任务（不回显）
+      shell: 'echo "quiet work"'
+      output: none
+
+    - name: 敏感任务（回显与 JSON 报告一并遮蔽）
+      shell: 'echo "secret-token-should-not-leak"'
+      no_log: true
+      register: secret
+
+    - name: no_log 不影响 register 数据
+      shell: 'echo "secret captured: {{ .secret.stdout }}"'
+
+    - name: 清理
+      file:
+        path: "{{ .workdir }}"
+        state: absent
+      tags: [cleanup]
+
+  handlers:
+    - name: 汇报变更
+      shell: 'echo "handler on {{ .inventory_hostname }}"'

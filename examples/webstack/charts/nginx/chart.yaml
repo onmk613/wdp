@@ -1,0 +1,3 @@
+name: nginx
+version: 2.0.0
+description: Nginx 反向代理子 chart：安装、配置（upstream 自动发现）、服务管理

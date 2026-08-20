@@ -1,0 +1,49 @@
+# 第 1 层：默认值（envs/*.yaml 与 --set 在此之上深合并）
+#
+# 配置按职责分块：应用本体 / nginx 反代 / common 系统层 / global 跨 chart 共享。
+# global 是唯一跨子 chart 可见的命名空间（nginx 子 chart 经它拿应用端口）。
+
+app:
+  name: orders-api
+  version: 1.4.2
+  port: 8080                 # 应用监听端口（应用侧视角）
+  replicas: 2                # 每台主机的 worker 进程数（真实场景由 systemd 拉起）
+  log:
+    level: info
+    dir: /var/log/orders-api
+    rotate_mb: 100
+  features:
+    metrics: true
+    tracing: false
+    cache:
+      driver: memory         # prod 环境切换 redis
+      ttl_secs: 300
+  endpoints: [orders, payments, inventory]
+  secrets:
+    api_token: dev-token-please-rotate   # 演示值；生产经 --set 注入并配合 no_log
+
+nginx:                       # nginx 子 chart 的覆盖子树（子 chart 内这些键在顶层作用域）
+  workers: auto
+  keepalive: 32
+  listen_port: 80
+  client_max_body: 4m
+  conf_dir: /tmp/wdp-webstack-nginx   # 演练环境可写；生产（envs/prod.yaml）为 /etc/nginx/conf.d
+
+common:                      # common 子 chart（系统层：用户/组/目录）
+  user: orders
+  group: orders
+  create_user: true          # 演示机无 root 时可置 false 跳过用户创建
+
+monitoring:
+  enabled: false
+  endpoint: ""
+
+# get_url 可选在线制品：填真实 URL+sha256 后任务生效（如紧急热修二进制）
+artifact_url: ""
+artifact_sha256: ""
+
+global:
+  env: dev
+  workdir: /tmp/wdp-webstack/orders   # 版本化发布根目录（releases/ shared/ current）；演示可写路径，生产为 /opt/orders
+  app_port: 8080                      # nginx 子 chart 的 upstream 端口（跨 chart 共享）
+  domain: orders.dev.example.com

@@ -1,0 +1,19 @@
+name: webstack
+version: 1.2.0
+description: >-
+  代表性应用包：orders-api（Go Web 服务）+ Nginx 反向代理的完整生命周期部署。
+  覆盖复杂配置下的自动化部署全要素：三层 values、子 chart 组件化、金丝雀策略 +
+  健康门 + 自动回滚、hook 生命周期、脚本模块扩展、systemd 服务化、版本化目录发布。
+
+# 部署前校验：合并后 values 缺失任一点路径立即报错
+#（--set app.version=null 删掉必填键可看到该机制）
+required:
+  - app.name
+  - app.version
+  - global.env
+  - global.workdir
+  - global.app_port
+  - global.domain
+
+# 演示用 marker 目录（macOS/无 root 环境可写）；生产保持缺省 /var/lib/wdp
+marker_dir: /tmp/wdp-webstack-marker

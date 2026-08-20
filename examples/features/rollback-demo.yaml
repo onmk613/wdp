@@ -1,0 +1,28 @@
+# 自动回滚演示：健康门未通过 → 回滚该批文件类变更 → 终止后续批次
+#
+# 演练（真实执行，预期以失败告终——这正是演示点）：
+#   wdp run examples/features/rollback-demo.yaml -i examples/features/local.yaml
+# 观察输出顺序：
+#   1. 金丝雀主机完成部署任务
+#   2. 健康门重试 2 次后仍未通过（探测不存在的就绪文件）
+#   3. auto-rollback 任务出现：金丝雀批次的新建文件被删除
+#   4. 后续批次不再执行；RECAP 呈现失败
+# 对比：把 gate.shell 改成恒真命令（如 true）即为正常发布路径。
+- name: 健康门失败的发布
+  hosts: all
+  strategy:
+    type: canary
+    batch: "50%"
+    gate:
+      shell: 'test -f /tmp/wdp-rollback-demo-ready'   # 该文件永不出现 → 门必失败
+      retries: 2
+      delay: 1
+    auto_rollback: true
+  tasks:
+    - name: 下发新版本（新建文件 → 可自动回滚）
+      copy:
+        content: "rollback demo payload\n"
+        dest: /tmp/wdp-rollback-demo-{{ .inventory_hostname }}
+
+    - name: 过程性变更（shell 不可自动回滚——评估报告会提示）
+      shell: 'echo "side effect on {{ .inventory_hostname }}"'

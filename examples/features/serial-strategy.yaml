@@ -1,0 +1,56 @@
+# 部署策略演示：serial 三种写法 + strategy 三种类型 + 健康门 + 自动回滚
+#
+# 演练（本机 4 台 local 主机，真实执行）：
+#   wdp run examples/features/serial-strategy.yaml -i examples/features/local.yaml
+# 观察 play_batch 批次推进：1 台 → 2 台 → 剩余；
+# 故意失败触发回滚的对照示例见 rollback-demo.yaml。
+- name: 逐批尺寸演示
+  hosts: all
+  # serial 三种写法：5（绝对数）/ "25%"（百分比）/ "1,2"（逐批尺寸，最后尺寸重复用）
+  # 这里 "1,2"：第 1 批 1 台、第 2 批 2 台、第 3 批剩余 1 台
+  serial: "1,2"
+  tasks:
+    - name: 批内并发执行（当前批次主机）
+      shell: 'echo "batch={{ .play_batch }} of {{ len .play_hosts }}"'
+
+    - name: 模拟部署动作
+      copy:
+        content: "serial demo\n"
+        dest: /tmp/wdp-features-serial-{{ .inventory_hostname }}
+
+- name: 金丝雀策略演示
+  hosts: all
+  strategy:
+    type: canary          # 首批固定 1 台金丝雀，其余按 batch 分批
+    batch: "50%"          # 金丝雀之后的每批尺寸
+    gate:                 # 每批完成且 handlers flush 后的健康门
+      shell: 'test -f /tmp/wdp-features-serial-{{ .inventory_hostname }}'
+      retries: 2          # 门重试（缺省判据 rc==0）
+      delay: 1
+    auto_rollback: true   # 批次失败或门未过 → 回滚该批文件类变更并终止
+  tasks:
+    - name: 部署新版本（文件类变更可自动回滚）
+      copy:
+        content: "canary v2\n"
+        dest: /tmp/wdp-features-serial-{{ .inventory_hostname }}
+      notify: 发布通知
+
+    - name: 健康标记（真实场景由服务启动逻辑写入；本演示供 gate 检查）
+      file:
+        path: /tmp/wdp-features-serial-{{ .inventory_hostname }}
+        state: touch
+
+  handlers:
+    - name: 发布通知
+      shell: 'echo "v2 live on {{ .inventory_hostname }}"'
+
+- name: 滚动策略演示
+  hosts: all
+  strategy:
+    type: rolling         # 顺序分批（linear 等价传统 serial 语义）
+    batch: "2"            # 绝对数
+  tasks:
+    - name: 清理演示产物
+      file:
+        path: /tmp/wdp-features-serial-{{ .inventory_hostname }}
+        state: absent

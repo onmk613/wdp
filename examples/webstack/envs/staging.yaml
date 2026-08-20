@@ -1,0 +1,13 @@
+# 预发环境覆盖（验证配置分层：只覆盖与默认不同的键）
+app:
+  replicas: 2
+  log:
+    level: debug
+
+monitoring:
+  enabled: true
+  endpoint: https://metrics-staging.example.com/invoke
+
+global:
+  env: staging
+  domain: orders-staging.example.com

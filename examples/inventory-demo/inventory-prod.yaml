@@ -1,0 +1,16 @@
+# 多文件合并演示：与 inventory.yaml 一起传入（-i 可重复）
+#   wdp run examples/inventory-demo/show-vars.yaml \
+#     -i examples/inventory-demo/inventory.yaml -i examples/inventory-demo/inventory-prod.yaml
+# 合并规则：同名组主机参数后者覆盖、组变量深合并、children 并集。
+#
+# 本文件把环境切到 prod：覆盖 all.vars、追加 web3、深合并 webservers 组变量。
+all:
+  vars:
+    env: prod           # 覆盖 inventory.yaml 的 dev
+
+webservers:
+  hosts:
+    web3: {conn: local} # 追加主机（web1/web2 保留）
+  vars:
+    nginx_port: 9090    # 覆盖组变量
+    tls: true           # 深合并新增键

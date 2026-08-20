@@ -1,0 +1,17 @@
+# webstack 生产拓扑：应用集群 + 负载均衡
+# 演示环境全部 local 连接；真实环境示例：
+#   app1: {host: 10.0.0.11, user: deploy, key_path: ~/.ssh/id_ed25519, host_key_check: true}
+#   lb1:  {conn: agent, host: 10.0.0.10, agent_url: https://10.0.0.10:7602, token_env: LB_TOKEN}
+appservers:
+  hosts:
+    app1: {conn: local}
+    app2: {conn: local}
+    app3: {conn: local}
+    app4: {conn: local}
+
+lb:
+  hosts:
+    lb1: {conn: local}
+
+production:
+  children: [appservers, lb]

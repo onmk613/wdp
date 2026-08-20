@@ -80,6 +80,51 @@ func TestBlockRescue(t *testing.T) {
 	}
 }
 
+// TestBlockIgnoreErrorsNotRescued block 内 ignore_errors 的失败不视为 block 失败：
+// 后续任务继续、rescue 不触发。
+func TestBlockIgnoreErrorsNotRescued(t *testing.T) {
+	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+		if strings.Contains(req.Script, "will-fail") {
+			return connection.ExecResult{Code: 1}, nil
+		}
+		return connection.ExecResult{Code: 0}, nil
+	})
+	plays := []*model.Play{{
+		Hosts: "h1",
+		Tasks: []*model.Task{
+			{
+				Name: "容错组",
+				Block: []*model.Task{
+					{Name: "可忽略失败", Module: "shell", FreeForm: "will-fail", IgnoreErrors: true},
+					{Name: "紧随任务", Module: "shell", FreeForm: "next-step"},
+				},
+				Rescue: []*model.Task{
+					{Name: "救援", Module: "shell", FreeForm: "rescue-step"},
+				},
+			},
+		},
+	}}
+	if ex.Run(context.Background(), plays) {
+		t.Fatalf("ignore_errors 的失败不应导致 play 失败:\n%s", rep.joined())
+	}
+	out := rep.joined()
+	if strings.Contains(out, "rescue-step") || strings.Contains(out, "已由 rescue 恢复") {
+		t.Fatalf("ignore_errors 失败不应触发 rescue:\n%s", out)
+	}
+	joined := ""
+	for _, f := range allFakes() {
+		for _, r := range f.ExecLog {
+			joined += r.Script + "|"
+		}
+	}
+	if !strings.Contains(joined, "next-step") {
+		t.Fatalf("被忽略失败后的任务应继续执行: %s", joined)
+	}
+	if strings.Contains(joined, "rescue-step") {
+		t.Fatalf("rescue 不应执行: %s", joined)
+	}
+}
+
 func TestBlockNoRescueFails(t *testing.T) {
 	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
 		if strings.Contains(req.Script, "will-fail") {

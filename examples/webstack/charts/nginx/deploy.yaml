@@ -1,0 +1,42 @@
+# nginx 反代子 chart：部署到 lb 组（父 deploy.yaml 的第二个 play 引用）
+- hosts: all
+  tasks:
+    - name: 安装 nginx（Linux 守卫）
+      package:
+        name: [nginx]
+        state: present
+      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      become: true
+
+    - name: 配置目录（conf_dir 演练环境为 /tmp，生产为 /etc/nginx/conf.d）
+      file:
+        path: "{{ .conf_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: 下发反代配置（upstream 自动发现 appservers 成员）
+      template:
+        src: templates/nginx.conf.tpl
+        dest: "{{ .conf_dir }}/webstack.conf"
+        mode: "0644"
+      notify: 重载 nginx
+
+    - name: 启动并自启（Linux 非 alpine 守卫）
+      service:
+        name: nginx
+        state: started
+        enabled: true
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      become: true
+
+    - name: 非 Linux 演练环境提示（配置已渲染供检视）
+      shell: 'echo "nginx.conf rendered at {{ .conf_dir }}/webstack.conf"'
+      when: '{{ if and .os (eq .os.family "unknown") }}yes{{ end }}'
+
+  handlers:
+    - name: 重载 nginx
+      service:
+        name: nginx
+        state: reloaded
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      become: true

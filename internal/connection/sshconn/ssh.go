@@ -467,13 +467,17 @@ func ScanHostKey(h *model.Host) (ssh.PublicKey, error) {
 	return nil, fmt.Errorf("未采集到主机公钥")
 }
 
+// KnownHostsMarker 返回主机在 known_hosts 中的主机段（非 22 端口用 [host]:port 格式）。
+func KnownHostsMarker(h *model.Host) string {
+	if h.Port != 22 {
+		return fmt.Sprintf("[%s]:%d", h.Address, h.Port)
+	}
+	return h.Address
+}
+
 // KnownHostsLine 生成 known_hosts 行（非 22 端口用 [host]:port 格式）。
 func KnownHostsLine(h *model.Host, key ssh.PublicKey) string {
-	marker := h.Address
-	if h.Port != 22 {
-		marker = fmt.Sprintf("[%s]:%d", h.Address, h.Port)
-	}
-	return knownhosts.Line([]string{marker}, key)
+	return knownhosts.Line([]string{KnownHostsMarker(h)}, key)
 }
 
 // randHex 返回不可预测的 8 字节随机十六进制串（上传临时文件后缀），

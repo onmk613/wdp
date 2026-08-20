@@ -1,0 +1,43 @@
+# 运行时动态分组：主机变量/facts → group_by 建组 → 后续 play 通配引用
+# 条件分组的正确位置是运行时（变量已知）而非 inventory 声明期。
+#
+# 演练：
+#   wdp run examples/features/dynamic-groups.yaml -i examples/features/local.yaml
+# local.yaml 里 l1 是 primary、其余是 replica：按 role 分流演示确定性分组；
+# 真实环境可用 facts（.os.family / .memory_mb 等）做同样的事。
+- name: 采集与建组
+  hosts: all
+  tasks:
+    - name: 采集 facts
+      setup:
+
+    - name: 按角色建组（组名 = role_主机role 变量）
+      group_by: 'role_{{ .role }}'
+
+    - name: 按系统家族建组（带前缀：组名 = dyn-os_家族）
+      group_by:
+        name: 'os_{{ .os.family }}'
+        prefix: dyn
+
+    - name: 内置变量速览
+      shell: 'echo "host={{ .inventory_hostname }} groups={{ .group_names }} peers={{ len .play_hosts }}"'
+
+# 动态组用 hosts 直接引用；.groups 与 .hosts 内置变量可在任务里取拓扑
+- name: 主节点专属任务
+  hosts: "role_primary"
+  tasks:
+    - name: 仅主节点执行（如集群初始化）
+      shell: 'echo "primary init on {{ .inventory_hostname }} replicas={{ len .groups.role_replica }}"'
+
+- name: 副本节点任务
+  hosts: "role_replica"
+  tasks:
+    - name: 副本从主节点地址连入（.hosts 内置变量取同伴地址）
+      shell: 'echo "replica {{ .inventory_hostname }} joins primary at {{ (index .hosts "l1").address }}"'
+
+- name: 家族组内单次执行（run_once）
+  hosts: "dyn-os_*"
+  tasks:
+    - name: 每个家族只跑一次（组名含连字符 → index 取键；wdp 的 join 是 列表在前）
+      shell: 'echo "family={{ .os.family }} members={{ join (index .groups (printf "dyn-os_%s" .os.family)) "," }}"'
+      run_once: true

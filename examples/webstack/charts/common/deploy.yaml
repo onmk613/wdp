@@ -1,0 +1,26 @@
+# 系统层子 chart：单 play；hosts/become/strategy 继承父 play
+# 作用域隔离：只看到 common 子树 + global + 引用 vars，看不到兄弟键（app/nginx）
+- hosts: all
+  tasks:
+    - name: 应用组（Linux 守卫：非 Linux 演练机跳过）
+      group:
+        name: "{{ .group }}"
+        system: true
+      when: '{{ if and .os (ne .os.family "unknown") .create_user }}yes{{ end }}'
+      become: true
+
+    - name: 应用用户（nologin 系统账户）
+      user:
+        name: "{{ .user }}"
+        group: "{{ .group }}"
+        shell: /usr/sbin/nologin
+        system: true
+      when: '{{ if and .os (ne .os.family "unknown") .create_user }}yes{{ end }}'
+      become: true
+
+    - name: 发布目录骨架（releases/ shared/，全平台生效）
+      file:
+        path: "{{ .global.workdir }}/{{ .item }}"
+        state: directory
+        mode: "0755"
+      loop: [releases, shared]

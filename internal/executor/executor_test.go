@@ -255,6 +255,36 @@ func TestLoopItems(t *testing.T) {
 	}
 }
 
+// TestLoopTemplateList 单模板元素渲染结果为 JSON 列表字符串时展开为多项；
+// 非列表语法的渲染结果保持单元素语义。
+func TestLoopTemplateList(t *testing.T) {
+	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+		return connection.ExecResult{Code: 0}, nil
+	})
+	plays := []*model.Play{{
+		Hosts: "h1",
+		Tasks: []*model.Task{
+			// to_json 输出 ["p","q"] → 展开为 2 项
+			{Name: "json", Module: "shell", FreeForm: "echo {{ .item }}", Loop: []any{`{{ to_json (list "p" "q") }}`}},
+			// 普通模板输出单字符串 → 单项
+			{Name: "scalar", Module: "shell", FreeForm: "echo {{ .item }}", Loop: []any{`{{ printf "plain" }}`}},
+		},
+	}}
+	if ex.Run(context.Background(), plays) {
+		t.Fatalf("不应失败:\n%s", rep.joined())
+	}
+	joined := ""
+	for _, r := range allFakes()[0].ExecLog {
+		joined += r.Script + "|"
+	}
+	if !strings.Contains(joined, "echo p|") || !strings.Contains(joined, "echo q|") {
+		t.Fatalf("模板列表应展开为 p/q 两项: %s", joined)
+	}
+	if !strings.Contains(joined, "echo plain") {
+		t.Fatalf("普通模板应保持单项: %s", joined)
+	}
+}
+
 func TestUnknownModule(t *testing.T) {
 	ex, rep := setup(t, okExec)
 	plays := []*model.Play{{

@@ -90,7 +90,7 @@ when:
   # 内层任务（block 展开或下一任务）用 loop_var: inner
 ```
 
-- `loop` 支持模板（渲染结果须是列表）
+- `loop` 支持模板：单个模板元素渲染结果为 JSON/YAML 列表语法时展开为多项（如 `loop: '{{ to_json .vals }}'`）；非列表语法的渲染结果保持单元素
 - 每项结果可独立 failed/changed；聚合结果 stdout 为逐项拼接、rc/msg 取最后一项
 - `changed_when`/`failed_when` 作用于**聚合后**的结果
 

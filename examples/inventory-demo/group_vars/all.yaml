@@ -1,0 +1,3 @@
+# group_vars/all.yaml：自动合入全局变量（等价 all.vars，优先级低于组/主机变量）
+company: example-corp
+log_level: info

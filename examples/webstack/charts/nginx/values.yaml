@@ -1,0 +1,7 @@
+# 子 chart 默认值（父 values 的 nginx: 子树深合并覆盖）
+# 注意作用域：子 chart 内这些键在顶层（.workers 而非 .nginx.workers）
+workers: auto
+keepalive: 32
+listen_port: 80
+client_max_body: 4m
+conf_dir: /tmp/wdp-webstack-nginx   # 演练环境可写目录；生产（envs/prod.yaml）覆盖为 /etc/nginx/conf.d

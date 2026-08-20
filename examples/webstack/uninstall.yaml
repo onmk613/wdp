@@ -1,0 +1,65 @@
+# 卸载清单（wdp run examples/webstack --phase uninstall）：deploy 的逆操作
+# hook 相位自动过滤：卸载时只执行 pre_uninstall/post_uninstall
+- name: 卸载 webstack
+  hosts: appservers
+  tasks:
+    - name: 采集 facts（系统层卸载的条件判断依据）
+      setup:
+
+    - name: 卸载前备份提示（数据目录保留，仅记录清单）
+      shell: 'ls -1 {{ .global.workdir }}/shared/ 2>/dev/null || echo "无共享数据"'
+      hook: pre_uninstall
+      run_once: true
+      delegate_to: localhost
+
+    - name: 停止并禁用服务（Linux 守卫；已不存在的环境跳过）
+      systemd_unit:
+        name: "{{ .app.name }}.service"
+        state: stopped
+        enabled: false
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      become: true
+      ignore_errors: true
+
+    - name: 删除 systemd 单元文件
+      file:
+        path: /etc/systemd/system/{{ .app.name }}.service
+        state: absent
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      become: true
+
+    - name: 删除应用目录（含 releases/versions、shared、current）
+      file:
+        path: "{{ .global.workdir }}"
+        state: absent
+
+    - name: 删除系统用户与组（保留数据的场景可删除本段）
+      user:
+        name: "{{ .common.user }}"
+        state: absent
+      when: '{{ if and .os (ne .os.family "unknown") .common.create_user }}yes{{ end }}'
+      become: true
+
+    - name: 卸载完成通知
+      shell: 'echo "webstack uninstalled from {{ len .play_hosts }} hosts"'
+      hook: post_uninstall
+      run_once: true
+      delegate_to: localhost
+
+- name: 卸载 lb nginx 配置
+  hosts: lb
+  tasks:
+    - name: 采集 facts
+      setup:
+
+    - name: 删除反代配置
+      file:
+        path: "{{ .nginx.conf_dir }}/webstack.conf"
+        state: absent
+
+    - name: 重载 nginx（配置移除后生效）
+      service:
+        name: nginx
+        state: reloaded
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      become: true

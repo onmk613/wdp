@@ -1,0 +1,27 @@
+# 生产环境覆盖（第 2 层：wdp run examples/webstack -f examples/webstack/envs/prod.yaml）
+# 标量与列表整体替换、map 递归合并（features.cache 只换 driver，ttl_secs 保留）
+app:
+  version: 1.4.2
+  port: 8080
+  replicas: 4
+  log:
+    level: warn
+  features:
+    tracing: true
+    cache:
+      driver: redis
+  secrets:
+    api_token: prod-rotate-me-via-set   # 生产真实值用 --set 注入，不进仓库
+
+nginx:
+  listen_port: 443
+  conf_dir: /etc/nginx/conf.d           # 生产配置目录（默认值为演练环境 /tmp）
+
+monitoring:
+  enabled: true
+  endpoint: https://metrics.example.com/invoke
+
+global:
+  env: prod
+  workdir: /opt/orders
+  domain: orders.example.com

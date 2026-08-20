@@ -1,0 +1,30 @@
+# inventory 特性演示：分组、children、组变量、主机变量
+# 同目录的 group_vars/<组>.yaml 与 host_vars/<主机>.yaml 自动加载（all.yaml 合入全局）。
+#
+# 演示机全部用 local 连接；真实环境替换为：
+#   web1: {host: 10.0.0.11, port: 22, user: deploy, key_path: ~/.ssh/id_ed25519}
+#   db1:  {conn: agent, host: 10.0.1.10, agent_url: https://10.0.1.10:7602, token_env: DB_TOKEN}
+all:
+  vars:
+    env: dev
+    repo: https://repo.example.com
+
+webservers:
+  hosts:
+    web1: {conn: local}
+    web2: {conn: local}
+  vars:
+    nginx_port: 8080
+    tier: web
+
+dbservers:
+  hosts:
+    db1: {conn: local}
+  vars:
+    tier: db
+
+# children 组：聚合多个组，变量对成员生效
+production:
+  children: [webservers, dbservers]
+  vars:
+    alert_channel: "#ops-prod"

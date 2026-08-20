@@ -1,0 +1,5 @@
+# host_vars/web1.yaml：主机变量（优先级高于组变量与 all，低于 play vars/chart values）
+# 真实用途：单机特殊参数（灰度开关、本机密钥引用等）
+node_id: "web-001"
+nginx_port: 8081          # 覆盖组变量 8080
+canary: true

@@ -21,6 +21,8 @@ import (
 	"wdp/internal/render"
 	"wdp/internal/report"
 	"wdp/internal/shellquote"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Options 是执行选项。
@@ -179,6 +181,33 @@ func New(inv *inventory.Inventory, conns *connection.Manager, rep report.Reporte
 	e.facts = map[string]map[string]any{}
 	e.deadHosts = map[string]bool{}
 	return e
+}
+
+// renderLoopItems 渲染 loop 项。单个模板元素渲染结果为 JSON/YAML 列表字符串时
+// 展开为多项（loop 支持模板：渲染结果须是列表，如 '{{ to_json .vals }}'）；
+// 非列表语法保持单元素语义不变（'{{ .name }}' 仍是单个字符串项）。
+func (e *Executor) renderLoopItems(loop []any, vars map[string]any) ([]any, error) {
+	lv, err := e.engine.RenderValue(loop, vars)
+	if err != nil {
+		return nil, err
+	}
+	items, _ := lv.([]any)
+	if len(loop) != 1 || len(items) != 1 {
+		return items, nil
+	}
+	tpl, ok := loop[0].(string)
+	if !ok || !strings.Contains(tpl, "{{") {
+		return items, nil
+	}
+	rs, ok := items[0].(string)
+	if !ok || !strings.HasPrefix(strings.TrimSpace(rs), "[") {
+		return items, nil
+	}
+	var parsed []any
+	if err := yaml.Unmarshal([]byte(rs), &parsed); err != nil || parsed == nil {
+		return items, nil // 解析失败维持单元素（字符串原文即用户数据）
+	}
+	return parsed, nil
 }
 
 // Run 依次执行全部 play，返回是否存在失败。
@@ -1006,11 +1035,10 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 
 	var loopResults []*model.TaskResult
 	if task.Loop != nil {
-		lv, err := e.engine.RenderValue(task.Loop, vars)
+		items, err := e.renderLoopItems(task.Loop, vars)
 		if err != nil {
 			return fail(res, err)
 		}
-		items, _ := lv.([]any)
 		for _, item := range items {
 			lr := runOne(item)
 			if item != nil {
@@ -1153,13 +1181,11 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 	// loop 项
 	items := []any{nil}
 	if task.Loop != nil {
-		lv, err := e.engine.RenderValue(task.Loop, base())
+		l, err := e.renderLoopItems(task.Loop, base())
 		if err != nil {
 			return fail(res, err)
 		}
-		if l, ok := lv.([]any); ok {
-			items = l
-		}
+		items = l
 	}
 
 	// 构建子 chart 有效 play（hosts/become/strategy 继承父）
@@ -1473,15 +1499,12 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 			if r.Unreachable {
 				return false, true, append(msgs, r.Msg)
 			}
-			if r.Failed {
-				failed = true
-				msgs = append(msgs, fmt.Sprintf("%s: %s", t.Label(), r.Msg))
-				if !t.IgnoreErrors {
-					return true, false, msgs // block 内失败即转 rescue
-				}
+			if r.Failed && !t.IgnoreErrors {
+				// block 内失败即转 rescue；ignore_errors 的失败是例外，不视为 block 失败
+				return true, false, append(msgs, fmt.Sprintf("%s: %s", t.Label(), r.Msg))
 			}
 		}
-		return failed, false, msgs
+		return false, false, msgs
 	}
 
 	blockFailed, unreachable, msgs := runSeq(task.Block)
