@@ -1,6 +1,6 @@
+.DS_Store
+.vscode/
+.idea/
+.zcode/
+vendor/
 bin/
-fetched/
-.v2/
-.v3/
-*.test
-nohup.out

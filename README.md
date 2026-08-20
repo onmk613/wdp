@@ -522,3 +522,7 @@ go build ./... && go test -race ./...
 
 测试基于 `connection.Fake`（内存假连接，尊重 ctx 取消）与 httptest，不依赖真实主机；
 `internal/skel` 的生成物测试（lint + check 演练）构成 `wdp new` 的质量门。
+
+## 许可证
+
+MIT License，详见 [LICENSE](LICENSE)。

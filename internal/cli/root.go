@@ -36,7 +36,7 @@ const (
 )
 
 // Version 是 wdp 版本（var 以便构建时 -ldflags "-X wdp/internal/cli.Version=…" 注入）。
-var Version = "0.2.0"
+var Version = "0.0.1"
 
 // 全局选项（由 PersistentFlags 绑定；未显式指定时默认值可被 wdp.cfg 覆盖）。
 var (
