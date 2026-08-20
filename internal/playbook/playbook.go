@@ -83,7 +83,11 @@ func parsePlay(rp map[string]any) (*model.Play, error) {
 		p.Environment = m
 	}
 	if v, ok := rp["become"]; ok {
-		p.Become, _ = v.(bool)
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("become: %w", err)
+		}
+		p.Become = b
 	}
 	if v, ok := rp["become_user"]; ok {
 		p.BecomeUser = fmt.Sprint(v)
@@ -214,7 +218,11 @@ func parseTask(raw any, isHandler bool) (*model.Task, error) {
 		t.Environment = env
 	}
 	if v, ok := m["ignore_errors"]; ok {
-		t.IgnoreErrors, _ = v.(bool)
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("任务 %q: ignore_errors: %w", t.Label(), err)
+		}
+		t.IgnoreErrors = b
 	}
 	if v, ok := m["retries"]; ok {
 		t.Retries = toInt(v)
@@ -226,7 +234,10 @@ func parseTask(raw any, isHandler bool) (*model.Task, error) {
 		t.TimeoutSec = toInt(v)
 	}
 	if v, ok := m["become"]; ok {
-		b, _ := v.(bool)
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("任务 %q: become: %w", t.Label(), err)
+		}
 		t.Become = &b
 	}
 	if v, ok := m["become_user"]; ok {
@@ -245,13 +256,21 @@ func parseTask(raw any, isHandler bool) (*model.Task, error) {
 		}
 	}
 	if v, ok := m["no_log"]; ok {
-		t.NoLog, _ = v.(bool)
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("任务 %q: no_log: %w", t.Label(), err)
+		}
+		t.NoLog = b
 	}
 	if v, ok := m["delegate_to"]; ok {
 		t.DelegateTo = fmt.Sprint(v)
 	}
 	if v, ok := m["run_once"]; ok {
-		t.RunOnce, _ = v.(bool)
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return nil, fmt.Errorf("任务 %q: run_once: %w", t.Label(), err)
+		}
+		t.RunOnce = b
 	}
 	if v, ok := m["loop_control"]; ok {
 		lc, ok := v.(map[string]any)
@@ -510,7 +529,11 @@ func parseStrategy(v any) (*model.Strategy, error) {
 		st.Batch = fmt.Sprint(b)
 	}
 	if ar, ok := sm["auto_rollback"]; ok {
-		st.AutoRollback, _ = ar.(bool)
+		b, err := model.ParseBool(ar)
+		if err != nil {
+			return nil, fmt.Errorf("auto_rollback: %w", err)
+		}
+		st.AutoRollback = b
 	}
 	if g, ok := sm["gate"]; ok {
 		gm, ok := g.(map[string]any)

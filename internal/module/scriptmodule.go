@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"wdp/internal/shellquote"
 )
@@ -48,8 +47,12 @@ func RunScriptModule(rc *RunContext, path string, args map[string]any, free stri
 		return Fail("读取脚本模块失败: %v", err)
 	}
 	if rc.CheckMode {
-		// check 模式仍执行脚本但注入 WDP_CHECK=1，由脚本返回预演；
-		// 不执行亦可，但会丧失模块自检能力（脚本只读探测是常见用法）
+		// 脚本是外部代码，check 模式无法保证预演安全：仅当 chart.yaml
+		// 显式声明 check_mode: supported 时才执行（注入 WDP_CHECK=1），
+		// 否则跳过并报清晰提示，避免 --check 意外执行第三方脚本。
+		if !rc.CheckScriptAllowed {
+			return &Result{Skipped: true, Msg: fmt.Sprintf("[check] 跳过脚本模块（chart 未声明 check_mode: supported）: %s", path)}
+		}
 		return runScriptModuleCode(rc, data, args, free, true)
 	}
 	return runScriptModuleCode(rc, data, args, free, false)
@@ -60,7 +63,7 @@ func runScriptModuleCode(rc *RunContext, data []byte, args map[string]any, free 
 	if err != nil {
 		return Fail("模块参数序列化失败: %v", err)
 	}
-	remote := fmt.Sprintf("/tmp/.wdp-mod-%d", time.Now().UnixNano())
+	remote := "/tmp/.wdp-mod-" + tempSuffix()
 	if err := rc.Conn.UploadFile(rc.Ctx, remote, bytes.NewReader(data), 0o755); err != nil {
 		return Fail("上传脚本模块失败: %v", err)
 	}

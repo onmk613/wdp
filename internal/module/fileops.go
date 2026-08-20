@@ -74,17 +74,24 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 		}
 		var res *Result
 		if changed {
-			res = &Result{Changed: true, Msg: fmt.Sprintf("[check] %s 将写入（%d 字节）", dest, len(data))}
-			if rc.DiffMode {
-				res.Diff = contentDiff(rc, dest, exists, string(data))
+			if !exists || remote != sum {
+				res = &Result{Changed: true, Msg: fmt.Sprintf("[check] %s 将写入（%d 字节）", dest, len(data))}
+				if rc.DiffMode {
+					res.Diff = contentDiff(rc, dest, exists, string(data))
+				}
+			} else {
+				res = &Result{Changed: true, Msg: fmt.Sprintf("[check] %s 内容一致，权限将校正", dest)}
+				if rc.DiffMode {
+					res.Diff = modeDiff(rc, dest, mode)
+				}
 			}
 		} else {
-			res = &Result{Changed: false, Msg: fmt.Sprintf("[check] %s 内容一致", dest)}
+			res = &Result{Changed: false, Msg: fmt.Sprintf("[check] %s 内容与权限一致", dest)}
 		}
 		return changed, res
 	}
 	if !changed {
-		// 内容未变时仍校正权限
+		// 内容未变时仍校正权限/属主（变更计入 changed，不再被丢弃）
 		if hasMode {
 			if fixed, bad := chmodIfDiffers(rc, dest, mode); bad != nil {
 				return false, bad
@@ -97,11 +104,11 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 				return false, bad
 			}
 		}
-		return false, nil
+		return changed, nil
 	}
 	if exists && backup {
 		bak := fmt.Sprintf("%s.bak.%d", dest, time.Now().Unix())
-		script := fmt.Sprintf("cp -a %s %s", shellquote.Quote(dest), shellquote.Quote(bak))
+		script := fmt.Sprintf("cp -a -- %s %s", shellquote.Quote(dest), shellquote.Quote(bak))
 		if out, bad := rc.exec(script); bad != nil {
 			return false, bad
 		} else if out.Code != 0 {
@@ -189,6 +196,15 @@ func chownPath(rc *RunContext, path, owner, group string) *Result {
 		return Fail("chown 失败: %s", firstLine(out.Stderr))
 	}
 	return nil
+}
+
+// modeDiff 生成权限校正的 diff 行（check/diff 模式下说明将发生的属性变更）。
+func modeDiff(rc *RunContext, path string, want int64) string {
+	cur, ok, bad := remoteMode(rc, path)
+	if bad != nil || !ok {
+		return fmt.Sprintf("- mode: unknown\n+ mode: %04o", want)
+	}
+	return fmt.Sprintf("- mode: %04o\n+ mode: %04o", cur, want)
 }
 
 func firstLine(s string) string {

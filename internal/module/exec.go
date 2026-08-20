@@ -101,7 +101,7 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 // Params 参数文档。
 func (m *ShellModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "(free-form)", Type: "string", Desc: "要执行的命令（shell 走 /bin/sh；command 不做变量展开）"},
+		{Name: "(free-form)", Type: "string", Desc: "要执行的命令（shell/command 一致：均经 /bin/sh 执行）"},
 		{Name: "cmd", Type: "string", Desc: "命令（free-form 为空时的替代写法）"},
 		{Name: "creates", Type: "string", Desc: "路径存在则跳过（幂等守卫）"},
 		{Name: "removes", Type: "string", Desc: "路径不存在则跳过（幂等守卫）"},

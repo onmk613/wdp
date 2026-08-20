@@ -25,6 +25,26 @@ type Meta struct {
 	Required    []string `yaml:"required"`   // 必须由调用方提供的 values 点路径（缺失即报错）
 	MarkerDir   string   `yaml:"marker_dir"` // 目标机 release marker 目录（缺省 /var/lib/wdp）
 	NoMarker    bool     `yaml:"no_marker"`  // 不写 release marker
+	// CheckMode 声明 chart 的脚本模块（modules/<名>）支持 check 模式预演。
+	// 未声明时脚本模块在 --check 下被跳过（脚本为外部代码，默认不信任其预演安全）。
+	// YAML 取值：supported / true（启用）或 false（显式关闭）。
+	CheckMode CheckModeSupport `yaml:"check_mode"`
+}
+
+// CheckModeSupport 解析 check_mode 字段（布尔或 "supported" 字面量）。
+type CheckModeSupport bool
+
+// UnmarshalYAML 兼容 `check_mode: supported` 与 `check_mode: true`。
+func (c *CheckModeSupport) UnmarshalYAML(value *yaml.Node) error {
+	switch strings.ToLower(strings.TrimSpace(value.Value)) {
+	case "supported", "true", "yes", "on", "1":
+		*c = true
+	case "", "false", "no", "off", "0":
+		*c = false
+	default:
+		return fmt.Errorf("check_mode 仅支持 supported / true / false，得到 %q", value.Value)
+	}
+	return nil
 }
 
 // Chart 是加载后的部署包。

@@ -48,6 +48,9 @@ func (m *FetchModule) Run(rc *RunContext, args map[string]any, free string) *Res
 	}
 
 	local := m.localPath(rc, src, dest, flat)
+	if err := checkLocalPath(dest, local); err != nil {
+		return Fail("%v", err)
+	}
 	// 幂等：本地已存在同校验和文件则跳过下载（只读模块，check 模式行为不变）
 	if data, err := os.ReadFile(local); err == nil {
 		if sum := sha256hex(data); sum == remote {
@@ -81,6 +84,25 @@ func (m *FetchModule) localPath(rc *RunContext, src, dest string, flat bool) str
 	}
 	rel := strings.TrimPrefix(src, "/")
 	return filepath.Join(dest, rc.Host.Name, filepath.FromSlash(rel))
+}
+
+// checkLocalPath 校验最终落盘路径仍位于 dest 之内（防 src/主机名中的 .. 逃逸）。
+// 复用 chart.go 已验证的 Clean-后判包含模式；dest 相对路径时基于当前目录解析。
+func checkLocalPath(dest, local string) error {
+	absDest, err := filepath.Abs(dest)
+	if err != nil {
+		return fmt.Errorf("解析 dest 失败: %w", err)
+	}
+	absLocal, err := filepath.Abs(local)
+	if err != nil {
+		return fmt.Errorf("解析目标路径失败: %w", err)
+	}
+	absDest = filepath.Clean(absDest)
+	absLocal = filepath.Clean(absLocal)
+	if absLocal != absDest && !strings.HasPrefix(absLocal, absDest+string(os.PathSeparator)) {
+		return fmt.Errorf("fetch 落盘路径 %q 逃逸出 dest %q（src 或主机名包含 .. 时触发）", local, dest)
+	}
+	return nil
 }
 
 func isDirLocal(p string) bool {

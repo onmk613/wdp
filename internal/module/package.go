@@ -41,7 +41,8 @@ func (m *PackageModule) Run(rc *RunContext, args map[string]any, free string) *R
 		return bad
 	}
 
-	// check 模式：只探测当前安装状态，返回变更预估（--diff 列出逐包增删）
+	// check 模式：只探测当前安装状态，返回变更预估（--diff 列出逐包增删；
+	// latest 会真实查询可用升级，与实跑判定一致）
 	if rc.CheckMode {
 		would := false
 		var logs []string
@@ -60,6 +61,18 @@ func (m *PackageModule) Run(rc *RunContext, args map[string]any, free string) *R
 				would = true
 				logs = append(logs, name+" 将安装")
 				diffLines = append(diffLines, "+ "+name)
+			case state == "latest" && installed:
+				up, bad := mgr.upgradable(rc, name)
+				if bad != nil {
+					return bad
+				}
+				if up {
+					would = true
+					logs = append(logs, name+" 将升级")
+					diffLines = append(diffLines, "~ "+name)
+				} else {
+					logs = append(logs, name+" 已是最新")
+				}
 			default:
 				logs = append(logs, name+" 已是目标状态")
 			}
@@ -88,6 +101,15 @@ func (m *PackageModule) Run(rc *RunContext, args map[string]any, free string) *R
 			changed = true
 			logs = append(logs, name+" 已安装")
 		case state == "latest" && installed:
+			// 幂等：先探测是否存在可用升级，无升级则跳过（不再每次无脑 upgrade）
+			up, bad := mgr.upgradable(rc, name)
+			if bad != nil {
+				return bad
+			}
+			if !up {
+				logs = append(logs, name+" 已是最新")
+				continue
+			}
 			if bad := mgr.upgrade(rc, name); bad != nil {
 				return bad
 			}
@@ -202,6 +224,45 @@ func (p *pkgManager) upgrade(rc *RunContext, name string) *Result {
 		return p.run(rc, fmt.Sprintf("zypper update -y %s", shellquote.Quote(name)))
 	}
 	return Fail("未知包管理器 %s", p.kind)
+}
+
+// upgradable 探测包是否存在可用升级（state: latest 的幂等判定依据）。
+// 探测失败（如 dnf 源暂时不可用）返回 error，不静默跳过。
+func (p *pkgManager) upgradable(rc *RunContext, name string) (bool, *Result) {
+	q := shellquote.Quote(name)
+	var script string
+	switch p.kind {
+	case "apt":
+		// 模拟升级并解析 "N upgraded" 汇总行：N>0 即存在可用升级。
+		// "already the newest version" 时无该行，awk 默认 0 → 无升级。
+		script = fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get -s install --only-upgrade %s 2>/dev/null | awk '/^[0-9]+ upgraded/{ if ($1+0 > 0) exit 1 }'", q)
+	case "dnf", "yum":
+		// check-update 语义：返回 100 = 有可用更新，0 = 无
+		script = fmt.Sprintf("%s check-update %s >/dev/null 2>&1; rc=$?; [ $rc -eq 100 ] || [ $rc -eq 0 ] || exit $rc", p.kind, q)
+	case "apk":
+		// apk version -l '<' 仅列出存在可用升级的包
+		script = fmt.Sprintf("apk version -l '<' %s 2>/dev/null | grep -q .", q)
+	case "zypper":
+		// list-updates 输出表头后存在包行即存在升级
+		script = fmt.Sprintf("zypper --non-interactive list-updates %s 2>/dev/null | tail -n +5 | grep -q .", q)
+	default:
+		return false, Fail("未知包管理器 %s", p.kind)
+	}
+	out, bad := rc.exec(script)
+	if bad != nil {
+		return false, bad
+	}
+	switch p.kind {
+	case "dnf", "yum":
+		// 脚本保证 rc ∈ {0,100}（其它值已提前 exit 原码）
+		return out.Code == 100, nil
+	case "apt":
+		// awk 发现 >0 行时 exit 1；apt 自身网络错误为其它非零码，不误判
+		return out.Code == 1, nil
+	default:
+		// grep 探测：0 = 有升级，1 = 无升级
+		return out.Code == 0, nil
+	}
 }
 
 func (p *pkgManager) cmd(verb, name string) string {

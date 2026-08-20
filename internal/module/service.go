@@ -83,7 +83,11 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *R
 	if rc.CheckMode {
 		res := &Result{Changed: len(verbs) > 0}
 		if res.Changed {
-			res.Msg = fmt.Sprintf("[check] 将%s %s（%s）", verbFor(state), name, joinCN(logs))
+			if hasState {
+				res.Msg = fmt.Sprintf("[check] 将%s %s（%s）", verbFor(state), name, joinCN(logs))
+			} else {
+				res.Msg = fmt.Sprintf("[check] %s（%s）", name, joinCN(logs))
+			}
 		} else {
 			res.Msg = fmt.Sprintf("[check] %s 已是目标状态", name)
 		}

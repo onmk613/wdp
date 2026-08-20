@@ -84,6 +84,12 @@ func (m *SystemdUnitModule) Run(rc *RunContext, args map[string]any, free string
 	if hasContent == hasSrc {
 		return Fail("content 与 src 必须二选一")
 	}
+	if hasContent && content == "" {
+		return Fail("content 不能为空（模板渲染为空的 unit 文件会导致 systemd 不可用）")
+	}
+	if hasSrc && src == "" {
+		return Fail("src 不能为空")
+	}
 	destDir, _ := argStr(args, "dest_dir")
 	if destDir == "" {
 		destDir = "/etc/systemd/system"

@@ -32,7 +32,8 @@ func (m *UserModule) Params() []ParamDoc {
 		{Name: "state", Type: "string", Default: "present", Desc: "present 创建/校正；absent 删除（含 home）"},
 		{Name: "uid", Type: "int", Desc: "UID（已存在用户漂移时经 usermod -u 校正）"},
 		{Name: "group", Type: "string", Desc: "主组名（漂移时经 usermod -g 校正）"},
-		{Name: "groups", Type: "list", Desc: "附加组列表（漂移时经 usermod -G 整体覆盖）"},
+		{Name: "groups", Type: "list", Desc: "附加组列表（漂移时经 usermod -G 整体覆盖；append: true 时改为 -aG 只增不删）"},
+		{Name: "append", Type: "bool", Default: "false", Desc: "groups 只追加成员、不删除既有附加组（usermod -aG）"},
 		{Name: "shell", Type: "string", Desc: "登录 shell（漂移时经 usermod -s 校正）"},
 		{Name: "home", Type: "string", Desc: "home 目录（漂移时经 usermod -d -m 迁移内容）"},
 		{Name: "system", Type: "bool", Default: "false", Desc: "创建系统账号（useradd -r，仅创建时生效）"},
@@ -84,6 +85,7 @@ func (m *UserModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 	uid, hasUID := argInt(args, "uid")
 	primaryGroup, _ := argStr(args, "group")
 	groups, hasGroups := argStrList(args, "groups")
+	appendGroups, _ := argBool(args, "append")
 	shell, _ := argStr(args, "shell")
 	home, _ := argStr(args, "home")
 	system, _ := argBool(args, "system")
@@ -178,7 +180,7 @@ func (m *UserModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 	}
 
 	// present 且已存在：逐属性探测漂移，仅校正漂移项
-	drift, diffLines, bad := userDrift(rc, name, hasUID, uid, primaryGroup, hasGroups, groups, shell, home)
+	drift, diffLines, bad := userDrift(rc, name, hasUID, uid, primaryGroup, hasGroups, groups, appendGroups, shell, home)
 	if bad != nil {
 		return bad
 	}
@@ -203,7 +205,11 @@ func (m *UserModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 		flags = append(flags, "-g", shellquote.Quote(primaryGroup))
 	}
 	if hasGroups && containsStr(drift, "groups") {
-		flags = append(flags, "-G", shellquote.Quote(strings.Join(groups, ",")))
+		if appendGroups {
+			flags = append(flags, "-aG", shellquote.Quote(strings.Join(groups, ",")))
+		} else {
+			flags = append(flags, "-G", shellquote.Quote(strings.Join(groups, ",")))
+		}
 	}
 	if shell != "" && containsStr(drift, "shell") {
 		flags = append(flags, "-s", shellquote.Quote(shell))
@@ -222,7 +228,9 @@ func (m *UserModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 
 // userDrift 探测已存在用户的属性漂移，返回（漂移字段名列表、diff 行、失败）。
 // 仅比较显式提供的参数；groups 与主组并集后做集合比较保证幂等。
-func userDrift(rc *RunContext, name string, hasUID bool, uid int, primaryGroup string, hasGroups bool, groups []string, shell, home string) ([]string, []string, *Result) {
+// append=true 时 groups 语义为"确保成员"（不删除既有附加组，走 usermod -aG），
+// 避免整体覆盖把既有 wheel/sudo 之类附加组悄悄移除。
+func userDrift(rc *RunContext, name string, hasUID bool, uid int, primaryGroup string, hasGroups bool, groups []string, appendGroups bool, shell, home string) ([]string, []string, *Result) {
 	var drift, diff []string
 	if hasUID {
 		cur, bad := userUID(rc, name)
@@ -251,12 +259,18 @@ func userDrift(rc *RunContext, name string, hasUID bool, uid int, primaryGroup s
 		if bad != nil {
 			return nil, nil, bad
 		}
-		// 目标全集 = 附加组 + 主组（主组不在 -G 列表也保持成员关系，集合比较才收敛）
 		wantPrimary := primaryGroup
 		if wantPrimary == "" {
 			wantPrimary = curPrimary
 		}
-		want := sortUnique(append(append([]string{}, groups...), wantPrimary))
+		var want []string
+		if appendGroups {
+			// 确保成员：目标 = 当前全集 ∪ 附加组（主组恒保留，既有组不丢）
+			want = sortUnique(append(append([]string{}, curFull...), groups...))
+		} else {
+			// 整体覆盖：目标全集 = 附加组 + 主组
+			want = sortUnique(append(append([]string{}, groups...), wantPrimary))
+		}
 		if joinSorted(curFull) != joinSorted(want) {
 			drift = append(drift, "groups")
 			diff = append(diff, "- groups "+joinSorted(curFull), "+ groups "+joinSorted(want))

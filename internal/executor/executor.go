@@ -5,6 +5,8 @@ package executor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strings"
@@ -60,6 +62,9 @@ type Executor struct {
 
 	statsMu sync.Mutex
 	stats   map[string]*model.Stats // 当前 play 的统计（子 chart 子任务也计入）
+
+	deadMu    sync.Mutex
+	deadHosts map[string]bool // 本次 run 内失败/不可达的主机（后续 play 不再参与）
 }
 
 // hostRun 是单主机在单个 play 中的运行态。
@@ -73,7 +78,12 @@ type hostRun struct {
 	notified   map[string]bool
 	stats      *model.Stats
 	journal    []module.RollbackAction // 变更日志（auto_rollback 时快照恢复依据）
+	chartDepth int                     // chart 引用展开深度（防自引用/互引用递归崩溃）
 }
+
+// maxChartDepth 是 chart 引用展开的深度上限：
+// 合法的组件组合远小于此值，超过即视为环引用并报错（而非栈溢出崩溃）。
+const maxChartDepth = 32
 
 // playState 延续同一 play 内跨批次/跨 hook 的主机运行态：
 // register/facts 变量与回滚变更日志在批次间保持（修复原批次间 register 丢失）。
@@ -167,6 +177,7 @@ func New(inv *inventory.Inventory, conns *connection.Manager, rep report.Reporte
 		e.engine = render.DefaultEngine()
 	}
 	e.facts = map[string]map[string]any{}
+	e.deadHosts = map[string]bool{}
 	return e
 }
 
@@ -174,6 +185,10 @@ func New(inv *inventory.Inventory, conns *connection.Manager, rep report.Reporte
 func (e *Executor) Run(ctx context.Context, plays []*model.Play) bool {
 	anyFail := false
 	for _, p := range plays {
+		if ctx.Err() != nil {
+			e.Rep.PlayMsg("执行已取消（%v），终止剩余 play", ctx.Err())
+			return true
+		}
 		if e.runPlay(ctx, p) {
 			anyFail = true
 		}
@@ -181,14 +196,20 @@ func (e *Executor) Run(ctx context.Context, plays []*model.Play) bool {
 	return anyFail
 }
 
-// LastStats 返回最近一次 run 的汇总统计（部署记录用）。
+// LastStats 返回最近一次 run 的汇总统计快照（部署记录用）。
+// 返回深拷贝而非内部 map：调用方持有快照期间 run 仍可能写入，避免数据竞争。
 func (e *Executor) LastStats() map[string]*model.Stats {
 	e.statsMu.Lock()
 	defer e.statsMu.Unlock()
-	if e.stats == nil {
-		return map[string]*model.Stats{}
+	out := make(map[string]*model.Stats, len(e.stats))
+	for k, v := range e.stats {
+		if v == nil {
+			continue
+		}
+		c := *v
+		out[k] = &c
 	}
-	return e.stats
+	return out
 }
 
 func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
@@ -227,7 +248,7 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 	// 自动回滚快照目录（play 级唯一，hook 变更同样登记）
 	e.rollbackDir = ""
 	if p.Strategy != nil && p.Strategy.AutoRollback {
-		e.rollbackDir = fmt.Sprintf("/tmp/.wdp-rollback-%d", time.Now().UnixNano())
+		e.rollbackDir = "/tmp/.wdp-rollback-" + randSuffix()
 	}
 
 	// 跨批次/跨 hook 的主机运行态延续（register/facts/回滚日志）
@@ -265,6 +286,11 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 	}
 
 	for _, batch := range batches {
+		if ctx.Err() != nil {
+			e.Rep.PlayMsg("执行已取消（%v），终止剩余批次", ctx.Err())
+			failed = true
+			break
+		}
 		batchFailed, runs := e.runBatch(ctx, main, hosts, batch, stats, st)
 		executedRuns = append(executedRuns, runs...)
 		if batchFailed {
@@ -491,6 +517,10 @@ func (e *Executor) runBatch(ctx context.Context, p *model.Play, playHosts, hosts
 	started := e.Opts.StartAtTask == ""
 	taskFailed := false
 	for _, task := range p.Tasks {
+		if ctx.Err() != nil {
+			e.Rep.PlayMsg("执行已取消（%v），终止剩余任务", ctx.Err())
+			return true, runs
+		}
 		if !started {
 			if task.Label() == e.Opts.StartAtTask {
 				started = true
@@ -509,6 +539,7 @@ func (e *Executor) runBatch(ctx context.Context, p *model.Play, playHosts, hosts
 			if (r.res.Failed && !task.IgnoreErrors) || r.res.Unreachable {
 				r.hr.alive = false
 				taskFailed = true
+				e.markDead(r.hr.host.Name)
 			}
 		}
 		e.Rep.TaskDone()
@@ -518,26 +549,30 @@ func (e *Executor) runBatch(ctx context.Context, p *model.Play, playHosts, hosts
 		}
 	}
 
-	// flush handlers
-	notifiedList := collectNotified(runs, p.Handlers)
-	notified := map[string]bool{}
-	for _, n := range notifiedList {
-		notified[n] = true
-	}
+	// flush handlers：每个 handler 只在通知了它的主机上执行
+	// （Ansible 语义：h2 未变更则不在 h2 重启服务）。
+	notifiedList, notifiedByHost := collectNotified(runs, p.Handlers)
 	if len(notifiedList) > 0 {
 		e.Rep.PlayMsg("触发 handlers: %s", strings.Join(notifiedList, ", "))
 		for _, h := range p.Handlers {
-			if !notified[h.Name] {
+			if !contains(notifiedList, h.Name) {
 				continue
 			}
+			targets := make([]*hostRun, 0, len(runs))
+			for _, hr := range runs {
+				if notifiedByHost[hr.host.Name][h.Name] && hr.alive {
+					targets = append(targets, hr)
+				}
+			}
 			e.Rep.TaskStart(h.Label()+" (handler)", h.Module)
-			results := e.fanOut(ctx, p, h, runs)
+			results := e.fanOut(ctx, p, h, targets)
 			for _, r := range results {
 				e.recordResult(r.hr, r.res, stats, false)
 				e.Rep.HostResult(r.hr.host.Name, r.res)
 				if r.res.Failed || r.res.Unreachable {
 					r.hr.alive = false
 					taskFailed = true
+					e.markDead(r.hr.host.Name)
 				}
 			}
 			e.Rep.TaskDone()
@@ -714,6 +749,11 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 			if !render.Truthy(s) {
 				res.Skipped = true
 				res.SkipReason = cond
+				// Ansible 语义：跳过的任务同样 register（含 skipped=true），
+				// 使 `when: not r.skipped` 之类的惯用法可用
+				if task.Register != "" {
+					hr.vars[task.Register] = resultData(res)
+				}
 				return res
 			}
 		}
@@ -821,6 +861,11 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 			if scriptPath == "" {
 				return fail(res, fmt.Errorf("未知模块 %q", task.Module))
 			}
+		} else {
+			// 参数校验：未知键/非法 bool/mode 直接报错（杜绝拼写错误静默失效）
+			if verr := module.ValidateArgs(mod, args, free); verr != nil {
+				return fail(res, verr)
+			}
 		}
 		rc := &module.RunContext{
 			Ctx:        taskCtx,
@@ -835,6 +880,10 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 			TimeoutMs:  int64(timeoutSec) * 1000,
 			CheckMode:  e.Opts.CheckMode,
 			DiffMode:   e.Opts.DiffMode,
+		}
+		// 脚本模块 check 模式需 chart.yaml 显式声明 check_mode: supported
+		if e.Opts.Chart != nil {
+			rc.CheckScriptAllowed = bool(e.Opts.Chart.Meta.CheckMode)
 		}
 		// auto_rollback：注入变更日志（文件类模块登记快照/删除动作）
 		if p.Strategy != nil && p.Strategy.AutoRollback && !e.Opts.CheckMode && e.rollbackDir != "" {
@@ -858,6 +907,7 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 		applyModule := func(mr *module.Result) {
 			r.Changed = mr.Changed
 			r.Failed = mr.Failed
+			r.Skipped = mr.Skipped
 			r.Msg = mr.Msg
 			r.Stdout = truncateOut(mr.Stdout)
 			r.Stderr = truncateOut(mr.Stderr)
@@ -885,11 +935,11 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 		}
 
 		if task.Until != "" {
-			// until 轮询：retries=总尝试上限（默认 3），delay=轮询间隔秒数（0 不等待）；
-			// 条件满足采用当轮结果；耗尽则按失败计（即使模块本身成功）。
-			attempts := task.Retries
-			if attempts <= 0 {
-				attempts = 3
+			// until 轮询：retries 表示重试次数，总尝试 = retries + 1（未设置时默认 3，同 Ansible）；
+			// delay=轮询间隔秒数（0 不等待）；条件满足采用当轮结果；耗尽则按失败计。
+			attempts := 3
+			if task.Retries > 0 {
+				attempts = task.Retries + 1
 			}
 			delay := task.DelaySec
 			var last *module.Result
@@ -1023,7 +1073,8 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 	// register
 	if task.Register != "" {
 		data := resultData(res)
-		if len(loopResults) > 0 {
+		if task.Loop != nil {
+			// 空 loop 同样产出 results: []（下游 len .r.results 不炸）
 			list := make([]any, len(loopResults))
 			for i, lr := range loopResults {
 				list[i] = resultData(lr)
@@ -1049,6 +1100,15 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 		res.Msg = "chart 引用仅在 chart 模式下可用（wdp run <chart目录|tgz>）"
 		return res
 	}
+	// 环引用防护：chart 自引用/互引用会在此递归展开中无限下钻，
+	// 超过深度上限即报错终止（Go 栈溢出无法 recover，必须前置拦截）。
+	if hr.chartDepth >= maxChartDepth {
+		res.Failed = true
+		res.Msg = fmt.Sprintf("chart 引用展开超过深度上限 %d（可能存在环引用: %s）", maxChartDepth, task.ChartRef)
+		return res
+	}
+	hr.chartDepth++
+	defer func() { hr.chartDepth-- }()
 	sub, serr := e.Opts.Chart.ResolveSub(task.ChartRef)
 	if sub == nil {
 		res.Failed = true
@@ -1222,7 +1282,7 @@ func (e *Executor) selectHosts(pattern string) ([]*model.Host, error) {
 		return nil, err
 	}
 	if e.Opts.Limit == "" {
-		return hosts, nil
+		return e.filterDead(hosts), nil
 	}
 	limited, err := e.Inv.Select(e.Opts.Limit)
 	if err != nil {
@@ -1238,7 +1298,33 @@ func (e *Executor) selectHosts(pattern string) ([]*model.Host, error) {
 			out = append(out, h)
 		}
 	}
-	return out, nil
+	return e.filterDead(out), nil
+}
+
+// filterDead 剔除本次 run 内已失败/不可达的主机（后续 play 不再参与，
+// 避免在安装失败的节点上继续执行启动类 play）。
+func (e *Executor) filterDead(hosts []*model.Host) []*model.Host {
+	e.deadMu.Lock()
+	defer e.deadMu.Unlock()
+	if len(e.deadHosts) == 0 {
+		return hosts
+	}
+	out := hosts[:0:0]
+	for _, h := range hosts {
+		if e.deadHosts[h.Name] {
+			e.Rep.PlayMsg("%s 此前失败，跳过本 play", h.Name)
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// markDead 登记不可继续参与后续 play 的主机。
+func (e *Executor) markDead(host string) {
+	e.deadMu.Lock()
+	e.deadHosts[host] = true
+	e.deadMu.Unlock()
 }
 
 func taskSelected(t *model.Task, opts Options) bool {
@@ -1262,15 +1348,21 @@ func taskSelected(t *model.Task, opts Options) bool {
 	return true
 }
 
-func collectNotified(runs []*hostRun, handlers []*model.Task) []string {
+// collectNotified 汇总 handler 通知：返回（有序通知列表，主机 → 通知集合）。
+// 每台主机独立记录，handler 派发按主机过滤（不全局扇出）。
+func collectNotified(runs []*hostRun, handlers []*model.Task) ([]string, map[string]map[string]bool) {
+	byHost := map[string]map[string]bool{}
 	set := map[string]bool{}
 	for _, hr := range runs {
 		if !hr.alive {
 			continue
 		}
+		m := map[string]bool{}
 		for n := range hr.notified {
+			m[n] = true
 			set[n] = true
 		}
+		byHost[hr.host.Name] = m
 	}
 	var out []string
 	for _, h := range handlers {
@@ -1279,7 +1371,16 @@ func collectNotified(runs []*hostRun, handlers []*model.Task) []string {
 		}
 	}
 	sort.Strings(out)
-	return out
+	return out, byHost
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // splitBatches 按 serial 表达式分批："5"（每批 5 台）/"10%"（百分比）/
@@ -1385,8 +1486,20 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 
 	blockFailed, unreachable, msgs := runSeq(task.Block)
 	if unreachable {
+		// always 语义是"无论如何都要执行的清理"，主机不可达时仍应尝试
+		// （连接故障时 always 任务会各自报 unreachable，但不会被静默跳过）
 		res.Unreachable = true
 		res.Msg = strings.Join(msgs, "; ")
+		if len(task.Always) > 0 {
+			if _, un, amsgs := runSeq(task.Always); un {
+				res.Msg = strings.Join(append(msgs, amsgs...), "; ")
+			} else {
+				res.Msg += "（always 已尝试执行）"
+			}
+		}
+		res.Task = task.Label()
+		res.Module = "block"
+		res.Host = hr.host.Name
 		return res
 	}
 
@@ -1402,6 +1515,12 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 			if resUnreachable {
 				res.Unreachable = true
 				res.Msg = strings.Join(rmsgs, "; ")
+				if _, un, amsgs := runSeq(task.Always); un {
+					res.Msg = strings.Join(append(rmsgs, amsgs...), "; ")
+				}
+				res.Task = task.Label()
+				res.Module = "block"
+				res.Host = hr.host.Name
 				return res
 			}
 			if rescueFailed {
@@ -1452,6 +1571,16 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// randSuffix 生成不可预测的临时路径后缀（回滚快照目录），
+// 避免 UnixNano 可预测路径在远端 /tmp 被预创建符号链接劫持。
+func randSuffix() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }
 
 // localOnce 复用的 localhost 主机（delegate_to: localhost 目标）。

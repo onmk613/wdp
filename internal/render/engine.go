@@ -22,10 +22,17 @@ func DefaultEngine() *Engine { return defaultEngine }
 // newEngine 构造引擎骨架（include 以闭包自引用注册，helpers 解析期即可用）。
 // 函数集 = sprig 全集（Helm 同款成熟库）打底 + wdp 自有函数覆盖：
 // 自有函数签名优先（join/split/default 等保持 wdp 既有语义，旧 chart 不破坏）。
+// 安全考量：与 Helm 一致地移除 env/expandenv（chart 模板不得读取控制端
+// 环境变量——其中可能含 WDP_CA_PASSPHRASE 与各类 *_env 密钥）以及
+// getHostByName（DNS 查询可被用作隐蔽外传信道）。
 func newEngine() *Engine {
 	e := &Engine{}
+	fm := sprig.TxtFuncMap()
+	delete(fm, "env")
+	delete(fm, "expandenv")
+	delete(fm, "getHostByName")
 	e.base = template.New("wdp").
-		Funcs(sprig.TxtFuncMap()).
+		Funcs(fm).
 		Funcs(funcs).
 		Funcs(template.FuncMap{
 			"include": func(name string, data any) (string, error) {

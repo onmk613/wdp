@@ -5,7 +5,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"time"
 
 	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
@@ -147,7 +146,7 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, free string) 
 		if err != nil {
 			return Fail("读取本地归档失败: %v", err)
 		}
-		remoteArc = fmt.Sprintf("/tmp/.wdp-arc-%d", time.Now().UnixNano())
+		remoteArc = "/tmp/.wdp-arc-" + tempSuffix()
 		if err := uploadBytes(rc, remoteArc, data, 0o600, true); err != nil {
 			return Fail("上传归档失败: %v", err)
 		}

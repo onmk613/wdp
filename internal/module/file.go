@@ -29,7 +29,14 @@ func (m *FileModule) Desc() string {
 func (m *FileModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	path, ok := argStr(args, "path")
 	if !ok || path == "" {
-		return Fail("file 需要 path 参数")
+		// dest 别名：与 copy/template/get_url/unarchive 保持一致的键名
+		if alias, aok := argStr(args, "dest"); aok && alias != "" {
+			path = alias
+			ok = true
+		}
+	}
+	if !ok || path == "" {
+		return Fail("file 需要 path 参数（或 dest 别名）")
 	}
 	state, _ := argStr(args, "state")
 	switch state {
@@ -280,7 +287,8 @@ func changeLabel(would bool) string {
 // Params 参数文档。
 func (m *FileModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "path", Type: "string", Desc: "远端路径（必需）"},
+		{Name: "path", Type: "string", Desc: "远端路径（必需；dest 为等价别名）"},
+		{Name: "dest", Type: "string", Desc: "path 的别名（与 copy/template 等模块键名一致）"},
 		{Name: "state", Type: "string", Desc: "file/directory/link/touch/absent"},
 		{Name: "mode", Type: "mode", Desc: "权限，如 0755"},
 		{Name: "owner", Type: "string", Desc: "属主（需 become）"},
@@ -300,7 +308,7 @@ func (m *FileModule) Example() string {
 - name: 当前版本软链
   file:
     src: "{{ .global.workdir }}/releases/v1"
-    dest: "{{ .global.workdir }}/current"
+    path: "{{ .global.workdir }}/current"
     state: link
 `
 }

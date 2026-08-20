@@ -4,17 +4,31 @@ package module
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"wdp/internal/connection"
 	"wdp/internal/model"
 	"wdp/internal/render"
 	"wdp/internal/shellquote"
 )
+
+// tempSuffix 生成不可预测的临时文件后缀（crypto/rand）：
+// 远端 /tmp 下 UnixNano 时间戳路径可被本机低权限用户预创建符号链接劫持
+// （上传/执行/快照重定向到任意路径）。
+func tempSuffix() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano()) // crypto/rand 故障兜底
+	}
+	return hex.EncodeToString(b)
+}
 
 // RunContext 是模块执行上下文（单主机、单任务项）。
 type RunContext struct {
@@ -30,7 +44,11 @@ type RunContext struct {
 	TimeoutMs  int64          // 任务超时毫秒（0 不限），透传给连接层
 	CheckMode  bool           // check 模式：模块预演不实际变更
 	DiffMode   bool           // diff 模式：check 下产出内容级差异
-	Rollback   *RollbackCtx   // auto_rollback 时的变更日志（nil = 不记录）
+	// CheckScriptAllowed 由 executor 依据 chart.yaml 的 check_mode: supported
+	// 声明注入：未声明时脚本模块在 check 模式下直接跳过（脚本是外部代码，
+	// 无法保证预演安全），避免 --check 意外执行第三方脚本造成变更。
+	CheckScriptAllowed bool
+	Rollback           *RollbackCtx // auto_rollback 时的变更日志（nil = 不记录）
 }
 
 // RollbackAction 是一条可回滚变更：
@@ -77,6 +95,7 @@ func pathDirOf(p string) string {
 type Result struct {
 	Changed bool
 	Failed  bool
+	Skipped bool // 模块主动跳过（如 check 模式下未声明的脚本模块）
 	Msg     string
 	Stdout  string
 	Stderr  string
@@ -225,6 +244,10 @@ func argStrList(args map[string]any, key string) ([]string, bool) {
 	}
 }
 
+// argBool 解析布尔参数。除 Go 原生 true/false 外，
+// 兼容 YAML 1.1 / Ansible 惯用写法 yes/no/on/off/1/0（大小写不敏感）。
+// 无法解析时返回 ok=false（视为未提供）；ValidateArgs 会在派发前对
+// bool 类型参数做严格校验，因此这里不会把 "maybe" 静默当 false。
 func argBool(args map[string]any, key string) (bool, bool) {
 	v, ok := args[key]
 	if !ok || v == nil {
@@ -233,15 +256,36 @@ func argBool(args map[string]any, key string) (bool, bool) {
 	switch x := v.(type) {
 	case bool:
 		return x, true
-	case string:
-		b, err := strconv.ParseBool(x)
-		return b, err == nil
-	default:
+	case int:
+		if x == 0 {
+			return false, true
+		}
+		if x == 1 {
+			return true, true
+		}
 		return false, false
+	case float64: // YAML 解析器可能产出浮点
+		if x == 0 {
+			return false, true
+		}
+		if x == 1 {
+			return true, true
+		}
+		return false, false
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true", "yes", "on", "1":
+			return true, true
+		case "false", "no", "off", "0":
+			return false, true
+		}
 	}
+	return false, false
 }
 
 // argMode 解析 mode 参数："0755" / 0755(yaml 八进制整数) / 493。
+// yaml.v3 对含 8/9 的纯数字（如 0999）会解析成 float64——八进制里
+// 8/9 非法，一律拒绝（ok=false），不再静默丢弃。
 func argMode(args map[string]any, key string) (fs.FileMode, bool) {
 	v, ok := args[key]
 	if !ok || v == nil {
@@ -250,6 +294,11 @@ func argMode(args map[string]any, key string) (fs.FileMode, bool) {
 	switch x := v.(type) {
 	case int:
 		return fs.FileMode(x), true
+	case float64:
+		if x != float64(int64(x)) || x < 0 || x >= 512 {
+			return 0, false
+		}
+		return fs.FileMode(int64(x)), true
 	case string:
 		s := strings.TrimSpace(x)
 		base := 10
@@ -264,4 +313,83 @@ func argMode(args map[string]any, key string) (fs.FileMode, bool) {
 	default:
 		return 0, false
 	}
+}
+
+// ValidateArgs 在模块派发前校验任务参数（executor 调用）：
+//   - 未知键直接报错（附相似键建议）——杜绝 moed/ownerr 之类拼写错误静默失效；
+//   - bool 类型参数拒绝无法解析的值（如 "maybe"）；
+//   - mode 类型参数拒绝非法值。
+//
+// free 非空表示任务使用了 free-form 写法（如 `command: ls -l`），
+// 仅声明了 "(free-form)" 参数的模块接受该写法。
+// 未实现 UsageProvider（无参数元数据）时跳过校验。
+func ValidateArgs(m Module, args map[string]any, free string) error {
+	params := Usage(m)
+	if params == nil {
+		return nil
+	}
+	allowed := make(map[string]ParamDoc, len(params))
+	for _, p := range params {
+		allowed[p.Name] = p
+	}
+	if free != "" {
+		if _, ok := allowed["(free-form)"]; !ok {
+			return fmt.Errorf("模块 %s 不接受 free-form 写法", m.Name())
+		}
+	}
+	for k, v := range args {
+		doc, ok := allowed[k]
+		if !ok {
+			if s := suggestKey(k, params); s != "" {
+				return fmt.Errorf("模块 %s 存在未知参数 %q（是否为 %q？）", m.Name(), k, s)
+			}
+			return fmt.Errorf("模块 %s 存在未知参数 %q", m.Name(), k)
+		}
+		switch doc.Type {
+		case "bool":
+			if _, ok := argBool(args, k); !ok {
+				return fmt.Errorf("模块 %s 参数 %s 需要布尔值（true/false/yes/no），得到 %v", m.Name(), k, v)
+			}
+		case "mode":
+			if _, ok := argMode(args, k); !ok {
+				return fmt.Errorf("模块 %s 参数 %s 需要合法权限值（如 \"0755\"），得到 %v", m.Name(), k, v)
+			}
+		}
+	}
+	return nil
+}
+
+// suggestKey 返回与未知键最相似的合法参数名（编辑距离 ≤ 2 时给出建议）。
+func suggestKey(unknown string, params []ParamDoc) string {
+	best, bestDist := "", 3
+	for _, p := range params {
+		d := editDistance(unknown, p.Name)
+		if d < bestDist {
+			best, bestDist = p.Name, d
+		}
+	}
+	return best
+}
+
+// editDistance 经典 Levenshtein 距离（参数名都很短，无需优化）。
+func editDistance(a, b string) int {
+	la, lb := len(a), len(b)
+	dp := make([][]int, la+1)
+	for i := range dp {
+		dp[i] = make([]int, lb+1)
+		dp[i][0] = i
+	}
+	for j := 0; j <= lb; j++ {
+		dp[0][j] = j
+	}
+	for i := 1; i <= la; i++ {
+		for j := 1; j <= lb; j++ {
+			cost := 0
+			if a[i-1] != b[j-1] {
+				cost = 1
+			}
+			dp[i][j] = min(dp[i-1][j]+1, dp[i][j-1]+1, dp[i-1][j-1]+cost)
+		}
+	}
+	return dp[la][lb]
 }

@@ -66,6 +66,7 @@ func SortGroups(groups []string) []string {
 func (m *GroupByModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "name", Type: "string", Desc: "组名表达式（模板渲染后为组名；亦可用 free-form）"},
+		{Name: "(free-form)", Type: "string", Desc: "组名表达式（name 的简写形式）"},
 		{Name: "prefix", Type: "string", Desc: "可选前缀（组名 = prefix-name）"},
 	}
 }

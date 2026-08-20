@@ -43,7 +43,7 @@ playbook 是 play 列表；每个 play 选一批主机、按顺序执行任务�
   tags: [install]              # 标签筛选
   environment: {FOO: bar}      # 任务级环境变量
   ignore_errors: true          # 失败不中断该主机后续任务
-  retries: 3                   # 重试次数（配合 delay；until 时为总尝试上限）
+  retries: 3                   # 重试次数（配合 delay；until 时总尝试 = retries+1，同 Ansible）
   delay: 5                     # 重试/轮询间隔秒
   timeout: 120                 # 任务超时秒（0/-1 不限）
   become: true                 # 任务级提权覆盖
@@ -164,7 +164,7 @@ register 变量**跨批次、跨 play 延续**（serial 分批时第一批注册
 - name: 等待服务就绪
   shell: 'curl -sf http://localhost:8080/health'
   until: '{{ if eq .result.rc 0 }}ok{{ end }}'
-  retries: 10       # 总尝试上限（缺省 3）
+  retries: 10       # 重试次数：总尝试 = retries+1（缺省 3 次，同 Ansible）
   delay: 3          # 间隔秒
   timeout: 120      # 任务级超时兜底
 ```

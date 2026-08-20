@@ -204,7 +204,10 @@ func build(raw rawInventory, varDirs []string) (*Inventory, error) {
 	// 构建主机对象并回填组成员
 	inv.Hosts = make([]*model.Host, 0, len(hostRaw))
 	for hname, hvars := range hostRaw {
-		h := buildHost(hname, hvars)
+		h, err := buildHost(hname, hvars)
+		if err != nil {
+			return nil, fmt.Errorf("主机 %s: %w", hname, err)
+		}
 		hostIndex[hname] = h
 		inv.Hosts = append(inv.Hosts, h)
 	}
@@ -407,7 +410,7 @@ var hostKeys = map[string]bool{
 	"tls": true, "insecure_skip_verify": true,
 }
 
-func buildHost(name string, vars map[string]any) *model.Host {
+func buildHost(name string, vars map[string]any) (*model.Host, error) {
 	// 连接默认值取 wdp.cfg 的 [ssh]（主机条目未显式指定的键生效）
 	cfg := config.Current()
 	h := &model.Host{
@@ -449,7 +452,12 @@ func buildHost(name string, vars map[string]any) *model.Host {
 		case "agent_port":
 			h.AgentPort = toInt(v, 0)
 		case "host_key_check":
-			h.HostKeyCheck, _ = v.(bool)
+			// 严格解析：非布尔值直接报错（静默当 false 会关闭指纹校验）
+			b, err := model.ParseBool(v)
+			if err != nil {
+				return nil, fmt.Errorf("host_key_check: %w", err)
+			}
+			h.HostKeyCheck = b
 		case "known_hosts":
 			h.KnownHosts = fmt.Sprint(v)
 		case "connect_timeout":
@@ -467,21 +475,33 @@ func buildHost(name string, vars map[string]any) *model.Host {
 		case "binary_path":
 			h.BinaryPath = fmt.Sprint(v)
 		case "keep_agent":
-			h.KeepAgent, _ = v.(bool)
+			b, err := model.ParseBool(v)
+			if err != nil {
+				return nil, fmt.Errorf("keep_agent: %w", err)
+			}
+			h.KeepAgent = b
 		case "become_password":
 			h.BecomePassword = fmt.Sprint(v)
 		case "become_password_env":
 			h.BecomePasswordEnv = fmt.Sprint(v)
 		case "tls":
-			h.TLS, _ = v.(bool)
+			b, err := model.ParseBool(v)
+			if err != nil {
+				return nil, fmt.Errorf("tls: %w", err)
+			}
+			h.TLS = b
 		case "insecure_skip_verify":
-			h.InsecureSkipVerify, _ = v.(bool)
+			b, err := model.ParseBool(v)
+			if err != nil {
+				return nil, fmt.Errorf("insecure_skip_verify: %w", err)
+			}
+			h.InsecureSkipVerify = b
 		}
 	}
 	if h.Address == "" {
 		h.Address = name
 	}
-	return h
+	return h, nil
 }
 
 func toInt(v any, def int) int {

@@ -48,7 +48,7 @@ inventory 主机条目通过 `conn` 选择连接类型：
 |---|---|---|
 | `ssh`（默认） | 标准 SSH（base64 脚本传输，SFTP 优先/降级 exec 流式） | 认证链：私钥（`key_passphrase` 支持口令）→ ssh-agent → 默认密钥 → `password`/`password_env`（含 keyboard-interactive）；`host_key_check: true` 启用 known_hosts 校验；`become_password` 支持密码 sudo |
 | `agent` | 常驻 HTTP(S) agent 直连 | 无认证 / token（`token`/`token_env`）/ mTLS（`ca_file`+`cert_file`+`key_file`） |
-| `push` | SSH 自举临时 agent：上传自身二进制与随机 token 文件（ps 不可见）→ 远端**真端口**启动（默认 7602，`agent_port` 可指定，占用自动换端口）→ 控制端直连 HTTP（不经 SSH 隧道）→ 结束自删（`keep_agent: true` 保留） | token（自动随机生成）；自举失败自动回退纯 SSH |
+| `push` | SSH 自举临时 agent：上传自身二进制与随机 token 文件（ps 不可见）→ 远端**真端口**启动（默认 7602，`agent_port` 可指定，占用自动换端口）→ 控制端直连 HTTP（不经 SSH 隧道）→ 结束自删（`keep_agent: true` 保留）。⚠️ 明文 HTTP：token 与 become 密码明文过网，仅在可信内网使用（启动时输出告警） | token（自动随机生成）；自举失败自动回退纯 SSH |
 | `local` | 本机执行（演练/CI） | 无（注意：local 通道忽略 become） |
 
 敏感值支持 `env:VAR` 引用或 `*_env` 独立键（`password_env`/`token_env`/`become_password_env`…），避免 inventory 明文。
@@ -152,7 +152,7 @@ Ansible 风格 YAML（模块名作为任务 key）：
     - name: 等待服务就绪（until 轮询，.result 引用本轮结果）
       shell: 'curl -sf http://localhost:{{ .nginx_port }}/health'
       until: '{{ if eq .result.rc 0 }}ok{{ end }}'
-      retries: 10
+      retries: 10       # 重试次数：总尝试 = retries+1（同 Ansible）
       delay: 3
       timeout: 120
 
@@ -313,8 +313,10 @@ modules/
   my-check: {timeout: 5}
 ```
 
-契约：参数经环境变量注入（`WDP_MODULE_ARGS` JSON 对象 / `WDP_FREE_FORM` 原文），
-check 模式注入 `WDP_CHECK=1` 由脚本自行预演；stdout 输出
+契约：参数经环境变量注入（`WDP_MODULE_ARGS` JSON 对象 / `WDP_FREE_FORM` 原文）。
+check 模式下脚本模块默认**跳过**（脚本是外部代码，`--check` 不保证预演安全）；
+chart.yaml 显式声明 `check_mode: supported` 后才会执行并注入 `WDP_CHECK=1`，
+由脚本自行返回只读预演结果。stdout 输出
 `{"changed":..,"failed":..,"msg":".."}` 精确判定，缺省 rc==0 即变更。
 应用包无需改 wdp 源码即可扩展模块，且 SSH/agent 通道行为一致。
 

@@ -38,6 +38,8 @@ required:                       # 必填 values 点路径：合并后缺失任�
 
 marker_dir: /var/lib/wdp        # 目标机 release marker 目录（缺省此值）
 no_marker: false                # true 不写 marker
+check_mode: supported           # 声明脚本模块（modules/）支持 check 模式预演；
+                                # 未声明时脚本模块在 --check 下被跳过
 ```
 
 ## 三层 values 叠加

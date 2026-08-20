@@ -6,7 +6,9 @@ package sshconn
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -194,7 +196,7 @@ func (c *Conn) UploadFile(ctx context.Context, dst string, r io.Reader, mode fs.
 		if err := mkdirRemote(c.sftp, path.Dir(dst)); err != nil {
 			return fmt.Errorf("创建远端目录失败: %w", err)
 		}
-		tmp := fmt.Sprintf("%s/.wdp.upload.%d", path.Dir(dst), time.Now().UnixNano())
+		tmp := fmt.Sprintf("%s/.wdp.upload.%s", path.Dir(dst), randHex())
 		f, err := c.sftp.Create(tmp)
 		if err != nil {
 			return fmt.Errorf("创建远端临时文件失败: %w", err)
@@ -472,4 +474,14 @@ func KnownHostsLine(h *model.Host, key ssh.PublicKey) string {
 		marker = fmt.Sprintf("[%s]:%d", h.Address, h.Port)
 	}
 	return knownhosts.Line([]string{marker}, key)
+}
+
+// randHex 返回不可预测的 8 字节随机十六进制串（上传临时文件后缀），
+// 避免 UnixNano 可预测路径被远端本机用户预创建符号链接劫持。
+func randHex() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
 }

@@ -37,19 +37,24 @@ func T(en, zh string) string {
 
 // Resolve 根据用户偏好解析语言并全局生效：
 // zh/en 直接采用，auto/空 则按「中国时区 + 中文编码支持」自动检测。
+// 与 T 共用同一把锁（此前写入未加锁，与 T 的读形成潜在竞态）。
 func Resolve(pref string) Lang {
+	resolved := Lang(En)
 	switch normalize(Lang(pref)) {
 	case Zh:
-		lang = Zh
+		resolved = Zh
 	case En:
-		lang = En
+		resolved = En
 	default:
 		if isChinaRegion() && isUTF8Terminal() {
-			lang = Zh
+			resolved = Zh
 		} else {
-			lang = En
+			resolved = En
 		}
 	}
+	mu.Lock()
+	lang = resolved
+	mu.Unlock()
 	return lang
 }
 

@@ -83,7 +83,11 @@ Go text/template，`missingkey=error`（**未定义变量直接报错**，尽早
 | 数学 | `add` `sub` `mul` `div` `mod` `max` `min` `ceil` `floor` `round` `add1` |
 | 日期 | `now` `date` `dateInZone` `dateModify` `duration` `unixEpoch` `htmlDate` `toDate` |
 | 编码 | `b64enc` `b64dec` `b32enc` `b32dec` `toJson` `toToml` `toYaml`（注：sprig 的 toYaml 返回带引号 YAML；wdp 建议用下述 `to_yaml`） |
-| 流程 | `fail` `env` `expandenv` `uuidv4` `semver` `semverCompare` `regexQuoteMeta` |
+| 流程 | `fail` `uuidv4` `semver` `semverCompare` `regexQuoteMeta` |
+
+> **安全说明**：与 Helm 一致，`env` / `expandenv` 已移除——chart 模板不得读取
+> 控制端环境变量（其中可能含 `WDP_CA_PASSPHRASE` 与各类 `*_env` 密钥）；
+> `getHostByName` 同样移除（DNS 查询可被用作隐蔽外传信道）。
 
 ### wdp 自有函数（覆盖 sprig 同名，保持旧 chart 兼容）
 

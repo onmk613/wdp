@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
@@ -54,6 +55,39 @@ func Secret(direct, envKey string) string {
 		return os.Getenv(rest)
 	}
 	return direct
+}
+
+// ParseBool 严格解析布尔配置值：接受 bool、字符串 true/false/yes/no/on/off/1/0
+// （大小写不敏感，兼容 Ansible/YAML 1.1 惯用写法）与数值 0/1。
+// 其它值返回错误——布尔配置静默当 false 是安全漏洞源
+// （host_key_check: yes 会悄悄关闭指纹校验、no_log: yes 会泄露输出）。
+func ParseBool(v any) (bool, error) {
+	switch x := v.(type) {
+	case bool:
+		return x, nil
+	case int:
+		switch x {
+		case 0:
+			return false, nil
+		case 1:
+			return true, nil
+		}
+	case float64: // YAML 解析器可能产出浮点
+		switch x {
+		case 0:
+			return false, nil
+		case 1:
+			return true, nil
+		}
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true", "yes", "on", "1":
+			return true, nil
+		case "false", "no", "off", "0":
+			return false, nil
+		}
+	}
+	return false, fmt.Errorf("无法解析为布尔值: %v", v)
 }
 
 // Clone 深拷贝主机（变量单独一份，供每主机独立变量域使用）。

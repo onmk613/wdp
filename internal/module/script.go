@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
@@ -45,7 +44,7 @@ func (m *ScriptModule) Run(rc *RunContext, args map[string]any, free string) *Re
 		return &Result{Changed: true, Msg: fmt.Sprintf("[check] 将执行: %s %s", src, scriptArgs)}
 	}
 
-	remote := fmt.Sprintf("/tmp/.wdp-script-%d", time.Now().UnixNano())
+	remote := "/tmp/.wdp-script-" + tempSuffix()
 	if err := uploadBytes(rc, remote, data, 0o755, true); err != nil {
 		return Fail("上传脚本失败: %v", err)
 	}

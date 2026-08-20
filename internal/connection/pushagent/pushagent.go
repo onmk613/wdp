@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"wdp/internal/config"
@@ -29,6 +30,9 @@ import (
 	"wdp/internal/model"
 	"wdp/internal/shellquote"
 )
+
+// warnOnce 保证明文直连告警整个进程只打印一次。
+var warnOnce sync.Once
 
 func init() {
 	connection.RegisterFactory("push", func(h *model.Host) (connection.Connection, error) {
@@ -60,6 +64,11 @@ func (c *Conn) Connect(ctx context.Context) error {
 		return nil // 降级：保留 SSH 连接继续执行
 	}
 	c.started = true
+	// 安全告警：临时 agent 以明文 HTTP 对外监听，token 与 become 密码将明文过网。
+	// 仅在可信内网使用；跨不可信网络的场景请用 conn: ssh 或常驻 agent + mTLS。
+	warnOnce.Do(func() {
+		fmt.Fprintln(os.Stderr, "[push] 警告: 临时 agent 经明文 HTTP 直连（token 明文传输），请仅在可信内网使用；跨不可信网络请改用 conn: ssh 或常驻 agent+mTLS")
+	})
 	// 自举完成，SSH 连接使命结束（清理由 agent 自删 + shutdown 完成）
 	_ = c.ssh.Close()
 	return nil
