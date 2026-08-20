@@ -573,7 +573,7 @@ func (inv *Inventory) applyVars(hostIndex map[string]*model.Host) {
 	}
 }
 
-// Select 按模式选择主机。表达式语法（Ansible 风格子集）：
+// Select 按模式选择主机。表达式语法：
 //
 //	逗号联合：webservers,dbservers；! 前缀排除：all,!web1
 //	:& 交集：webservers:&production（可链式 a:&b:&c）

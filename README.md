@@ -1,6 +1,6 @@
 # wdp
 
-用 Go 完全重写的 Ansible 替代品。单二进制、零运行时依赖，
+Go 实现的自动化部署工具：单二进制、零运行时依赖，
 支持 **SSH** / **常驻 agent** / **push 临时 agent** 三种远程通道，
 Helm 风格 chart 打包与多环境精准部署。
 
@@ -8,16 +8,16 @@ Helm 风格 chart 打包与多环境精准部署。
 > playbook 全语法、19 个内置模块手册、chart 应用包与生命周期、values 与模板函数、
 > 输出控制、check/diff 预演、CLI 全量参考、最佳实践与 FAQ。
 
-## 为什么重写
+## 设计要点
 
-| Ansible 的痛点 | wdp 的做法 |
+| 设计取舍 | wdp 的做法 |
 |---|---|
-| 控制端依赖 Python 环境 | 单静态二进制（交叉编译开箱即用） |
-| 目标端需要 Python | SSH 通道仅需 POSIX sh；agent 通道零依赖 |
-| Jinja2 复杂且难以内嵌 | Go text/template（sprig 全集 + to_yaml/from_yaml） |
-| galaxy/role 体系复杂 | chart 子 chart 组合（values 命名空间隔离 + global 共享 + `@版本` 约束） |
+| 控制端环境依赖 | 单静态二进制（交叉编译开箱即用） |
+| 目标端依赖 | SSH 通道仅需 POSIX sh；agent 通道零依赖 |
+| 模板语言复杂度 | Go text/template（sprig 全集 + to_yaml/from_yaml） |
+| 应用包依赖体系 | chart 子 chart 组合（values 命名空间隔离 + global 共享 + `@版本` 约束） |
 | 每任务重复 SSH 握手 | 连接按主机复用；agent 直连常驻免握手 |
-| 自定义模块要写 Python 包 | chart 自带脚本模块（`modules/<名>` 可执行文件即模块） |
+| 自定义模块扩展成本 | chart 自带脚本模块（`modules/<名>` 可执行文件即模块） |
 
 ## 快速开始
 
@@ -110,7 +110,7 @@ production:
 
 ## Playbook
 
-Ansible 风格 YAML（模块名作为任务 key）：
+声明式 YAML 编排（模块名作为任务 key）：
 
 ```yaml
 - name: web 部署
@@ -152,7 +152,7 @@ Ansible 风格 YAML（模块名作为任务 key）：
     - name: 等待服务就绪（until 轮询，.result 引用本轮结果）
       shell: 'curl -sf http://localhost:{{ .nginx_port }}/health'
       until: '{{ if eq .result.rc 0 }}ok{{ end }}'
-      retries: 10       # 重试次数：总尝试 = retries+1（同 Ansible）
+      retries: 10       # 重试次数：总尝试 = retries+1
       delay: 3
       timeout: 120
 
@@ -477,7 +477,7 @@ internal/
   model/                Host / Play / Task / TaskResult / Stats
   inventory/            YAML 清单：组、children、变量合并、多文件合并、
                         group_vars/host_vars、模式选择（联合/交集/通配）、动态组
-  playbook/             Ansible 风格 playbook 解析（block/rescue/always/until/hook）
+  playbook/             声明式任务编排解析（block/rescue/always/until/hook）
   chart/                chart 加载/values 深合并/lint/package/版本约束子 chart 解析
   render/               Go text/template 引擎（sprig 全集 + 自有函数 + helpers 命名模板）
   executor/             编排引擎：forks 并发、when/loop/register/notify/handlers、

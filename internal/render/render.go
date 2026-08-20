@@ -1,5 +1,5 @@
 // Package render 提供基于 Go text/template 的变量渲染能力，
-// 替代 Ansible 的 Jinja2。所有含 {{ }} 的字符串在执行期按主机变量域渲染。
+// 声明式模板渲染层。所有含 {{ }} 的字符串在执行期按主机变量域渲染。
 package render
 
 import (

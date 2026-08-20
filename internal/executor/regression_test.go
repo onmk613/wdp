@@ -51,7 +51,7 @@ func TestHandlerOnlyOnNotifyingHost(t *testing.T) {
 }
 
 // TestWhenSkipRegisters 跳过的任务同样 register（skipped=true），
-// 使 `when: not r.skipped` 这类 Ansible 惯用法可用。
+// 使 `when: not r.skipped` 这类惯用法可用。
 func TestWhenSkipRegisters(t *testing.T) {
 	var mu sync.Mutex
 	rendered := map[string]bool{}

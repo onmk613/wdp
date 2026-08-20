@@ -2,7 +2,7 @@ package inventory
 
 import "testing"
 
-// TestHostKeyCheckYesWorks 安全修复：host_key_check: yes（Ansible 惯用写法）
+// TestHostKeyCheckYesWorks 安全修复：host_key_check: yes（YAML 1.1 惯用写法）
 // 必须解析为 true——此前静默当 false，等于关闭 SSH 指纹校验。
 func TestHostKeyCheckYesWorks(t *testing.T) {
 	inv, err := Parse([]byte(`

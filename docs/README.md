@@ -1,6 +1,6 @@
 # wdp 用户文档
 
-wdp 是 Go 编写的自动化部署工具：单二进制、零运行时依赖，支持 SSH / 常驻 agent / push 临时 agent 三种通道，Helm 风格 chart 应用包 + Ansible 风格任务编排。
+wdp 是 Go 编写的自动化部署工具：单二进制、零运行时依赖，支持 SSH / 常驻 agent / push 临时 agent 三种通道，Helm 风格 chart 应用包 + 声明式任务编排。
 
 | 文档 | 内容 |
 |---|---|

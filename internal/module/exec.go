@@ -28,7 +28,7 @@ func (m *ShellModule) Run(rc *RunContext, args map[string]any, free string) *Res
 	return runCommandModule(rc, args, free)
 }
 
-// CommandModule 直接执行命令（与 shell 行为一致：远端统一经 /bin/sh，保留 Ansible 习惯命名）。
+// CommandModule 直接执行命令（与 shell 行为一致：远端统一经 /bin/sh）。
 type CommandModule struct{}
 
 // Name 模块名。

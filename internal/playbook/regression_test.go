@@ -2,7 +2,7 @@ package playbook
 
 import "testing"
 
-// TestNoLogYesParsedAsTrue 安全修复：no_log: yes（Ansible 惯用写法）
+// TestNoLogYesParsedAsTrue 安全修复：no_log: yes（YAML 1.1 惯用写法）
 // 必须解析为 true，不能静默当 false 导致输出泄露。
 func TestNoLogYesParsedAsTrue(t *testing.T) {
 	plays, err := Parse([]byte(`

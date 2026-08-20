@@ -1,4 +1,4 @@
-// Package playbook 解析 Ansible 风格的 playbook YAML。
+// Package playbook 解析声明式的 playbook YAML。
 // 每个任务是单键 map：已知控制属性之外的唯一一个键即模块名。
 package playbook
 

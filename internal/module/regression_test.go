@@ -30,7 +30,7 @@ func TestValidateArgsRejectsBadBool(t *testing.T) {
 	}
 }
 
-// TestValidateArgsAcceptsYesBool yes/on/1 是合法布尔（Ansible 习惯写法）。
+// TestValidateArgsAcceptsYesBool yes/on/1 是合法布尔（YAML 1.1 习惯写法）。
 func TestValidateArgsAcceptsYesBool(t *testing.T) {
 	m, _ := Get("copy")
 	for _, v := range []any{"yes", "no", "on", "off", "1", "0", true, false} {
@@ -40,7 +40,7 @@ func TestValidateArgsAcceptsYesBool(t *testing.T) {
 	}
 }
 
-// TestArgBoolCanonicalValues argBool 解析 Ansible 惯用布尔。
+// TestArgBoolCanonicalValues argBool 解析 YAML 1.1 惯用布尔。
 func TestArgBoolCanonicalValues(t *testing.T) {
 	for v, want := range map[any]bool{"yes": true, "YES": true, "on": true, "1": true, "no": false, "off": false, "0": false} {
 		b, ok := argBool(map[string]any{"k": v}, "k")

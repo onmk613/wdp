@@ -58,7 +58,7 @@ func Secret(direct, envKey string) string {
 }
 
 // ParseBool 严格解析布尔配置值：接受 bool、字符串 true/false/yes/no/on/off/1/0
-// （大小写不敏感，兼容 Ansible/YAML 1.1 惯用写法）与数值 0/1。
+// （大小写不敏感，兼容 YAML 1.1 惯用写法）与数值 0/1。
 // 其它值返回错误——布尔配置静默当 false 是安全漏洞源
 // （host_key_check: yes 会悄悄关闭指纹校验、no_log: yes 会泄露输出）。
 func ParseBool(v any) (bool, error) {

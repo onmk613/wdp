@@ -31,7 +31,7 @@ type Strategy struct {
 	AutoRollback bool   // 失败自动回滚（文件类变更快照恢复）
 }
 
-// Task 是单个任务。模块名作为 YAML key（Ansible 风格），其余为控制属性。
+// Task 是单个任务。模块名作为 YAML key，其余为控制属性。
 type Task struct {
 	Name      string         // 任务名（可选，缺省用模块名）
 	Module    string         // 模块名，如 shell / copy；chart 引用时为 "chart"

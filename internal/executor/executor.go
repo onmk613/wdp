@@ -550,7 +550,7 @@ func (e *Executor) runBatch(ctx context.Context, p *model.Play, playHosts, hosts
 	}
 
 	// flush handlers：每个 handler 只在通知了它的主机上执行
-	// （Ansible 语义：h2 未变更则不在 h2 重启服务）。
+	// （h2 未变更则不在 h2 重启服务）。
 	notifiedList, notifiedByHost := collectNotified(runs, p.Handlers)
 	if len(notifiedList) > 0 {
 		e.Rep.PlayMsg("触发 handlers: %s", strings.Join(notifiedList, ", "))
@@ -749,7 +749,7 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 			if !render.Truthy(s) {
 				res.Skipped = true
 				res.SkipReason = cond
-				// Ansible 语义：跳过的任务同样 register（含 skipped=true），
+				// 跳过的任务同样 register（含 skipped=true），
 				// 使 `when: not r.skipped` 之类的惯用法可用
 				if task.Register != "" {
 					hr.vars[task.Register] = resultData(res)
@@ -935,7 +935,7 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 		}
 
 		if task.Until != "" {
-			// until 轮询：retries 表示重试次数，总尝试 = retries + 1（未设置时默认 3，同 Ansible）；
+			// until 轮询：retries 表示重试次数，总尝试 = retries + 1（未设置时默认 3）；
 			// delay=轮询间隔秒数（0 不等待）；条件满足采用当轮结果；耗尽则按失败计。
 			attempts := 3
 			if task.Retries > 0 {

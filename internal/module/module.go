@@ -245,7 +245,7 @@ func argStrList(args map[string]any, key string) ([]string, bool) {
 }
 
 // argBool 解析布尔参数。除 Go 原生 true/false 外，
-// 兼容 YAML 1.1 / Ansible 惯用写法 yes/no/on/off/1/0（大小写不敏感）。
+// 兼容 YAML 1.1 惯用写法 yes/no/on/off/1/0（大小写不敏感）。
 // 无法解析时返回 ok=false（视为未提供）；ValidateArgs 会在派发前对
 // bool 类型参数做严格校验，因此这里不会把 "maybe" 静默当 false。
 func argBool(args map[string]any, key string) (bool, bool) {
