@@ -1,5 +1,5 @@
 // Package release 记录每次 chart 部署（chart 版本 + values 快照 + 结果），
-// 供 wdp release list / show 审计与重放（show --values 输出可直接 -f 复用）。
+// 供部署审计与重放（values 快照输出可直接作为 -f 输入复用）。
 package release
 
 import (
@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/cyphar/filepath-securejoin"
 
 	"wdp/internal/model"
 )
@@ -58,7 +60,13 @@ func Save(rec *Record) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return rec.ID, os.WriteFile(filepath.Join(dir, rec.ID+".json"), data, 0o600)
+	// 记录路径经 securejoin 约束在记录目录内: ID 源自 chart 名,
+	// 含 ../ 的名字被收敛为目录内路径, 不会越出 releases 写文件.
+	path, err := securejoin.SecureJoin(dir, rec.ID+".json")
+	if err != nil {
+		return "", err
+	}
+	return rec.ID, os.WriteFile(path, data, 0o600)
 }
 
 // List 列出记录（新在前），chartFilter 非空时按 chart 名前缀过滤。
@@ -92,13 +100,18 @@ func List(chartFilter string) ([]*Record, error) {
 	return out, nil
 }
 
-// Load 读取一条记录。
+// Load 读取一条记录。id 经 securejoin 约束在记录目录内（../ 等穿越
+// 写法不越出 releases 目录读文件）。
 func Load(id string) (*Record, error) {
 	dir, err := Dir()
 	if err != nil {
 		return nil, err
 	}
-	data, err := os.ReadFile(filepath.Join(dir, id+".json"))
+	path, err := securejoin.SecureJoin(dir, id+".json")
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("记录 %s 不存在", id)
 	}
@@ -107,4 +120,48 @@ func Load(id string) (*Record, error) {
 		return nil, err
 	}
 	return &rec, nil
+}
+
+// DiffValues 递归对比两份 values，返回 "- 路径: 旧值 / + 路径: 新值" 变更行
+// （新增/删除项带标注；无差异返回空）。部署对比功能用其对比两次部署的快照。
+func DiffValues(a, b map[string]any) []string {
+	var lines []string
+	diffValues("", a, b, &lines)
+	return lines
+}
+
+// diffValues 递归对比两份 values，输出 - 路径: 旧值 / + 路径: 新值 行。
+func diffValues(prefix string, a, b map[string]any, out *[]string) {
+	keys := map[string]bool{}
+	for k := range a {
+		keys[k] = true
+	}
+	for k := range b {
+		keys[k] = true
+	}
+	for k := range keys {
+		path := k
+		if prefix != "" {
+			path = prefix + "." + k
+		}
+		av, aok := a[k]
+		bv, bok := b[k]
+		switch {
+		case !aok:
+			*out = append(*out, fmt.Sprintf("+ %s: %v（新增）", path, bv))
+		case !bok:
+			*out = append(*out, fmt.Sprintf("- %s: %v（删除）", path, av))
+		default:
+			am, aIsMap := av.(map[string]any)
+			bm, bIsMap := bv.(map[string]any)
+			if aIsMap && bIsMap {
+				diffValues(path, am, bm, out)
+				continue
+			}
+			if fmt.Sprint(av) != fmt.Sprint(bv) {
+				*out = append(*out, fmt.Sprintf("- %s: %v", path, av))
+				*out = append(*out, fmt.Sprintf("+ %s: %v", path, bv))
+			}
+		}
+	}
 }

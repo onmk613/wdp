@@ -115,8 +115,7 @@ func TestRootHelpGrouped(t *testing.T) {
 
 	// 组标题全部出现（version 已由 cobra 内置 --version 提供，不再有 other 组）
 	for _, title := range []string{
-		"Deployment Commands:", "Chart & Package Commands:", "Security & Trust Commands:",
-		"Agent Commands:", "Operations & Records Commands:",
+		"Deployment", "Package", "Security", "Agent", "Operations",
 	} {
 		if !strings.Contains(out, title) {
 			t.Fatalf("帮助缺少分组标题 %q:\n%s", title, out)
@@ -131,9 +130,10 @@ func TestRootHelpGrouped(t *testing.T) {
 	want := map[string]string{
 		"run": groupDeploy, "adhoc": groupDeploy,
 		"new": groupChart, "template": groupChart, "lint": groupChart, "package": groupChart,
-		"ca": groupSecurity, "key": groupSecurity,
-		"agent":   groupAgent,
-		"release": groupOps, "modules": groupOps,
+		"ca":       groupSecurity,
+		"scan-ssh": groupSecurity,
+		"agent":    groupAgent,
+		"release":  groupOps, "modules": groupOps,
 	}
 	for _, c := range root.Commands() {
 		gid, ok := want[c.Name()]

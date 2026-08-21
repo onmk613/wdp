@@ -1,8 +1,11 @@
 package agent
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"wdp/internal/ca"
 )
 
 func TestIsLoopbackListen(t *testing.T) {
@@ -45,17 +48,27 @@ func TestListenAndServeRefusesUnauthExposed(t *testing.T) {
 	}
 }
 
-// TestListenAndServeAllowsSafeConfigs 回环无认证 / 有 token / mTLS 均放行。
+// TestListenAndServeAllowsSafeConfigs 回环无认证 / mTLS 均放行。
 func TestListenAndServeAllowsSafeConfigs(t *testing.T) {
 	s := New("127.0.0.1:99999")
 	if err := s.ListenAndServe(); err == nil || strings.Contains(err.Error(), "拒绝启动") {
 		t.Fatalf("回环无认证应允许: %v", err)
 	}
 
+	dir := t.TempDir()
+	if _, _, _, err := ca.Init(dir, ""); err != nil {
+		t.Fatal(err)
+	}
+	srvCrt, srvKey, _, err := ca.Issue(ca.IssueOptions{Dir: dir}, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	s2 := New("0.0.0.0:99999")
-	s2.ConfigureAuth("secret", "", "", "", "")
+	if err := s2.ConfigureAuth(filepath.Join(dir, ca.CAFile), srvCrt, srvKey); err != nil {
+		t.Fatal(err)
+	}
 	if err := s2.ListenAndServe(); err == nil || strings.Contains(err.Error(), "拒绝启动") {
-		t.Fatalf("有 token 对外监听应允许: %v", err)
+		t.Fatalf("mTLS 对外监听应允许: %v", err)
 	}
 }
 

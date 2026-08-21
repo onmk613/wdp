@@ -34,7 +34,7 @@
 - `--forks 20+`（或 wdp.cfg），建连限流自动防握手洪峰
 - 保持缺省聚合输出；排障时对单任务 `--start-at-task` + `-vv`
 - 分批发布用 strategy（`canary` 首台金丝雀 + `gate` 健康门 + `auto_rollback`）
-- `wdp key scan 'web*'` 批量采集新集群指纹
+- `wdp scan-ssh 'web*'` 批量采集新集群指纹
 
 ## FAQ
 
@@ -45,7 +45,7 @@
 引擎是严格模式（未定义变量报错）。可选键用 `{{ dig "key" "默认值" . }}`；确认拼写；`wdp template` 可离线排查渲染。
 
 **Q: SSH 连接被拒（host key 校验失败）？**
-安全默认 `host_key_check: true`。新主机先 `wdp key scan <模式>` 采集指纹；明确接受风险才用 `host_key_check: false`。
+安全默认 `host_key_check: true`。新主机先 `wdp scan-ssh <模式>` 采集指纹；明确接受风险才用 `host_key_check: false`。
 
 **Q: `owner`/`group` 设置报"需要 become"？**
 属主变更需要 root。play 或任务加 `become: true`（local 通道除外——本机执行不提权）。
@@ -74,8 +74,8 @@ setup/stat 的 facts 不进 register——它们直接并入变量域顶层（`.
 ## 已知限制
 
 - `local` 通道忽略 become；push 通道要求目标机与控制端二进制平台一致（`binary_path` 可指定预编译产物）
-- become 密码在 agent 通道经请求体明文传输（建议 TLS/token 内网）
-- token 认证无过期时间；明文 HTTP 仅限可信内网
+- become 密码在未启用 mTLS 的常驻 agent 通道经请求体明文传输（对外纳管建议 mTLS）；push 通道自举临时 mTLS，全程加密
+- 常驻 agent 未配置 mTLS 的对外监听需显式 `--allow-no-auth`（明文 HTTP 仅限可信内网）
 - `package` 的 `state: latest` 视为 changed（无法精确判定是否升级）
 - 自动回滚快照在 play 正常结束后清理；过程性变更（shell/package/service/user）不在覆盖范围
 - 无 CRL/OCSP：证书吊销靠指纹名单 + 短周期轮换
@@ -87,4 +87,4 @@ setup/stat 的 facts 不进 register——它们直接并入变量域顶层（`.
 2. `--list-hosts`：主机选择是否符合预期（选择模式语法见 inventory 文档）
 3. `--check --diff`：变更内容是否符合预期
 4. `-vvv` 单任务排障：`--start-at-task <名>` + 完整 stderr
-5. 连接层：`wdp key scan`（指纹）、`wdp adhoc -m shell -a true <主机>`（连通性）
+5. 连接层：`wdp scan-ssh`（指纹）、`wdp adhoc -m shell -a true <主机>`（连通性）

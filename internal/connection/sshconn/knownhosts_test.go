@@ -1,4 +1,4 @@
-package cli
+package sshconn
 
 import (
 	"os"
@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"golang.org/x/crypto/ssh"
+
+	"wdp/internal/model"
 )
 
 const (
@@ -28,7 +30,7 @@ func entry(raw string) *khEntry { return parseKHEntry(raw) }
 func TestReconcileAdded(t *testing.T) {
 	key := mustKey(t, testKeyA)
 	action, entries := reconcile(nil, "10.0.0.11", key, "10.0.0.11 "+testKeyA)
-	if action != khAdded || len(entries) != 1 || entries[0].removed {
+	if action != ActionAdded || len(entries) != 1 || entries[0].removed {
 		t.Fatalf("空 known_hosts 应新增: action=%v entries=%+v", action, entries)
 	}
 }
@@ -37,7 +39,7 @@ func TestReconcileExists(t *testing.T) {
 	key := mustKey(t, testKeyA)
 	entries := []*khEntry{entry("10.0.0.11 " + testKeyA)}
 	action, next := reconcile(entries, "10.0.0.11", key, "10.0.0.11 "+testKeyA)
-	if action != khExists || len(next) != 1 || next[0].removed {
+	if action != ActionExists || len(next) != 1 || next[0].removed {
 		t.Fatalf("同指纹应已存在且无改动: action=%v entries=%+v", action, next)
 	}
 }
@@ -47,7 +49,7 @@ func TestReconcileOverwriteChangedKey(t *testing.T) {
 	newKey := mustKey(t, testKeyB)
 	entries := []*khEntry{entry("10.0.0.11 " + testKeyA)}
 	action, next := reconcile(entries, "10.0.0.11", newKey, "10.0.0.11 "+testKeyB)
-	if action != khUpdated {
+	if action != ActionUpdated {
 		t.Fatalf("指纹变化应更新: action=%v", action)
 	}
 	if len(next) != 2 || !next[0].removed || next[1].removed {
@@ -67,7 +69,7 @@ func TestReconcileCleansStaleDup(t *testing.T) {
 		entry("10.0.0.11 " + testKeyB),
 	}
 	action, next := reconcile(entries, "10.0.0.11", newKey, "10.0.0.11 "+testKeyB)
-	if action != khUpdated {
+	if action != ActionUpdated {
 		t.Fatalf("清理过期重复行应计为更新: action=%v", action)
 	}
 	if len(next) != 2 || !next[0].removed || next[1].removed {
@@ -79,7 +81,7 @@ func TestReconcileRevokedBlocked(t *testing.T) {
 	key := mustKey(t, testKeyA)
 	entries := []*khEntry{entry("@revoked 10.0.0.11 " + testKeyA)}
 	action, next := reconcile(entries, "10.0.0.11", key, "10.0.0.11 "+testKeyA)
-	if action != khRevoked || len(next) != 1 || next[0].removed {
+	if action != ActionRevoked || len(next) != 1 || next[0].removed {
 		t.Fatalf("@revoked 同指纹应拒绝覆盖: action=%v entries=%+v", action, next)
 	}
 }
@@ -93,7 +95,7 @@ func TestReconcileIgnoresOtherMarkers(t *testing.T) {
 		entry("@cert-authority 10.0.0.11 " + testKeyB), // CA 条目：不动
 	}
 	action, next := reconcile(entries, "10.0.0.11", key, "10.0.0.11 "+testKeyA)
-	if action != khUpdated {
+	if action != ActionUpdated {
 		t.Fatalf("action=%v", action)
 	}
 	if !next[0].removed || next[1].removed || next[2].removed {
@@ -109,7 +111,7 @@ func TestReconcileOtherPortProtected(t *testing.T) {
 	key := mustKey(t, testKeyA)
 	entries := []*khEntry{entry("10.0.0.11 " + testKeyB)}
 	action, next := reconcile(entries, "[10.0.0.11]:2222", key, "[10.0.0.11]:2222 "+testKeyA)
-	if action != khAdded {
+	if action != ActionAdded {
 		t.Fatalf("非 22 端口扫描与裸 IP 条目互不影响: action=%v", action)
 	}
 	if len(next) != 2 || next[0].removed {
@@ -122,7 +124,7 @@ func TestReconcileMultiHostLineRemoved(t *testing.T) {
 	key := mustKey(t, testKeyA)
 	entries := []*khEntry{entry("web1.example.com,10.0.0.11 " + testKeyB)}
 	action, next := reconcile(entries, "10.0.0.11", key, "10.0.0.11 "+testKeyA)
-	if action != khUpdated || len(next) != 2 || !next[0].removed {
+	if action != ActionUpdated || len(next) != 2 || !next[0].removed {
 		t.Fatalf("含别名的旧指纹行应整行删除: action=%v entries=%+v", action, next)
 	}
 }
@@ -141,7 +143,7 @@ func TestScanRewriteFile(t *testing.T) {
 	}
 	newKey := mustKey(t, testKeyB)
 	action, entries := reconcile(entries, "10.0.0.11", newKey, "10.0.0.11 "+testKeyB)
-	if action != khUpdated {
+	if action != ActionUpdated {
 		t.Fatalf("action=%v", action)
 	}
 	if err := writeKnownHostsFile(path, entries); err != nil {
@@ -267,16 +269,127 @@ func TestHostsFromSpecsAll(t *testing.T) {
 	if err := os.WriteFile(path, []byte("10.0.0.11 "+testKeyA+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	hosts, err := hostsFromSpecs([]string{"all"}, path)
+	hosts, err := HostsFromSpecs([]string{"all"}, path)
 	if err != nil || len(hosts) != 1 || hosts[0].Address != "10.0.0.11" {
 		t.Fatalf("all 应展开为 known_hosts 主机: %+v, err=%v", hosts, err)
 	}
-	hosts, err = hostsFromSpecs([]string{"10.0.0.2:2222", "10.0.0.3"}, path)
+	hosts, err = HostsFromSpecs([]string{"10.0.0.2:2222", "10.0.0.3"}, path)
 	if err != nil || len(hosts) != 2 ||
 		hosts[0].Port != 2222 || hosts[1].Port != 22 {
 		t.Fatalf("多个主机应按字面解析: %+v, err=%v", hosts, err)
 	}
-	if _, err := hostsFromSpecs([]string{"bad:spec:x"}, path); err == nil {
+	if _, err := HostsFromSpecs([]string{"bad:spec:x"}, path); err == nil {
 		t.Fatal("非法主机格式应报错")
+	}
+}
+
+// loadTestKnownHosts 写入内容并加载为 KnownHosts。
+func loadTestKnownHosts(t *testing.T, content string) *KnownHosts {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "known_hosts")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kh, err := LoadKnownHosts(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return kh
+}
+
+// TestRemoveHosts 已下线主机的全部条目（多把钥匙、别名共享行、@revoked）整行删除；
+// @cert-authority 与其他主机的条目保留。
+func TestRemoveHosts(t *testing.T) {
+	kh := loadTestKnownHosts(t, strings.Join([]string{
+		"10.0.0.11 " + testKeyA,
+		"10.0.0.11 " + testKeyB,                  // 同主机第二把钥匙，一并删除
+		"web1.example.com,10.0.0.11 " + testKeyA, // 别名共享行：整行删除
+		"@revoked 10.0.0.11 " + testKeyB,         // 吊销记录同属该主机，一并删除
+		"@cert-authority 10.0.0.11 " + testKeyA,  // CA 记录：保留
+		"other.example.com " + testKeyA,          // 其他主机：保留
+		"[10.0.0.11]:2222 " + testKeyA,           // 同 IP 不同端口：保留
+	}, "\n")+"\n")
+	if kh.Dirty() {
+		t.Fatal("刚加载应为干净状态")
+	}
+	n := kh.RemoveHosts([]*model.Host{{Name: "10.0.0.11", Address: "10.0.0.11", Port: 22}})
+	if n != 4 {
+		t.Fatalf("应删除 4 行，得到 %d", n)
+	}
+	if !kh.Dirty() {
+		t.Fatal("删除后应为脏状态")
+	}
+	if err := kh.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(kh.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Join([]string{
+		"@cert-authority 10.0.0.11 " + testKeyA,
+		"other.example.com " + testKeyA,
+		"[10.0.0.11]:2222 " + testKeyA,
+	}, "\n") + "\n"
+	if string(data) != want {
+		t.Fatalf("删除结果不符:\n--- got ---\n%s\n--- want ---\n%s", data, want)
+	}
+}
+
+// TestRemoveHostsPort 非 22 端口主机只删除 [host]:port 条目，不影响同 IP 裸条目。
+func TestRemoveHostsPort(t *testing.T) {
+	kh := loadTestKnownHosts(t, strings.Join([]string{
+		"10.0.0.11 " + testKeyA,
+		"[10.0.0.11]:2222 " + testKeyA,
+	}, "\n")+"\n")
+	n := kh.RemoveHosts([]*model.Host{{Name: "10.0.0.11:2222", Address: "10.0.0.11", Port: 2222}})
+	if n != 1 {
+		t.Fatalf("应仅删除 1 行，得到 %d", n)
+	}
+	if err := kh.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(kh.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), "10.0.0.11 "+testKeyA) {
+		t.Fatalf("裸 IP 条目应保留: %s", data)
+	}
+}
+
+// TestRemoveHostsUnknown 无匹配条目时不动文件、不置脏。
+func TestRemoveHostsUnknown(t *testing.T) {
+	kh := loadTestKnownHosts(t, "other.example.com "+testKeyA+"\n")
+	if n := kh.RemoveHosts([]*model.Host{{Name: "10.0.0.99", Address: "10.0.0.99", Port: 22}}); n != 0 {
+		t.Fatalf("无匹配不应删除，得到 %d", n)
+	}
+	if kh.Dirty() {
+		t.Fatal("无匹配不应置脏")
+	}
+	if kh.RemoveHosts(nil) != 0 {
+		t.Fatal("空主机列表应为 no-op")
+	}
+}
+
+// TestKnownHostsMarker 主机段格式：非 22 端口或 IPv6（含冒号）一律 [host]:port，
+// 对齐 OpenSSH put_host_port——否则 IPv6@22 与校验侧 JoinHostPort 产物失配。
+func TestKnownHostsMarker(t *testing.T) {
+	cases := []struct {
+		name string
+		addr string
+		port int
+		want string
+	}{
+		{"域名22裸写", "web1.example.com", 22, "web1.example.com"},
+		{"IPv4非22方括号", "10.0.0.5", 2222, "[10.0.0.5]:2222"},
+		{"IPv6@22也方括号", "fd00::5", 22, "[fd00::5]:22"},
+		{"IPv6非22方括号", "fd00::5", 2222, "[fd00::5]:2222"},
+	}
+	for _, tc := range cases {
+		h := &model.Host{Address: tc.addr, Port: tc.port}
+		if got := KnownHostsMarker(h); got != tc.want {
+			t.Errorf("%s: marker=%q want %q", tc.name, got, tc.want)
+		}
 	}
 }

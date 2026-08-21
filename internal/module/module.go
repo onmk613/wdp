@@ -117,7 +117,7 @@ type Module interface {
 	Run(rc *RunContext, args map[string]any, free string) *Result
 }
 
-// ParamDoc 描述模块参数（wdp modules 文档与 wdp new --module 片段生成的单一事实来源）。
+// ParamDoc 描述模块参数（模块文档与骨架片段生成的单一事实来源）。
 type ParamDoc struct {
 	Name    string `json:"name"`
 	Type    string `json:"type"` // string / list / bool / int / mode / map
@@ -126,7 +126,7 @@ type ParamDoc struct {
 }
 
 // UsageProvider 模块可选实现：参数自描述 + 示例任务 YAML。
-// 实现 后自动进入 `wdp modules -v` 文档与 `wdp new --module` 生成链路。
+// 实现后自动进入模块文档与骨架片段生成链路。
 type UsageProvider interface {
 	Params() []ParamDoc
 	Example() string

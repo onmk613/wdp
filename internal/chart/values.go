@@ -40,6 +40,27 @@ type pathSeg struct {
 	hasID bool // 段带 [n] 下标
 }
 
+// SubScope 计算子 chart 引用展开时的作用域 values（低 → 高）：
+// 子 chart 默认 values → 父作用域 <子chart名> 子树 → global（跨层共享，拷贝隔离）。
+// 执行器与 template 预览共用本规则；引用 vars（task 级）由调用方在其上继续叠加。
+func SubScope(sub *Chart, parentScope map[string]any) map[string]any {
+	scope := map[string]any{}
+	for k, v := range sub.Values {
+		scope[k] = v
+	}
+	if tree, ok := parentScope[sub.Meta.Name].(map[string]any); ok {
+		scope = Merge(scope, tree)
+	}
+	if g, ok := parentScope["global"].(map[string]any); ok {
+		gc := map[string]any{}
+		for k, v := range g {
+			gc[k] = v
+		}
+		scope["global"] = gc
+	}
+	return scope
+}
+
 // SetPath 按点路径写入值，支持单层列表下标："a.b[0].c"。
 // 中间路径不存在时自动创建；类型冲突时报错。返回根 map（即入参 root）。
 func SetPath(root map[string]any, path string, value any) (map[string]any, error) {

@@ -252,6 +252,8 @@ func TestRuneWidth(t *testing.T) {
 		{"ＡＢＣ", 6},                // 全角字母 = 2
 		{"🟢", 2},                  // 0x1F7E2 彩色圆
 		{"שָׁלוֹם", 4},            // 希伯来语元音点 (Mn) 归零
+		{"🇨🇳", 2},                 // 区域指示符国旗: grapheme 聚合为单格
+		{"👨‍👩‍👧", 2},              // ZWJ 家庭 emoji: 聚合为单格并封顶 2 列
 	}
 	for _, c := range cases {
 		if got := displayWidth(c.s); got != c.want {

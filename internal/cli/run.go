@@ -125,17 +125,19 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	}
 	var plays []*model.Play
 
-	if isChartPath(target) {
-		ch, values, eng, err := loadChart(target, opts.valuesFiles, opts.setArgs)
+	if chart.IsChartPath(target) {
+		ch, values, eng, err := chart.Open(target, opts.valuesFiles, opts.setArgs)
 		if err != nil {
 			return err
 		}
 		defer ch.Close()
 
-		// 生命周期相位：选择对应 play 并校验 required 配置项
-		switch opts.phase {
-		case "", "deploy":
-			plays = ch.Deploy
+		// 生命周期相位：选择对应 play；deploy 相位校验 required 配置项
+		plays, err = ch.PhasePlays(opts.phase)
+		if err != nil {
+			return err
+		}
+		if opts.phase == "" || opts.phase == "deploy" {
 			if err := ch.ValidateRequired(values); err != nil {
 				return err
 			}
@@ -145,18 +147,6 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 					return err
 				}
 			}
-		case "uninstall":
-			if ch.Uninstall == nil {
-				return fmt.Errorf("chart %s 未提供 uninstall.yaml，不可卸载", ch.Meta.Name)
-			}
-			plays = ch.Uninstall
-		case "status":
-			if ch.Status == nil {
-				return fmt.Errorf("chart %s 未提供 status.yaml", ch.Meta.Name)
-			}
-			plays = ch.Status
-		default:
-			return fmt.Errorf("未知 --phase %q（可选: deploy/uninstall/status）", opts.phase)
 		}
 		eopts.Chart = ch
 		eopts.Values = values
@@ -232,7 +222,7 @@ func confirmReversibility(ch *chart.Chart, yes bool) error {
 	if rep.Irreversible == 0 || yes {
 		return nil
 	}
-	if !isTTY() {
+	if !fmtutil.IsTerminal(os.Stdout) {
 		fmt.Fprintf(os.Stderr, "==> 警告: 含 %d 个不可逆操作且当前非交互环境，继续执行（--yes 可抑制本警告）\n",
 			rep.Irreversible)
 		return nil
@@ -282,7 +272,7 @@ func buildReporter() (report.Reporter, func()) {
 	if gQuiet {
 		level = -1
 	}
-	rep := report.NewConsole(os.Stdout, !gNoColor && isTTY(), level)
+	rep := report.NewConsole(os.Stdout, !gNoColor && fmtutil.ColorAuto(os.Stdout), level)
 	return rep, func() {}
 }
 
@@ -375,24 +365,14 @@ func splitCSV(s string) []string {
 	return out
 }
 
-func isTTY() bool {
-	fi, err := os.Stdout.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
-}
-
-// outPrinter 返回绑定命令输出流的着色 printer（颜色遵循 --no-color 与终端检测），
-// 供列表类命令渲染 fmtutil 表格。
+// outPrinter 返回绑定命令输出流的着色 printer（颜色遵循 --no-color、
+// 终端检测与 NO_COLOR 约定），供列表类命令渲染 fmtutil 表格。
 func outPrinter(cmd *cobra.Command) *fmtutil.Printer {
 	p := fmtutil.New()
 	p.SetWriter(cmd.OutOrStdout())
-	p.SetColor(!gNoColor && isTTY())
-	return p
-}
-
-func isChartPath(path string) bool {
-	fi, err := os.Stat(path)
-	if err != nil {
-		return strings.HasSuffix(path, ".tgz")
+	if gNoColor {
+		p.SetColor(false)
 	}
-	return fi.IsDir() || strings.HasSuffix(path, ".tgz")
+	// 未显式 --no-color 时保持自动模式（终端检测 + NO_COLOR）
+	return p
 }

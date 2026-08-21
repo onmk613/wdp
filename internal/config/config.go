@@ -65,7 +65,8 @@ type SSHConfig struct {
 
 // AgentConfig 是 agent 连接默认值。
 type AgentConfig struct {
-	Port int `toml:"port"` // 默认 agent 端口（0 = 7602）
+	Port          int `toml:"port"`            // 默认 agent 端口（0 = 7602）
+	CertRotateMin int `toml:"cert_rotate_min"` // push 临时证书轮换周期分钟（0 = 不轮换）
 }
 
 // DefaultPath 是默认配置文件路径（当前目录）。
@@ -123,7 +124,7 @@ func (c *Config) SSHConnectTimeout() int {
 	return 10
 }
 
-// SSHHostKeyCheck 归一化指纹校验（默认开启：安全默认；用 wdp key scan 采集指纹）。
+// SSHHostKeyCheck 归一化指纹校验（默认开启：安全默认；新主机首次连接前先采集指纹写入 known_hosts）。
 func (c *Config) SSHHostKeyCheck() bool {
 	if c.SSH.HostKeyCheck != nil {
 		return *c.SSH.HostKeyCheck
@@ -137,6 +138,16 @@ func (c *Config) AgentPort() int {
 		return c.Agent.Port
 	}
 	return 7602
+}
+
+// AgentCertRotateMin 归一化 push 临时证书轮换周期（分钟，<=0 = 不轮换）。
+// 轮换压缩共享证书对的暴露窗口；仅对仍有后续任务的主机生效，
+// 已完成自销毁的主机不受影响。
+func (c *Config) AgentCertRotateMin() int {
+	if c.Agent.CertRotateMin > 0 {
+		return c.Agent.CertRotateMin
+	}
+	return 0
 }
 
 // InventoryPath 归一化默认 inventory 路径。

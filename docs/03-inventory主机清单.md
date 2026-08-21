@@ -39,7 +39,7 @@ production:                   # 组的嵌套：children 引用其它组
 | 键 | 类型 | 说明 |
 |---|---|---|
 | `conn` | string | 连接类型：`ssh`（默认）/ `agent` / `push` / `local` |
-| `host` | string | 实际地址（缺省等于主机名） |
+| `host` | string | 实际地址（缺省等于主机名）；支持 IPv6 字面量，裸写即可（如 `fd00::5`，无需方括号）；不支持 zone ID（`fe80::1%eth0`） |
 | `port` | int | SSH 端口，缺省 22 |
 | `user` | string | SSH 用户（缺省取 wdp.cfg `[ssh].user`） |
 | `password` / `password_env` | string | SSH 密码认证（含 keyboard-interactive） |
@@ -50,7 +50,6 @@ production:                   # 组的嵌套：children 引用其它组
 | `connect_timeout` | int | 建连超时秒 |
 | `agent_url` | string | conn=agent 时的服务地址，如 `http://10.0.0.5:7602` |
 | `agent_port` | int | agent/push 端口（无 agent_url 时用 host:port） |
-| `token` / `token_env` | string | agent token 认证 |
 | `tls` | bool | agent 通道启用 HTTPS |
 | `ca_file` / `cert_file` / `key_file` | string | agent 通道 mTLS 三件套 |
 | `insecure_skip_verify` | bool | 跳过服务端证书校验（明确声明的降级） |

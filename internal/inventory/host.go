@@ -13,10 +13,10 @@ var hostKeys = map[string]bool{
 	"key_path": true, "key_passphrase": true, "key_passphrase_env": true,
 	"conn": true, "agent_url": true, "agent_port": true,
 	"host_key_check": true, "known_hosts": true, "connect_timeout": true,
-	"token": true, "token_env": true, "ca_file": true, "cert_file": true, "key_file": true,
+	"ca_file": true, "cert_file": true, "key_file": true,
 	"binary_path": true, "keep_agent": true,
 	"become_password": true, "become_password_env": true,
-	"tls": true, "insecure_skip_verify": true,
+	"tls": true, "insecure_skip_verify": true, "tls_skip_host_verify": true, "tls_server_name": true,
 }
 
 func buildHost(name string, vars map[string]any) (*model.Host, error) {
@@ -71,10 +71,6 @@ func buildHost(name string, vars map[string]any) (*model.Host, error) {
 			h.KnownHosts = fmt.Sprint(v)
 		case "connect_timeout":
 			h.ConnectTimeoutSec = toInt(v, cfg.SSHConnectTimeout())
-		case "token":
-			h.Token = fmt.Sprint(v)
-		case "token_env":
-			h.TokenEnv = fmt.Sprint(v)
 		case "ca_file":
 			h.CAFile = fmt.Sprint(v)
 		case "cert_file":
@@ -105,6 +101,14 @@ func buildHost(name string, vars map[string]any) (*model.Host, error) {
 				return nil, fmt.Errorf("insecure_skip_verify: %w", err)
 			}
 			h.InsecureSkipVerify = b
+		case "tls_skip_host_verify":
+			b, err := model.ParseBool(v)
+			if err != nil {
+				return nil, fmt.Errorf("tls_skip_host_verify: %w", err)
+			}
+			h.TLSSkipHostVerify = b
+		case "tls_server_name":
+			h.TLSServerName = fmt.Sprint(v)
 		}
 	}
 	if h.Address == "" {

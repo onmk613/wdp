@@ -146,34 +146,54 @@ wdp release diff <id1> <id2>
 ## wdp ca
 
 ```
-wdp ca init   --dir <目录> [--passphrase]
+wdp ca init   --dir <目录> [--passphrase] [--import-cert <ca.crt> --import-key <ca.key>]
 wdp ca issue  --dir <目录> --name <名称|IP> [--san <附加SAN>（可多次）] [--client] [--days N]
+              [--ca-cert <CA证书>] [--ca-key <CA私钥>] [--passphrase]
 wdp ca renew  --dir <目录> --name <名称> [--new-key] [--days N]
+              [--ca-cert <CA证书>] [--ca-key <CA私钥>] [--passphrase]
+wdp ca show   <证书路径>
 ```
 
-| 子命令 | 说明 |
+| 子命令 / flag | 说明 |
 |---|---|
 | `init` | 创建 CA（10 年，PathLen=0；私钥 PBKDF2+AES-GCM 加密落盘） |
+| `init --import-cert/--import-key` | 导入已有 CA 证书/私钥对（二次分发：多环境复用同一信任链，已信任该 CA 的 agent 无需重新建立信任）。校验 CA 身份、有效期与公私钥匹配；证书原样落盘（主题/有效期/扩展全部保留），源私钥支持明文 SEC1 EC / PKCS8（openssl 风格组织 CA），wdp 加密信封用 `--passphrase` 解密 |
 | `issue` | 签发证书（服务端 SAN=名称/IP，默认 90 天；`--client` 签控制端客户端证书并输出 SHA256 指纹） |
 | `--san` | 追加额外 SAN（可多次，IP 或域名，自动去重）——多地址/NAT/端口转发主机一张证书覆盖全部可达地址，`renew` 续期时全量继承 |
 | `renew` | 原地续期（保留 SAN/EKU/私钥；`--new-key` 换钥即吊销旧证书） |
+| `--ca-cert/--ca-key` | 显式指定 CA 证书/私钥文件（默认 `<dir>/ca.crt`/`<dir>/ca.key`）——CA 集中保管一处、证书产物输出到别处时使用 |
+| `show` | 查看证书携带的信息：主题/签发者（自签标注）、序列号、有效期（剩余天数/已过期）、CA 角色与 PathLen、公钥算法、密钥用途、扩展用途（ServerAuth/ClientAuth）、SAN、SHA256 指纹——导入外部 CA 或排查证书问题时先看清内容再信任 |
+
+证书角色：agent 在目标机上是 TLS **服务端**（默认签发的服务端证书，含 SAN）；
+控制端连接 agent 时是 TLS **客户端**，`--client` 签的就是控制端身份证书
+（EKU=clientAuth、无 SAN），配合 agent `--pin-client-fp` 可精确吊销。
 
 口令环境变量：`WDP_CA_PASSPHRASE`（`--passphrase` 优先）。
 
-## wdp key
+## wdp scan-ssh
 
 ```
-wdp key scan <主机模式> [--known-hosts 路径]
+wdp scan-ssh <主机模式> [--known-hosts 路径]
+wdp scan-ssh --from-hosts <主机列表|all> [--known-hosts 路径] [--prune]
 ```
 
-采集 SSH 主机公钥写入 known_hosts（`host_key_check` 默认开启，新主机首次连接前执行一次）。支持全部主机选择模式语法。
+采集 SSH 主机公钥写入 known_hosts（`host_key_check` 默认开启，新主机首次连接前执行一次）。
+位置参数模式支持全部主机选择模式语法（从 inventory 选择）；
+`--from-hosts` 为独立模式（绕过 inventory，直接指定 `host`、`host:port` 或 `[ipv6]:port`，
+逗号分隔；`all` 扫描 known_hosts 中记录的全部主机）。
+
+| flag | 说明 |
+|---|---|
+| `--known-hosts` | known_hosts 路径（默认 `~/.ssh/known_hosts`） |
+| `--from-hosts` | 独立模式主机来源（逗号分隔；`all` 展开 known_hosts 全部主机） |
+| `--prune` | 仅独立模式：连接失败的主机视为可能已永久下线，删除其在 known_hosts 中的记录（含 `@revoked`，`@cert-authority` 不受影响） |
 
 ## wdp agent
 
 目标机启动常驻 agent：
 
 ```
-wdp agent [--listen 127.0.0.1:7602] [--token <密钥> | --token-file <文件>]
+wdp agent [--listen 127.0.0.1:7602]
           [--ca <CA证书> --cert <服务端证书> --key <私钥>]
           [--pin-client-fp sha256:<指纹>（可多次）]
           [--allow-no-auth] [--cleanup-on-shutdown]
@@ -182,18 +202,18 @@ wdp agent [--listen 127.0.0.1:7602] [--token <密钥> | --token-file <文件>]
 | flag | 说明 |
 |---|---|
 | `--listen` | 监听地址（默认仅绑定回环 `127.0.0.1`；对外监听需显式 `0.0.0.0:端口`；端口未指定时跟随 wdp.cfg `[agent].port`） |
-| `--token` / `--token-file` | token 认证（token 文件读取后自动删除；`--token` 明文会进进程 argv，同机 `ps` 可见，建议用 `--token-file`） |
 | `--ca/--cert/--key` | mTLS 三件套 |
 | `--pin-client-fp` | 客户端证书指纹准许名单（精确吊销：移除指纹重启即拒收） |
 | `--allow-no-auth` | 显式允许无认证对外监听（仅限可信内网） |
-| `--cleanup-on-shutdown` | 收到 /shutdown 时删除自身二进制（push 临时 agent 用） |
+| `--cleanup-on-shutdown` | 收到 /shutdown 时删除自身二进制与 mTLS 证书文件（push 临时 agent 用） |
 
+端点：`/exec`（命令执行）、`/file`（读写）、`/archive`（原生解压，不依赖目标机工具链）、`/health`、`/shutdown`。
 安全默认：`/exec`、`/file` 提供的是目标机命令执行与文件读写原语，
-**对外（非回环）监听且未配置 token/mTLS 时拒绝启动**（避免无意暴露 RCE）；
+**对外（非回环）监听且未配置 mTLS 时拒绝启动**（避免无意暴露 RCE）；
 回环监听仅本机可访问，允许无认证（本地调试）。远程纳管的标准姿势：
 
 ```sh
-ssh target 'wdp agent --listen 0.0.0.0:7602 --token-file /root/.wdp-token &'
+ssh target 'wdp agent --listen 0.0.0.0:7602 --ca ca.crt --cert <IP>.crt --key <IP>.key &'
 ```
 
 生产建议 systemd 托管（示例：`examples/wdp-agent.service`）。

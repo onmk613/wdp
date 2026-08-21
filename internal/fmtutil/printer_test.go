@@ -93,3 +93,24 @@ func TestPrinterColorEnabled(t *testing.T) {
 		t.Error("auto + non-terminal should disable color")
 	}
 }
+
+func TestNoColorEnvConvention(t *testing.T) {
+	// no-color.org 约定: 变量存在且非空即禁色, 与取值无关
+	t.Setenv("NO_COLOR", "")
+	if noColorByEnv() {
+		t.Error("空 NO_COLOR 不应禁色")
+	}
+	t.Setenv("NO_COLOR", "0")
+	if !noColorByEnv() {
+		t.Error("NO_COLOR 非空即禁色（取值 0 也是）")
+	}
+
+	// 显式强制开色不受 NO_COLOR 影响
+	p := New()
+	var buf bytes.Buffer
+	p.SetWriter(&buf)
+	p.SetColor(true)
+	if !p.ColorEnabled() {
+		t.Error("SetColor(true) 应覆盖 NO_COLOR")
+	}
+}

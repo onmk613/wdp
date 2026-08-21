@@ -1,10 +1,9 @@
 // Package agent 是部署在目标机上的常驻 HTTP 服务，
 // 为控制端提供 exec / 上传 / 下载原语。
 //
-// 认证三种模式（启动参数选择）：
-//   - token：--token 或 --token-file（header X-WDP-Token 常量时间比较）
+// 认证两种模式（启动参数选择）：
 //   - mTLS：--ca/--cert/--key 双向证书认证
-//   - 无认证：默认仅允许监听回环地址；对外（非回环）监听且未配置认证时
+//   - 无认证：默认仅允许监听回环地址；对外（非回环）监听且未配置 mTLS 时
 //     拒绝启动，除非显式 --allow-no-auth（仅限可信内网）
 package agent
 
@@ -12,7 +11,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -38,15 +36,12 @@ import (
 // Version 是 agent 协议版本。
 const Version = "1"
 
-// TokenHeader 是 token 认证头。
-const TokenHeader = "X-WDP-Token"
-
 // Server 是 agent HTTP 服务。
 type Server struct {
 	Listen      string
 	middlewares []func(http.Handler) http.Handler
 
-	token             string
+	tlsCAFile         string
 	tlsCertFile       string
 	tlsKeyFile        string
 	clientCAs         *x509.CertPool
@@ -66,20 +61,8 @@ func (s *Server) Use(mw func(http.Handler) http.Handler) {
 	s.middlewares = append(s.middlewares, mw)
 }
 
-// ConfigureAuth 配置认证：token（或 tokenFile，读取后删除文件）
-// 与 mTLS（ca 校验客户端证书、cert/key 为服务端证书）。
-func (s *Server) ConfigureAuth(token, tokenFile, ca, cert, key string) error {
-	if tokenFile != "" {
-		data, err := os.ReadFile(tokenFile)
-		if err != nil {
-			return fmt.Errorf("读取 token 文件失败: %w", err)
-		}
-		token = strings.TrimSpace(string(data))
-		if err := os.Remove(tokenFile); err != nil {
-			return fmt.Errorf("删除 token 文件失败: %w", err)
-		}
-	}
-	s.token = token
+// ConfigureAuth 配置 mTLS 认证：ca 校验客户端证书、cert/key 为服务端证书。
+func (s *Server) ConfigureAuth(ca, cert, key string) error {
 	if ca != "" || cert != "" || key != "" {
 		if ca == "" || cert == "" || key == "" {
 			return fmt.Errorf("mTLS 需要 --ca/--cert/--key 同时提供")
@@ -93,12 +76,13 @@ func (s *Server) ConfigureAuth(token, tokenFile, ca, cert, key string) error {
 			return fmt.Errorf("解析 CA 证书失败: %s", ca)
 		}
 		s.clientCAs = pool
-		s.tlsCertFile, s.tlsKeyFile = cert, key
+		s.tlsCAFile, s.tlsCertFile, s.tlsKeyFile = ca, cert, key
 	}
 	return nil
 }
 
-// CleanupOnShutdown 设置收到 /shutdown 时删除自身二进制。
+// CleanupOnShutdown 设置收到 /shutdown 时删除自身二进制与 mTLS 材料文件
+// （证书/私钥启动时已载入内存，删除不影响运行；push 临时 agent 场景防残留）。
 func (s *Server) CleanupOnShutdown(on bool) { s.cleanupOnShutdown.Store(on) }
 
 // AllowNoAuth 显式允许无认证对外监听（仅限可信内网场景；
@@ -130,16 +114,14 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("POST /exec", s.handleExec)
-	mux.HandleFunc("PUT /file", s.handleUpload)
-	mux.HandleFunc("GET /file", s.handleDownload)
-	mux.HandleFunc("POST /shutdown", s.handleShutdown)
+		mux.HandleFunc("PUT /file", s.handleUpload)
+		mux.HandleFunc("GET /file", s.handleDownload)
+		mux.HandleFunc("POST /archive", s.handleArchive)
+		mux.HandleFunc("POST /shutdown", s.handleShutdown)
 
 	var h http.Handler = mux
 	if s.clientPins != nil {
 		h = s.pinMiddleware(h)
-	}
-	if s.token != "" {
-		h = s.tokenMiddleware(h)
 	}
 	for i := len(s.middlewares) - 1; i >= 0; i-- {
 		h = s.middlewares[i](h)
@@ -150,7 +132,7 @@ func (s *Server) Handler() http.Handler {
 // pinMiddleware 校验客户端证书指纹在准许名单内（mTLS 模式生效）。
 func (s *Server) pinMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /health 仅含非敏感探测信息，放行（同 token 模式）
+		// /health 仅含非敏感探测信息，放行
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 			if r.URL.Path == "/health" {
 				next.ServeHTTP(w, r)
@@ -170,7 +152,7 @@ func (s *Server) pinMiddleware(next http.Handler) http.Handler {
 }
 
 // ListenAndServe 启动服务（阻塞）。mTLS 配置后以 TLS 启动。
-// 对外（非回环）监听且既无 token 也无 mTLS 时拒绝启动，除非 AllowNoAuth。
+// 对外（非回环）监听且未配置 mTLS 时拒绝启动，除非 AllowNoAuth。
 func (s *Server) ListenAndServe() error {
 	if err := s.checkAuthSafety(); err != nil {
 		return err
@@ -192,17 +174,17 @@ func (s *Server) ListenAndServe() error {
 }
 
 // checkAuthSafety 拒绝不安全的启动配置：/exec、/file 提供的是 root 级
-// 远程命令执行与任意文件读写，对外监听必须配置 token 或 mTLS。
+// 远程命令执行与任意文件读写，对外监听必须配置 mTLS。
 // 回环监听视为仅本机可访问，允许无认证（便于本地调试）。
 func (s *Server) checkAuthSafety() error {
-	if s.token != "" || s.clientCAs != nil || s.allowNoAuth || IsLoopbackListen(s.Listen) {
+	if s.clientCAs != nil || s.allowNoAuth || IsLoopbackListen(s.Listen) {
 		return nil
 	}
 	return fmt.Errorf("%s",
 		i18n.T("refusing to start: listening on "+s.Listen+" without auth exposes remote code execution; "+
-			"configure --token/--token-file or mTLS (--ca/--cert/--key), or pass --allow-no-auth on a trusted network",
+			"configure mTLS (--ca/--cert/--key), or pass --allow-no-auth on a trusted network",
 			"拒绝启动："+s.Listen+" 对外监听且未配置认证，等于暴露远程命令执行；"+
-				"请配置 --token/--token-file 或 mTLS（--ca/--cert/--key），可信内网可显式 --allow-no-auth"))
+				"请配置 mTLS（--ca/--cert/--key），可信内网可显式 --allow-no-auth"))
 }
 
 // IsLoopbackListen 判断监听地址是否仅绑定回环（localhost / 127.0.0.1 / ::1）。
@@ -217,19 +199,6 @@ func IsLoopbackListen(listen string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
-}
-
-// tokenMiddleware 校验 X-WDP-Token（常量时间比较；/health 放行探测）。
-func (s *Server) tokenMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := r.Header.Get(TokenHeader)
-		if r.URL.Path != "/health" &&
-			subtle.ConstantTimeCompare([]byte(got), []byte(s.token)) != 1 {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 type healthResp struct {
@@ -380,19 +349,49 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	_, _ = io.Copy(w, f)
 }
 
+// handleArchive 原生解压归档（Go 实现，不依赖目标机 tar/unzip/xz；
+// 旧版 agent 无此端点，控制端收到 404 后回退 shell 命令）。
+func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
+	src := r.URL.Query().Get("src")
+	dest := r.URL.Query().Get("dest")
+	if src == "" || dest == "" {
+		http.Error(w, "缺少 src/dest 参数", http.StatusBadRequest)
+		return
+	}
+	files, err := ExtractArchive(src, dest)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "files": files})
+}
+
 // handleShutdown 优雅退出；cleanupOnShutdown 时删除自身二进制。
 func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	go func() {
 		time.Sleep(200 * time.Millisecond) // 等响应送达
-		if s.cleanupOnShutdown.Load() && len(os.Args) > 0 {
-			_ = os.Remove(os.Args[0])
+		if s.cleanupOnShutdown.Load() {
+			s.cleanupFiles()
 		}
 		if s.httpSrv != nil {
 			_ = s.httpSrv.Shutdown(context.Background())
 		}
 		// httpSrv 为 nil（Handler 被外部嵌入测试）时仅作罢，不退出进程
 	}()
+}
+
+// cleanupFiles 删除自身二进制与 mTLS 材料文件（cleanupOnShutdown 用；
+// 证书/私钥启动时已载入内存，删除不影响运行）。
+func (s *Server) cleanupFiles() {
+	if len(os.Args) > 0 {
+		_ = os.Remove(os.Args[0])
+	}
+	for _, f := range []string{s.tlsCAFile, s.tlsCertFile, s.tlsKeyFile} {
+		if f != "" {
+			_ = os.Remove(f)
+		}
+	}
 }
 
 // becomeScript 生成提权执行脚本与最终 stdin 内容。

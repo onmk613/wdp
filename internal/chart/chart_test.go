@@ -196,3 +196,83 @@ func tarDir(src, prefix, dst string) error {
 		return err
 	})
 }
+
+// TestTgzTraversalContained 含 .. 穿越条目的 tgz 解包必须收敛在解包根内:
+// 条目被提取到解包根内部而非越出, chart 本身不受影响正常加载。
+func TestTgzTraversalContained(t *testing.T) {
+	tgz := filepath.Join(t.TempDir(), "evil-0.1.0.tgz")
+	f, err := os.Create(tgz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	members := []struct{ name, body string }{
+		{"chart.yaml", "name: demo\nversion: 0.1.0\ndescription: evil demo\n"},
+		{"deploy.yaml", "- name: t\n  hosts: all\n  tasks: []\n"},
+		{"../evil.txt", "evil"}, // 穿越条目: 须被收敛为解包根内路径
+	}
+	for _, m := range members {
+		if err := tw.WriteHeader(&tar.Header{Name: m.name, Mode: 0o644, Size: int64(len(m.body))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(m.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Load(tgz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if c.Meta.Name != "demo" {
+		t.Fatalf("chart 加载失败: %+v", c.Meta)
+	}
+	// 穿越条目被 securejoin 收敛提取到解包根内
+	if got, err := os.ReadFile(filepath.Join(c.tmpDir, "evil.txt")); err != nil || string(got) != "evil" {
+		t.Errorf("穿越条目应被收敛提取在解包根内: %v", err)
+	}
+	// 解包根之外 (tgz 所在目录与系统临时目录根) 不应出现穿越产物
+	for _, outside := range []string{
+		filepath.Join(filepath.Dir(tgz), "evil.txt"),
+		filepath.Join(os.TempDir(), "evil.txt"),
+	} {
+		if _, err := os.Stat(outside); err == nil {
+			t.Errorf("穿越条目越出了解包根: %s", outside)
+		}
+	}
+}
+
+// TestTgzExtractSizeCap 声明尺寸超出解包总量上限的 tgz 被拒绝（解压炸弹防御）：
+// 封顶检查在读正文前触发, 无需真实写出超大内容。
+func TestTgzExtractSizeCap(t *testing.T) {
+	tgz := filepath.Join(t.TempDir(), "bomb-0.1.0.tgz")
+	f, err := os.Create(tgz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(&tar.Header{Name: "chart.yaml", Mode: 0o644, Size: maxExtractBytes + 1}); err != nil {
+		t.Fatal(err)
+	}
+	// 不写正文即关闭: tar 写入器会报缺正文错误, 无关紧要——
+	// 头块已入流, 封顶检查在读取正文之前触发
+	_ = tw.Close()
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Load(tgz); err == nil || !strings.Contains(err.Error(), "解压超限") {
+		t.Fatalf("应拒绝超限包, got %v", err)
+	}
+}

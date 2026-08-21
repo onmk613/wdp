@@ -23,20 +23,23 @@ import (
 	"wdp/internal/model"
 )
 
-// startMTLS 启动带客户端证书校验的测试 agent。pinSelf=true 时把本次签发的
-// 客户端证书指纹加入准许名单；pins 为额外名单（与 pinSelf 可叠加）。
-// 返回（URL、CA 路径、控制端证书路径、控制端私钥路径）。
+// startMTLS 启动带客户端证书校验的测试 agent（服务端证书 SAN=127.0.0.1）。
 func startMTLS(t *testing.T, pinSelf bool, extraPins []string) (string, string, string, string) {
+	return startMTLSNamed(t, "127.0.0.1", pinSelf, extraPins)
+}
+
+// startMTLSNamed 服务端证书以 serverName 作为 SAN 签发（测试主机名不匹配场景）。
+func startMTLSNamed(t *testing.T, serverName string, pinSelf bool, extraPins []string) (string, string, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	if _, _, _, err := ca.Init(dir, ""); err != nil {
 		t.Fatal(err)
 	}
-	srvCrt, srvKey, _, err := ca.Issue(dir, "127.0.0.1", nil, false, 0)
+	srvCrt, srvKey, _, err := ca.Issue(ca.IssueOptions{Dir: dir}, serverName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctlCrt, ctlKey, fp, err := ca.Issue(dir, "ctl", nil, true, 0)
+	ctlCrt, ctlKey, fp, err := ca.Issue(ca.IssueOptions{Dir: dir, Client: true}, "ctl")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +48,7 @@ func startMTLS(t *testing.T, pinSelf bool, extraPins []string) (string, string, 
 		pins = append(pins, fp)
 	}
 	s := New(":0")
-	if err := s.ConfigureAuth("", "", filepath.Join(dir, ca.CAFile), srvCrt, srvKey); err != nil {
+	if err := s.ConfigureAuth(filepath.Join(dir, ca.CAFile), srvCrt, srvKey); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.PinClientFingerprints(pins); err != nil {
@@ -94,6 +97,74 @@ func TestPinInvalidFormat(t *testing.T) {
 	s := New(":0")
 	if err := s.PinClientFingerprints([]string{"not-a-fp"}); err == nil {
 		t.Fatal("非法指纹格式应报错")
+	}
+}
+
+// TestTLSSkipHostVerifyAndServerName 服务端证书 SAN 与连接地址不符时的处置：
+// 默认主机名不匹配拒绝；tls_server_name 改按证书 SAN 中的名称校验放行；
+// tls_skip_host_verify 跳过主机名但保留 CA 链校验放行（错误 CA 仍拒绝）。
+func TestTLSSkipHostVerifyAndServerName(t *testing.T) {
+	url, caPath, crt, key := startMTLSNamed(t, "agent1", true, nil)
+	ctx := context.Background()
+
+	// 默认：证书 SAN=agent1，连接地址是 127.0.0.1 → 主机名不匹配，拒绝
+	if err := agentconn.New(mtlsHost(url, caPath, crt, key)).Connect(ctx); err == nil {
+		t.Fatal("主机名不匹配应拒绝")
+	}
+
+	// tls_server_name=agent1：改按证书 SAN 中的名称校验 → 放行
+	h := mtlsHost(url, caPath, crt, key)
+	h.TLSServerName = "agent1"
+	if err := agentconn.New(h).Connect(ctx); err != nil {
+		t.Fatalf("tls_server_name 应放行: %v", err)
+	}
+
+	// tls_skip_host_verify：跳过主机名、保留链校验 → 放行
+	h2 := mtlsHost(url, caPath, crt, key)
+	h2.TLSSkipHostVerify = true
+	if err := agentconn.New(h2).Connect(ctx); err != nil {
+		t.Fatalf("tls_skip_host_verify 应放行: %v", err)
+	}
+
+	// tls_skip_host_verify 不放松链校验：换成无关 CA 仍拒绝
+	other := t.TempDir()
+	if _, _, _, err := ca.Init(other, ""); err != nil {
+		t.Fatal(err)
+	}
+	h3 := mtlsHost(url, filepath.Join(other, ca.CAFile), crt, key)
+	h3.TLSSkipHostVerify = true
+	if err := agentconn.New(h3).Connect(ctx); err == nil {
+		t.Fatal("链校验应仍然生效（错误 CA 拒绝）")
+	}
+}
+
+// TestDefaultServerNameFromHost 端口转发/NAT 场景（agent_url 入口 ≠ 证书 SAN）：
+// 默认按 host 字段（未填即 inventory 主机名）校验，无需 tls_server_name。
+func TestDefaultServerNameFromHost(t *testing.T) {
+	ctx := context.Background()
+
+	// 证书 SAN=host 字段值（IP），经 agent_url 127.0.0.1 入口连接 → 默认放行
+	url, caPath, crt, key := startMTLSNamed(t, "10.0.0.14", true, nil)
+	h := &model.Host{Name: "web1", Conn: "agent", Address: "10.0.0.14",
+		AgentURL: url, CAFile: caPath, CertFile: crt, KeyFile: key}
+	if err := agentconn.New(h).Connect(ctx); err != nil {
+		t.Fatalf("默认按 host 字段校验应放行: %v", err)
+	}
+
+	// 证书 SAN=inventory 主机名（未填 host 字段，Address 缺省即主机名）→ 默认放行
+	url2, caPath2, crt2, key2 := startMTLSNamed(t, "web1", true, nil)
+	h2 := &model.Host{Name: "web1", Conn: "agent", Address: "web1",
+		AgentURL: url2, CAFile: caPath2, CertFile: crt2, KeyFile: key2}
+	if err := agentconn.New(h2).Connect(ctx); err != nil {
+		t.Fatalf("默认按主机名校验应放行: %v", err)
+	}
+
+	// 与两者都无关的 SAN 仍拒绝（默认目标不是入口地址）
+	url3, caPath3, crt3, key3 := startMTLSNamed(t, "other-name", true, nil)
+	h3 := &model.Host{Name: "web1", Conn: "agent", Address: "10.0.0.14",
+		AgentURL: url3, CAFile: caPath3, CertFile: crt3, KeyFile: key3}
+	if err := agentconn.New(h3).Connect(ctx); err == nil {
+		t.Fatal("SAN 与主机名/host 字段均不符应拒绝")
 	}
 }
 

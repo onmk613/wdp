@@ -16,25 +16,6 @@ import (
 	"wdp/internal/render"
 )
 
-// loadChart 加载 chart 并构建 values 与引擎。
-func loadChart(path string, valuesFiles, setArgs []string) (*chart.Chart, map[string]any, *render.Engine, error) {
-	ch, err := chart.Load(path)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	values, err := ch.BuildValues(valuesFiles, setArgs)
-	if err != nil {
-		ch.Close()
-		return nil, nil, nil, err
-	}
-	eng, err := render.NewEngine(ch.CollectHelpers())
-	if err != nil {
-		ch.Close()
-		return nil, nil, nil, err
-	}
-	return ch, values, eng, nil
-}
-
 // newTemplateCmd 构造 `wdp template`。
 func newTemplateCmd() *cobra.Command {
 	var (
@@ -47,7 +28,7 @@ func newTemplateCmd() *cobra.Command {
 			"预览合并 values、模板渲染结果与任务清单（不执行）"),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ch, values, eng, err := loadChart(args[0], valuesFiles, setArgs)
+			ch, values, eng, err := chart.Open(args[0], valuesFiles, setArgs)
 			if err != nil {
 				return err
 			}
@@ -104,7 +85,7 @@ func printTasks(out io.Writer, tasks []*model.Task, domain map[string]any, eng *
 				fmt.Fprintf(out, "%s    !! %s\n", indent, err.Error())
 				continue
 			}
-			scope := subScopePreview(sub, domain)
+			scope := chart.SubScope(sub, domain)
 			for _, sp := range sub.Deploy {
 				printTasks(out, sp.Tasks, scope, eng, ch, indent+"    ")
 			}
@@ -125,25 +106,6 @@ func moduleLabel(t *model.Task) string {
 	return t.Module
 }
 
-// subScopePreview 计算子 chart 预览作用域（子默认 + 父子树 + global）。
-func subScopePreview(sub *chart.Chart, parentValues map[string]any) map[string]any {
-	scope := map[string]any{}
-	for k, v := range sub.Values {
-		scope[k] = v
-	}
-	if tree, ok := parentValues[sub.Meta.Name].(map[string]any); ok {
-		scope = chart.Merge(scope, tree)
-	}
-	if g, ok := parentValues["global"].(map[string]any); ok {
-		gc := map[string]any{}
-		for k, v := range g {
-			gc[k] = v
-		}
-		scope["global"] = gc
-	}
-	return scope
-}
-
 func sampleDomain(values map[string]any, hostname string) map[string]any {
 	sample := map[string]any{}
 	for k, v := range values {
@@ -161,7 +123,7 @@ func newLintCmd() *cobra.Command {
 		Short: i18n.T("statically validate a chart", "静态校验 chart"),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ch, values, _, err := loadChart(args[0], valuesFiles, setArgs)
+			ch, values, _, err := chart.Open(args[0], valuesFiles, setArgs)
 			if err != nil {
 				return err
 			}

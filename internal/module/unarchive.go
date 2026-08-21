@@ -1,11 +1,13 @@
 package module
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 
+	"wdp/internal/connection"
 	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
@@ -119,17 +121,6 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, free string) 
 		}
 	}
 
-	// zip 依赖 unzip，提前给出可读错误
-	if kind == "zip" {
-		out, bad := rc.exec("command -v unzip >/dev/null 2>&1")
-		if bad != nil {
-			return bad
-		}
-		if out.Code != 0 {
-			return Fail("目标机缺少 unzip（.zip 解压需要先安装 unzip 包）")
-		}
-	}
-
 	// 目标目录存在性探测：新建目录登记回滚删除
 	cur, bad := probePath(rc, dest)
 	if bad != nil {
@@ -152,14 +143,43 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, free string) 
 		}
 	}
 
+	if rc.Rollback != nil && cur == "missing" {
+		rc.Rollback.RecordRemove(dest)
+	}
+
+	// 解压双路径：agent/push 通道优先原生（agent 侧 Go 实现，不依赖目标机
+	// tar/unzip/xz，端点自建目标目录）；旧版 agent（404 哨兵）与 SSH 通道
+	// 回退 shell 命令
+	if nx, ok := rc.Conn.(connection.NativeExtractor); ok {
+		if err := nx.NativeExtract(rc.Ctx, remoteArc, dest); err == nil {
+			if remove && !remoteSrc {
+				if out, bad := rc.exec(fmt.Sprintf("rm -f -- %s", shellquote.Quote(remoteArc))); bad != nil {
+					return bad
+				} else if out.Code != 0 {
+					return Fail("清理归档失败: %s", firstLine(out.Stderr))
+				}
+			}
+			return &Result{Changed: true, Msg: fmt.Sprintf("已解压 %s 到 %s（原生）", src, dest)}
+		} else if !errors.Is(err, connection.ErrNativeUnsupported) {
+			return Fail("解压失败: %v", err)
+		}
+	}
+
+	// zip 依赖 unzip，提前给出可读错误（原生路径无此依赖）
+	if kind == "zip" {
+		out, bad := rc.exec("command -v unzip >/dev/null 2>&1")
+		if bad != nil {
+			return bad
+		}
+		if out.Code != 0 {
+			return Fail("目标机缺少 unzip（.zip 解压需要先安装 unzip 包）")
+		}
+	}
+
 	if out, bad := rc.exec(fmt.Sprintf("mkdir -p -- %s", shellquote.Quote(dest))); bad != nil {
 		return bad
 	} else if out.Code != 0 {
 		return Fail("创建目录失败: %s", firstLine(out.Stderr))
-	}
-
-	if rc.Rollback != nil && cur == "missing" {
-		rc.Rollback.RecordRemove(dest)
 	}
 
 	// 解压命令：tar 系列统一 -C dest；zip 用 unzip -o 覆盖解压

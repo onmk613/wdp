@@ -5,6 +5,7 @@ package connection
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -13,6 +14,19 @@ import (
 
 	"wdp/internal/model"
 )
+
+// ErrNativeUnsupported 表示连接不支持该原生化操作（SSH 通道、旧版常驻
+// agent、push 自举失败回退态等）。模块收到该哨兵应回退 shell 实现，
+// 其余错误按真实失败上抛。
+var ErrNativeUnsupported = errors.New("native op unsupported by this connection")
+
+// NativeExtractor 是可选的连接能力：远端归档解压由 agent 侧 Go 原生完成，
+// 不依赖目标机的 tar/unzip/xz 工具。agent/push 通道实现；模块以类型断言
+// 探测，未实现或返回 ErrNativeUnsupported 时走 shell 路径。
+type NativeExtractor interface {
+	// NativeExtract 将远端归档 src 解压到 dest 目录（dest 不存在时自动创建）。
+	NativeExtract(ctx context.Context, src, dest string) error
+}
 
 // Timeout 将时长转为毫秒值（<=0 表示不限）。
 func Timeout(d time.Duration) int64 {

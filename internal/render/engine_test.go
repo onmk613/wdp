@@ -60,7 +60,7 @@ func TestEngineIsolation(t *testing.T) {
 	if _, err := e2.Render(`{{ template "a" . }}`, nil); err == nil {
 		t.Fatal("e2 不应看到 e1 的命名模板")
 	}
-	if _, err := Render(`{{ template "a" . }}`, nil); err == nil {
+	if _, err := defaultEngine.Render(`{{ template "a" . }}`, nil); err == nil {
 		t.Fatal("默认引擎不应看到 e1 的命名模板")
 	}
 	// helpers 解析错误

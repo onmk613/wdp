@@ -29,12 +29,18 @@ type Host struct {
 
 	// agent 通道 TLS 与认证（inventory 主机条目直接配置）
 	TLS                bool   // 启用 HTTPS（公网/系统池证书场景）
-	InsecureSkipVerify bool   // 跳过服务端证书校验（明确声明的降级）
-	Token              string // token 认证（支持 "env:VAR"）
-	TokenEnv           string // token 环境变量
+	InsecureSkipVerify bool   // 跳过全部服务端证书校验（链+主机名；明确声明的降级）
+	TLSSkipHostVerify  bool   // 仅跳过主机名（SAN）校验，保留 CA 链校验（NAT/端口转发下证书 SAN 与连接地址不符时用）
+	TLSServerName      string // 显式覆盖主机名校验目标（默认：host 字段/inventory 主机名；证书 SAN 为其它名称时才需指定）
 	CAFile             string // mTLS：CA 证书（验证 agent 服务端；缺省信任系统证书池）
 	CertFile           string // mTLS：控制端客户端证书
 	KeyFile            string // mTLS：控制端客户端私钥
+
+	// 内联 mTLS 材料（PEM，内存态；push 通道注入，inventory 不配置）。
+	// 与上行三个文件字段二选一，文件路径优先。
+	CAData   []byte // CA 证书 PEM
+	CertData []byte // 客户端证书 PEM
+	KeyData  []byte // 客户端私钥 PEM
 
 	// push 临时 agent（conn: push）
 	BinaryPath string // 自举用的 wdp 二进制（缺省 os.Executable()）

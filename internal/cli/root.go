@@ -44,7 +44,7 @@ var (
 
 // 命令分组（`wdp --help` 按组分类展示；GroupID 在命令挂载时统一设置）。
 // 分组同时对应源码文件布局：run.go（部署）· new.go/chartcmd.go（应用包）·
-// ca.go/key.go（安全与信任）· agent.go（代理）· ops.go（运维与记录）。
+// ca.go/scan-ssh.go（安全与信任）· agent.go（代理）· ops.go（运维与记录）。
 const (
 	groupDeploy   = "deploy"
 	groupChart    = "chart"
@@ -170,7 +170,7 @@ func NewRootCmd() *cobra.Command {
 		grouped(groupChart, newLintCmd()),
 		grouped(groupChart, newPackageCmd()),
 		grouped(groupSecurity, newCACmd()),
-		grouped(groupSecurity, newKeyCmd()),
+		grouped(groupSecurity, newScanSshCmd()),
 		grouped(groupAgent, newAgentCmd()),
 		grouped(groupOps, newReleaseCmd()),
 		grouped(groupOps, newModulesCmd()),

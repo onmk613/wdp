@@ -9,9 +9,9 @@ import (
 	"wdp/internal/render"
 )
 
-// Formatter 是 adhoc --format 的逐主机格式化 reporter：
-// 每主机一行，按 Go 模板渲染结果域（.host .stdout .stderr .rc .changed .failed .msg），
-// 不输出任务标题与 RECAP，适配 shell 管道（wdp adhoc -m shell -a 'uptime' --format '{{.stdout}}' all）。
+// Formatter 是逐主机格式化 reporter：每主机一行，
+// 按 Go 模板渲染结果域（.host .stdout .stderr .rc .changed .failed .msg），
+// 不输出任务标题与 RECAP，适配 shell 管道。
 type Formatter struct {
 	Out    io.Writer
 	Format string

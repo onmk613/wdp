@@ -110,6 +110,29 @@ func (r *Reversibility) Summary() string {
 // Uninstallable 报告该应用包整体是否可卸载。
 func (r *Reversibility) Uninstallable() bool { return r.HasUninstall }
 
+// ---- 生命周期相位 ----
+
+// PhasePlays 返回指定生命周期相位对应的 play 清单（deploy | uninstall | status；空串按 deploy）。
+// uninstall/status 为可选清单，缺失时返回错误。
+func (c *Chart) PhasePlays(phase string) ([]*model.Play, error) {
+	switch phase {
+	case "", "deploy":
+		return c.Deploy, nil
+	case "uninstall":
+		if c.Uninstall == nil {
+			return nil, fmt.Errorf("chart %s 未提供 uninstall.yaml，不可卸载", c.Meta.Name)
+		}
+		return c.Uninstall, nil
+	case "status":
+		if c.Status == nil {
+			return nil, fmt.Errorf("chart %s 未提供 status.yaml", c.Meta.Name)
+		}
+		return c.Status, nil
+	default:
+		return nil, fmt.Errorf("未知 --phase %q（可选: deploy/uninstall/status）", phase)
+	}
+}
+
 // ---- required 校验与 values 摘要 ----
 
 // ValidateRequired 校验合并后的 values 覆盖 chart.yaml required 声明的全部点路径。

@@ -1,6 +1,7 @@
 // Package fmtutil 提供终端输出基础设施：颜色 Printer 与 CJK 宽度感知的
 // 文本表格渲染器。颜色开关集中在 Printer（强制开/强制关/按终端自动），
-// 表格单元格可单独着色，非终端或 --no-color 时自动降级为纯文本。
+// 表格单元格可单独着色，非终端、--no-color 或 NO_COLOR 环境变量
+// （no-color.org 约定）时自动降级为纯文本。
 package fmtutil
 
 // Color 是终端前景色；None 表示默认色（不着色）。

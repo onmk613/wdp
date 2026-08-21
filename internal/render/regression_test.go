@@ -10,7 +10,7 @@ func TestEnvFuncsRemoved(t *testing.T) {
 		`{{ expandenv "$HOME" }}`,
 		`{{ getHostByName "localhost" }}`,
 	} {
-		if _, err := Render(tpl, nil); err == nil {
+		if _, err := defaultEngine.Render(tpl, nil); err == nil {
 			t.Fatalf("模板 %q 应因函数被移除而报错", tpl)
 		}
 	}
@@ -18,7 +18,7 @@ func TestEnvFuncsRemoved(t *testing.T) {
 
 // TestToYamlStillAvailable 移除 env 系列不得波及其它自有函数。
 func TestToYamlStillAvailable(t *testing.T) {
-	got, err := Render(`{{ to_yaml . }}`, map[string]any{"a": 1})
+	got, err := defaultEngine.Render(`{{ to_yaml . }}`, map[string]any{"a": 1})
 	if err != nil {
 		t.Fatal(err)
 	}

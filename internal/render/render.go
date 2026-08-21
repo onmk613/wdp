@@ -52,25 +52,6 @@ var funcs = template.FuncMap{
 	},
 }
 
-// Render 用变量域渲染模板字符串（默认引擎，无 helpers）。未定义变量视为错误（尽早暴露拼写问题）。
-func Render(tpl string, vars map[string]any) (string, error) {
-	return defaultEngine.Render(tpl, vars)
-}
-
-// MustRender 渲染失败时 panic（仅用于内部确定无误的模板）。
-func MustRender(tpl string, vars map[string]any) string {
-	s, err := Render(tpl, vars)
-	if err != nil {
-		panic(err)
-	}
-	return s
-}
-
-// RenderValue 递归渲染任意值中的所有字符串（map / slice / string）。
-func RenderValue(v any, vars map[string]any) (any, error) {
-	return defaultEngine.RenderValue(v, vars)
-}
-
 // Truthy 判断渲染结果是否为真：空 / false / 0 / no 视为假。
 func Truthy(s string) bool {
 	switch strings.ToLower(strings.TrimSpace(s)) {

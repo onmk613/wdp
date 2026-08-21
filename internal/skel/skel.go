@@ -1,5 +1,5 @@
-// Package skel 提供 `wdp new` 应用包生成：内嵌最小骨架与全能力参考骨架，
-// 生成物保证 wdp lint 通过且 --check 可演练（见 skel_test.go 的 CI 门）。
+// Package skel 提供应用包骨架生成：内嵌最小骨架与全能力参考骨架，
+// 生成物保证 lint 通过且 --check 可演练（见 skel_test.go 的 CI 门）。
 // 骨架文件中的 __NAME__ 占位符在生成时替换为应用名。
 package skel
 
@@ -89,7 +89,7 @@ func writePayload(path, name string) error {
 	tw := tar.NewWriter(gz)
 	members := []struct{ name, body string }{
 		{"VERSION", name + "-0.1.0\n"},
-		{"README", "wdp new 生成的 unarchive 演示制品\n"},
+		{"README", "wdp 应用包骨架生成的 unarchive 演示制品\n"},
 	}
 	for _, m := range members {
 		if err := tw.WriteHeader(&tar.Header{Name: m.name, Mode: 0o644, Size: int64(len(m.body))}); err != nil {
@@ -108,12 +108,12 @@ func writePayload(path, name string) error {
 	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
-// ModuleSnippet 输出指定内置模块的参数文档与示例任务（wdp new --module）。
+// ModuleSnippet 输出指定内置模块的参数文档与示例任务（骨架模块片段）。
 func ModuleSnippet(name string) (string, error) {
 	m, ok := module.Get(name)
 	if !ok {
 		return "", fmt.Errorf("%s: %q (%s)",
-			i18n.T("unknown module", "未知模块"), name, i18n.T("see wdp modules for the list", "wdp modules 查看列表"))
+			i18n.T("unknown module", "未知模块"), name, i18n.T("see the built-in module list", "查看内置模块列表"))
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# %s — %s\n", name, m.Desc())

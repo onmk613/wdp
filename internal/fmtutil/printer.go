@@ -112,9 +112,14 @@ func (p *Printer) noColorLocked() bool {
 	case colorNever:
 		return true
 	default:
-		return !p.outIsTerminal
+		return !p.outIsTerminal || noColorByEnv()
 	}
 }
+
+// noColorByEnv 报告 NO_COLOR 约定是否生效：变量存在且非空即禁色
+// （无论取值，见 https://no-color.org）。仅在自动模式下参与判定，
+// 显式 SetColor(true) 的强制开色不受影响。
+func noColorByEnv() bool { return os.Getenv("NO_COLOR") != "" }
 
 // colorize 包裹颜色码；末尾换行符留在 reset 之后，纯换行不着色。
 func colorize(s string, c Color, noColor bool) string {
@@ -137,6 +142,14 @@ func colorize(s string, c Color, noColor bool) string {
 
 	return code + s[:end] + resetCode + s[end:]
 }
+
+// IsTerminal 报告 w 是否连接到终端。基于 term 的 ioctl 探测,
+// 比 ModeCharDevice 位判定更准确（/dev/null 不是终端）。
+func IsTerminal(w io.Writer) bool { return isTerminal(w) }
+
+// ColorAuto 返回当前环境的缺省颜色决策：w 为终端且 NO_COLOR 未生效。
+// CLI 的 --no-color 等显式开关应调用 SetColor(false) 覆盖本判定。
+func ColorAuto(w io.Writer) bool { return isTerminal(w) && !noColorByEnv() }
 
 func isTerminal(w io.Writer) bool {
 	f, ok := w.(*os.File)

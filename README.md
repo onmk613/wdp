@@ -51,21 +51,18 @@ inventory 主机条目通过 `conn` 选择连接类型：
 | conn | 说明 | 认证 |
 |---|---|---|
 | `ssh`（默认） | 标准 SSH（base64 脚本传输，SFTP 优先/降级 exec 流式） | 认证链：私钥（`key_passphrase` 支持口令）→ ssh-agent → 默认密钥 → `password`/`password_env`（含 keyboard-interactive）；`host_key_check: true` 启用 known_hosts 校验；`become_password` 支持密码 sudo |
-| `agent` | 常驻 HTTP(S) agent 直连 | 无认证 / token（`token`/`token_env`）/ mTLS（`ca_file`+`cert_file`+`key_file`） |
-| `push` | SSH 自举临时 agent：上传自身二进制与随机 token 文件（ps 不可见）→ 远端**真端口**启动（默认 7602，`agent_port` 可指定，占用自动换端口）→ 控制端直连 HTTP（不经 SSH 隧道）→ 结束自删（`keep_agent: true` 保留）。⚠️ 明文 HTTP：token 与 become 密码明文过网，仅在可信内网使用（启动时输出告警） | token（自动随机生成）；自举失败自动回退纯 SSH |
+| `agent` | 常驻 HTTP(S) agent 直连 | 无认证（默认仅回环）/ mTLS（`ca_file`+`cert_file`+`key_file`） |
+| `push` | SSH 自举临时 agent：上传自身二进制与会话级临时 mTLS 三件套（一次性 CA，全部主机共享，可配置轮换）→ 远端**真端口**启动（默认 7602，`agent_port` 可指定，占用自动换端口）→ 控制端 HTTPS 直连（不经 SSH 隧道，全程 TLS 加密）→ 结束自删二进制与证书（`keep_agent: true` 保留） | 临时 mTLS（客户端证书即凭证）；自举失败自动回退纯 SSH |
 | `local` | 本机执行（演练/CI） | 无（注意：local 通道忽略 become） |
 
-敏感值支持 `env:VAR` 引用或 `*_env` 独立键（`password_env`/`token_env`/`become_password_env`…），避免 inventory 明文。
+敏感值支持 `env:VAR` 引用或 `*_env` 独立键（`password_env`/`become_password_env`…），避免 inventory 明文。
 
-### agent 认证部署（token / mTLS）
+### agent 认证部署（mTLS）
 
-安全默认：`wdp agent` 仅绑定回环地址；对外监听且未配置认证时**拒绝启动**
+安全默认：`wdp agent` 仅绑定回环地址；对外监听且未配置 mTLS 时**拒绝启动**
 （`--allow-no-auth` 可显式放行可信内网），避免无意暴露命令执行原语。
 
 ```sh
-# token 模式
-ssh target 'wdp agent --listen 0.0.0.0:7602 --token <secret> &'   # 或 systemd（examples/wdp-agent.service）
-
 # mTLS 模式（自建 CA）
 export WDP_CA_PASSPHRASE=...                    # 可选：CA 私钥加密口令
 wdp ca init --dir ./ca --passphrase             # CA（10 年，PathLen=0，私钥加密落盘）
@@ -424,9 +421,9 @@ wdp adhoc -m shell -a 'uptime' [--format '{{.stdout}}'] [--check|--diff] <主机
 wdp new <name> [--full] [--module m] [--dir d]
 wdp template / lint / package <chart>
 wdp ca init / issue / renew  # mTLS 证书工具（加密 CA / 短周期 / 续期）
-wdp key scan <主机模式>       # 采集 SSH 主机指纹到 known_hosts
+wdp scan-ssh <主机模式>            # 采集 SSH 主机指纹到 known_hosts
 wdp release list / show / diff
-wdp agent [--token | --token-file | --ca/--cert/--key] [--pin-client-fp <指纹>]
+wdp agent [--ca/--cert/--key] [--pin-client-fp <指纹>]
 wdp modules [模块名] / version
 ```
 
@@ -455,7 +452,7 @@ color = true                 # 颜色输出
 [ssh]                        # inventory 主机条目未显式指定时的连接默认值
 user = "root"
 connect_timeout = 10
-host_key_check = true          # 安全默认；新主机先 wdp key scan 采集指纹
+host_key_check = true          # 安全默认；新主机先 wdp scan-ssh 采集指纹
 known_hosts = ""             # 空 = ~/.ssh/known_hosts
 
 [agent]
@@ -490,10 +487,10 @@ internal/
   module/               模块注册表 + 内置模块（check/diff/回滚感知）+ 脚本模块机制
   connection/           Connection 接口 + Manager（建连限流）
     sshconn/            SSH（认证链/known_hosts/密码 sudo/SFTP）
-    agentconn/          HTTP(S) agent 客户端（token/mTLS）
-    pushagent/          临时 agent 自举（真端口 + token 文件 + 自清理 + 回退）
+    agentconn/          HTTP(S) agent 客户端（mTLS）
+    pushagent/          临时 agent 自举（临时 mTLS + 证书轮换 + 自清理 + 回退）
     localconn/          本机执行
-  agent/                agent 服务端（token/mTLS/shutdown/自清理）
+  agent/                agent 服务端（mTLS/shutdown/自清理）
   ca/                   自建 CA 与证书签发
   release/              部署记录
   report/               控制台输出（级别体系/展示控制/diff 着色）+ JSON + 格式化
@@ -504,12 +501,11 @@ internal/
 ## 已知限制与路线图
 
 - push 临时 agent 要求目标机与控制端二进制平台一致（或 `binary_path` 指定预编译产物）
-- become 密码在 agent 通道经请求体明文传输（建议仅在 TLS/token 内网使用）
+- become 密码在未启用 mTLS 的常驻 agent 通道经请求体明文传输（对外纳管建议 mTLS）；push 通道全程临时 mTLS 加密
 - `local` 通道忽略 become（本机执行不提权）
-- `host_key_check` 默认开启：新主机首次连接前需 `wdp key scan <模式>` 采集指纹
+- `host_key_check` 默认开启：新主机首次连接前需 `wdp scan-ssh <模式>` 采集指纹
   （明确接受风险时可 `host_key_check: false` 关闭）
 - 无 CRL/OCSP：证书吊销依赖指纹名单（`--pin-client-fp`）与短周期轮换（`ca renew --new-key`）
-- token 认证无过期时间（走明文 HTTP 时仅限可信内网，建议 TLS 部署）
 - 自动回滚覆盖文件类变更（copy/template/file/unarchive）；shell/package/service/user
   的过程性变更无法自动回滚
 - `wait_for` 的端口探测为控制端视角（目标机本地防火墙视角可能不同；需要目标机视角时用 shell + until）

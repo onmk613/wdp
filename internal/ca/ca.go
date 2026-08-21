@@ -1,21 +1,22 @@
 // Package ca 提供自建 CA 与证书签发（crypto/x509 标准库实现）。
-// 用于 agent 通道 mTLS 双向认证：
+// 用于 agent 通道 mTLS 双向认证，能力包括：
 //
-//	wdp ca init --dir . [--passphrase]          # 生成 ca.crt / ca.key（可加密存储）
-//	wdp ca issue --name agent1 [--san 10.0.0.14（可多次）] [--days 30]
-//	                                            # 签发服务端证书（SAN=agent1+附加，多地址主机一张证书全覆盖）
-//	wdp ca issue --name ctl --client            # 签发控制端客户端证书
-//	wdp ca renew --name agent1 [--new-key]      # 续期（保留 SAN/EKU/密钥）
+//   - 初始化：生成 ca.crt / ca.key（私钥可加密存储）
+//   - 导入：复用已有 CA 证书/私钥对（二次分发同一信任链，支持组织既有 CA）
+//   - 签发服务端证书：SAN = 主机名 + 附加地址（多地址主机一张证书全覆盖）
+//   - 签发控制端客户端证书
+//   - 续期：保留 SAN/EKU/密钥
 //
 // 安全设计：
 //   - CA 私钥可用口令加密落盘（PBKDF2-SHA256 10万轮 + AES-256-GCM），
-//     口令经 --passphrase 或环境变量 WDP_CA_PASSPHRASE 提供
-//   - 叶子证书默认 90 天（可用 --days 调整），到期用 ca renew 轮换
+//     口令可显式提供或经环境变量 WDP_CA_PASSPHRASE 传入
+//   - 叶子证书默认 30 天（签发时可调），到期轮换（保留 SAN/EKU/密钥）
 //   - CA 设置 PathLen=0：即便私钥泄漏也不能签发中间 CA
-//   - 签发/续期输出证书 SHA256 指纹，供 agent --pin-client-fp 精确吊销
+//   - 签发/续期输出证书 SHA256 指纹，供 agent 端精确吊销
 package ca
 
 import (
+	"crypto"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/ecdsa"
@@ -43,7 +44,7 @@ const (
 	KeyFile    = "ca.key"
 	caValidity = 10 * 365 * 24 * time.Hour // CA 有效期 10 年
 	// DefaultDays 是叶子证书默认有效期（短周期 + renew 轮换，压缩泄漏窗口）。
-	DefaultDays = 90
+	DefaultDays = 30
 	// PassphraseEnv 是 CA 私钥口令的环境变量名。
 	PassphraseEnv = "WDP_CA_PASSPHRASE"
 
@@ -56,8 +57,10 @@ const (
 func PassphraseFromEnv() string { return os.Getenv(PassphraseEnv) }
 
 // Init 在 dir 生成自签 CA。passphrase 非空时私钥加密存储。
-// 返回 (caPath, keyPath, 证书指纹)。
+// 返回 (caPath, keyPath, 证书指纹)。口令解析：显式参数优先，其次环境变量
+// WDP_CA_PASSPHRASE，两者皆空 = 明文存储（与 --passphrase 帮助文案一致）。
 func Init(dir, passphrase string) (string, string, string, error) {
+	passphrase = firstNonEmpty(passphrase, PassphraseFromEnv())
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", "", "", err
 	}
@@ -98,69 +101,120 @@ func Init(dir, passphrase string) (string, string, string, error) {
 	return caPath, keyPath, FingerprintDER(der), nil
 }
 
-// LoadCA 读取 CA 证书与私钥（加密私钥需口令：显式参数优先，其次环境变量）。
-func LoadCA(dir, passphrase string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
-	certPEM, err := os.ReadFile(filepath.Join(dir, CAFile))
+// Import 将已有 CA 证书/私钥对导入 dir 作为本工具的 CA 复用（二次分发：
+// 多环境共享同一信任链，已信任该 CA 的 agent 无需重新建立信任）。
+// 校验：证书是 CA 且未过期、私钥与证书公钥匹配。passphrase 同时用于解密源私钥
+// 与加密落盘副本（显式参数优先，其次环境变量；两者皆空 = 明文存储）。
+func Import(dir, certSrc, keySrc, passphrase string) (string, string, string, error) {
+	passphrase = firstNonEmpty(passphrase, PassphraseFromEnv())
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", "", "", err
+	}
+	caPath, keyPath := filepath.Join(dir, CAFile), filepath.Join(dir, KeyFile)
+	if _, err := os.Stat(caPath); err == nil {
+		return "", "", "", fmt.Errorf("%s 已存在（如需替换请先删除）", caPath)
+	}
+	cert, err := parseCertificate(certSrc)
+	if err != nil {
+		return "", "", "", fmt.Errorf("读取 CA 证书失败: %w", err)
+	}
+	if !cert.IsCA {
+		return "", "", "", fmt.Errorf("%s 不是 CA 证书（BasicConstraints CA=false）", certSrc)
+	}
+	if time.Now().After(cert.NotAfter) {
+		return "", "", "", fmt.Errorf("CA 证书已过期（%s），无法用于签发", cert.NotAfter.Format(time.RFC3339))
+	}
+	der, err := readKey(keySrc, passphrase)
+	if err != nil {
+		return "", "", "", fmt.Errorf("读取 CA 私钥失败: %w", err)
+	}
+	signer, err := parsePrivateKey(der)
+	if err != nil {
+		return "", "", "", fmt.Errorf("读取 CA 私钥失败: %w", err)
+	}
+	if !pubEqual(cert.PublicKey, signer.Public()) {
+		return "", "", "", fmt.Errorf("CA 证书与私钥不匹配（%s / %s）", certSrc, keySrc)
+	}
+	if err := writePEM(caPath, "CERTIFICATE", cert.Raw, 0o644); err != nil {
+		return "", "", "", err
+	}
+	if err := writeKey(keyPath, der, passphrase); err != nil {
+		return "", "", "", err
+	}
+	return caPath, keyPath, FingerprintDER(cert.Raw), nil
+}
+
+// LoadCAAt 按显式路径读取 CA 证书与私钥（加密私钥需口令：显式参数优先，其次环境变量）。
+// 私钥支持 SEC1 EC 与 PKCS8（EC/RSA/Ed25519 等实现 crypto.Signer 的类型）。
+func LoadCAAt(certPath, keyPath, passphrase string) (*x509.Certificate, crypto.Signer, error) {
+	cert, err := parseCertificate(certPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("读取 CA 证书失败: %w", err)
 	}
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return nil, nil, fmt.Errorf("解析 CA 证书 PEM 失败")
-	}
-	cert, err := x509.ParseCertificate(block.Bytes)
+	der, err := readKey(keyPath, firstNonEmpty(passphrase, PassphraseFromEnv()))
 	if err != nil {
 		return nil, nil, err
 	}
-	keyDER, err := readKey(filepath.Join(dir, KeyFile), firstNonEmpty(passphrase, PassphraseFromEnv()))
+	key, err := parsePrivateKey(der)
 	if err != nil {
 		return nil, nil, err
-	}
-	key, err := x509.ParseECPrivateKey(keyDER)
-	if err != nil {
-		return nil, nil, fmt.Errorf("解析 CA 私钥失败: %w", err)
 	}
 	return cert, key, nil
+}
+
+// LoadCA 读取 <dir>/ca.crt 与 <dir>/ca.key。
+func LoadCA(dir, passphrase string) (*x509.Certificate, crypto.Signer, error) {
+	return LoadCAAt(filepath.Join(dir, CAFile), filepath.Join(dir, KeyFile), passphrase)
+}
+
+// IssueOptions 是签发参数。CACertPath/CAKeyPath 为空时取 <Dir>/ca.crt|ca.key，
+// 可显式指定以复用任意位置的 CA（如导入的或组织既有 CA）。
+type IssueOptions struct {
+	Dir        string   // 叶子证书输出目录
+	CACertPath string   // CA 证书路径（空 = <Dir>/ca.crt）
+	CAKeyPath  string   // CA 私钥路径（空 = <Dir>/ca.key）
+	Passphrase string   // CA 私钥口令（空 = 取环境变量）
+	SANs       []string // 服务端证书附加 SAN
+	Client     bool     // 签控制端客户端证书
+	Days       int      // 有效期天数，<=0 用 DefaultDays
 }
 
 // Issue 用 CA 签发证书。client=false 签服务端证书（SAN 含 name，IP 名同时加 IP SAN），
 // client=true 签控制端客户端证书。sans 为服务端证书追加的额外 SAN
 // （IP 或域名，自动去重）——多地址/NAT/端口转发主机一张证书覆盖全部可达地址。
-// 产物 <dir>/<name>.crt / <name>.key。返回 (certPath, keyPath, 指纹)。days<=0 用 DefaultDays。
-func Issue(dir, name string, sans []string, client bool, days int) (string, string, string, error) {
+// 产物 <dir>/<name>.crt / <name>.key。返回 (certPath, keyPath, 指纹)。
+func Issue(o IssueOptions, name string) (string, string, string, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return "", "", "", err
 	}
-	tpl, err := leafTemplate(name, sans, client, days)
+	tpl, err := leafTemplate(name, o.SANs, o.Client, o.Days)
 	if err != nil {
 		return "", "", "", err
 	}
-	certPath, keyPath, fp, err := signAndWrite(dir, name, tpl, key)
-	if err != nil {
-		return "", "", "", err
-	}
-	return certPath, keyPath, fp, nil
+	return signAndWrite(o.Dir, o.CACertPath, o.CAKeyPath, o.Passphrase, name, tpl, key)
+}
+
+// RenewOptions 是续期参数（CA 路径语义同 IssueOptions）。
+type RenewOptions struct {
+	Dir        string // 叶子证书输出目录，兼原证书/私钥读取目录
+	CACertPath string // CA 证书路径（空 = <Dir>/ca.crt）
+	CAKeyPath  string // CA 私钥路径（空 = <Dir>/ca.key）
+	Passphrase string // CA 私钥口令（空 = 取环境变量）
+	NewKey     bool   // 换新私钥（旧证书立即失效）
+	Days       int    // 新有效期天数，<=0 用 DefaultDays
 }
 
 // Renew 续期已有证书：保留 CN/SAN/EKU 与原私钥（newKey=true 换新私钥）。
-// 返回 (certPath, keyPath, 指纹)。days<=0 用 DefaultDays。
-func Renew(dir, name string, newKey bool, days int) (string, string, string, error) {
-	certPath := filepath.Join(dir, name+".crt")
-	certPEM, err := os.ReadFile(certPath)
+// 返回 (certPath, keyPath, 指纹)。
+func Renew(o RenewOptions, name string) (string, string, string, error) {
+	certPath := filepath.Join(o.Dir, name+".crt")
+	old, err := parseCertificate(certPath)
 	if err != nil {
 		return "", "", "", fmt.Errorf("读取原证书失败（%s）: %w", certPath, err)
 	}
-	block, _ := pem.Decode(certPEM)
-	if block == nil {
-		return "", "", "", fmt.Errorf("解析原证书 PEM 失败")
-	}
-	old, err := x509.ParseCertificate(block.Bytes)
-	if err != nil {
-		return "", "", "", err
-	}
 
-	tpl, err := leafTemplate("", nil, false, days) // 基础模板，字段随后从旧证书继承（SAN 全量继承）
+	tpl, err := leafTemplate("", nil, false, o.Days) // 基础模板，字段随后从旧证书继承（SAN 全量继承）
 	if err != nil {
 		return "", "", "", err
 	}
@@ -170,12 +224,12 @@ func Renew(dir, name string, newKey bool, days int) (string, string, string, err
 	tpl.ExtKeyUsage = old.ExtKeyUsage
 
 	var key *ecdsa.PrivateKey
-	if newKey {
+	if o.NewKey {
 		if key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
 			return "", "", "", err
 		}
 	} else {
-		keyDER, err := readKey(filepath.Join(dir, name+".key"), "")
+		keyDER, err := readKey(filepath.Join(o.Dir, name+".key"), "")
 		if err != nil {
 			return "", "", "", fmt.Errorf("读取原私钥失败: %w", err)
 		}
@@ -183,7 +237,7 @@ func Renew(dir, name string, newKey bool, days int) (string, string, string, err
 			return "", "", "", fmt.Errorf("解析原私钥失败: %w", err)
 		}
 	}
-	return signAndWrite(dir, name, tpl, key)
+	return signAndWrite(o.Dir, o.CACertPath, o.CAKeyPath, o.Passphrase, name, tpl, key)
 }
 
 // leafTemplate 构造叶子证书模板。sans 追加额外 SAN（IP → IP SAN，域名 → DNS SAN，
@@ -227,13 +281,24 @@ func leafTemplate(name string, sans []string, client bool, days int) (*x509.Cert
 }
 
 // signAndWrite 用 CA 签发模板并落盘证书/私钥（私钥不加密——叶子密钥短周期轮换）。
-func signAndWrite(dir, name string, tpl *x509.Certificate, key *ecdsa.PrivateKey) (string, string, string, error) {
-	caCert, caKey, err := LoadCA(dir, "")
+// CA 取自 caCertPath/caKeyPath（空时回退 <dir>/ca.crt|ca.key）。
+func signAndWrite(dir, caCertPath, caKeyPath, passphrase, name string, tpl *x509.Certificate, key *ecdsa.PrivateKey) (string, string, string, error) {
+	if caCertPath == "" {
+		caCertPath = filepath.Join(dir, CAFile)
+	}
+	if caKeyPath == "" {
+		caKeyPath = filepath.Join(dir, KeyFile)
+	}
+	caCert, caKey, err := LoadCAAt(caCertPath, caKeyPath, passphrase)
 	if err != nil {
 		return "", "", "", err
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tpl, caCert, &key.PublicKey, caKey)
 	if err != nil {
+		return "", "", "", err
+	}
+	// 输出目录可与 CA 目录分离（--ca-cert/--ca-key），不存在时创建
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", "", "", err
 	}
 	certPath := filepath.Join(dir, name+".crt")
@@ -254,9 +319,11 @@ func signAndWrite(dir, name string, tpl *x509.Certificate, key *ecdsa.PrivateKey
 // ---- 加密私钥信封：PBKDF2-SHA256(10万轮) → AES-256-GCM ----
 // payload = salt(16) | nonce(12) | AEAD(DER)
 
+// writeKey 落盘私钥：passphrase 非空时加密为 wdp 信封，否则明文
+// （PEM 类型按 DER 编码自动识别 SEC1 EC / PKCS8，导入的密钥保持原编码）。
 func writeKey(path string, der []byte, passphrase string) error {
 	if passphrase == "" {
-		return writePEM(path, plainPEMType, der, 0o600)
+		return writePEM(path, keyPEMType(der), der, 0o600)
 	}
 	enc, err := encryptDER(der, passphrase)
 	if err != nil {
@@ -368,6 +435,51 @@ func ParsePin(s string) (string, error) {
 }
 
 // ---- 基础工具 ----
+
+// parseCertificate 读取证书 PEM 文件并解析。
+func parseCertificate(path string) (*x509.Certificate, error) {
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, fmt.Errorf("%s 不是证书 PEM", path)
+	}
+	return x509.ParseCertificate(block.Bytes)
+}
+
+// parsePrivateKey 解析私钥 DER（SEC1 EC 或 PKCS8），须实现 crypto.Signer
+// （导入的组织 CA 可能是 RSA/Ed25519 等 PKCS8 密钥）。
+func parsePrivateKey(der []byte) (crypto.Signer, error) {
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, fmt.Errorf("解析私钥失败（支持 SEC1 EC / PKCS8）: %w", err)
+	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("私钥类型 %T 不支持签名", key)
+	}
+	return signer, nil
+}
+
+// pubEqual 比较两个公钥（标准库密钥类型均实现 Equal）。
+func pubEqual(a, b crypto.PublicKey) bool {
+	type equaler interface{ Equal(crypto.PublicKey) bool }
+	ae, ok := a.(equaler)
+	return ok && ae.Equal(b)
+}
+
+// keyPEMType 按 DER 编码识别明文私钥 PEM 类型。
+func keyPEMType(der []byte) string {
+	if _, err := x509.ParseECPrivateKey(der); err == nil {
+		return plainPEMType
+	}
+	return "PRIVATE KEY"
+}
 
 func writePEM(path, blockType string, der []byte, mode os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)

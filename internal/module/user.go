@@ -67,11 +67,27 @@ func (m *UserModule) Example() string {
     state: absent`
 }
 
-// Run 执行用户管理。
-func (m *UserModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+// userReq 是 user 模块解析后的参数。
+type userReq struct {
+	name         string
+	state        string
+	primaryGroup string
+	shell        string
+	home         string
+	password     string
+	uid          int
+	groups       []string
+	hasUID       bool
+	hasGroups    bool
+	appendGroups bool
+	system       bool
+}
+
+// parseUserArgs 解析并校验 user 模块参数。
+func parseUserArgs(args map[string]any) (*userReq, *Result) {
 	name, ok := argStr(args, "name")
 	if !ok || name == "" {
-		return Fail("user 需要 name 参数")
+		return nil, Fail("user 需要 name 参数")
 	}
 	state, _ := argStr(args, "state")
 	if state == "" {
@@ -80,214 +96,234 @@ func (m *UserModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 	switch state {
 	case "present", "absent":
 	default:
-		return Fail("不支持的 state %q（可选: present/absent）", state)
+		return nil, Fail("不支持的 state %q（可选: present/absent）", state)
 	}
-	uid, hasUID := argInt(args, "uid")
-	primaryGroup, _ := argStr(args, "group")
-	groups, hasGroups := argStrList(args, "groups")
-	appendGroups, _ := argBool(args, "append")
-	shell, _ := argStr(args, "shell")
-	home, _ := argStr(args, "home")
-	system, _ := argBool(args, "system")
-	password, _ := argStr(args, "password")
+	u := &userReq{name: name, state: state}
+	u.uid, u.hasUID = argInt(args, "uid")
+	u.primaryGroup, _ = argStr(args, "group")
+	u.groups, u.hasGroups = argStrList(args, "groups")
+	u.appendGroups, _ = argBool(args, "append")
+	u.shell, _ = argStr(args, "shell")
+	u.home, _ = argStr(args, "home")
+	u.system, _ = argBool(args, "system")
+	u.password, _ = argStr(args, "password")
+	return u, nil
+}
 
-	exists, bad := userExists(rc, name)
+// Run 执行用户管理：absent 删除 / present 创建缺失 / 已存在则按漂移项校正。
+func (m *UserModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+	u, bad := parseUserArgs(args)
 	if bad != nil {
 		return bad
 	}
 
-	// absent：存在则删除
-	if state == "absent" {
-		if !exists {
-			return &Result{Msg: fmt.Sprintf("用户 %s 不存在", name)}
-		}
-		if !rc.Become {
-			return Fail("删除用户需要 become: true")
-		}
-		if rc.CheckMode {
-			res := &Result{Changed: true, Msg: fmt.Sprintf("[check] 用户 %s 将删除（含 home）", name)}
-			if rc.DiffMode {
-				res.Diff = fmt.Sprintf("- %s（用户将删除）", name)
-			}
-			return res
-		}
-		if out, bad := rc.exec(fmt.Sprintf("userdel -r %s", shellquote.Quote(name))); bad != nil {
-			return bad
-		} else if out.Code != 0 {
-			return Fail("userdel 失败: %s", firstLine(out.Stderr))
-		}
-		return &Result{Changed: true, Msg: fmt.Sprintf("用户 %s 已删除", name)}
+	exists, bad := userExists(rc, u.name)
+	if bad != nil {
+		return bad
 	}
-
-	// present：缺失则创建
+	if u.state == "absent" {
+		return userAbsent(rc, u.name, exists)
+	}
 	if !exists {
-		if !rc.Become {
-			return Fail("创建用户需要 become: true")
-		}
-		var flags []string
-		if system {
-			flags = append(flags, "-r")
-		}
-		if hasUID {
-			flags = append(flags, "-u", strconv.Itoa(uid))
-		}
-		if primaryGroup != "" {
-			flags = append(flags, "-g", shellquote.Quote(primaryGroup))
-		}
-		if hasGroups {
-			flags = append(flags, "-G", shellquote.Quote(strings.Join(groups, ",")))
-		}
-		if shell != "" {
-			flags = append(flags, "-s", shellquote.Quote(shell))
-		}
-		if home != "" {
-			flags = append(flags, "-d", shellquote.Quote(home), "-m")
-		}
-		if password != "" {
-			flags = append(flags, "-p", shellquote.Quote(password))
-		}
-		script := fmt.Sprintf("useradd %s %s", strings.Join(flags, " "), shellquote.Quote(name))
-		if rc.CheckMode {
-			res := &Result{Changed: true, Msg: fmt.Sprintf("[check] 用户 %s 将创建", name)}
-			if rc.DiffMode {
-				var d []string
-				d = append(d, fmt.Sprintf("+ %s（新建用户%s）", name, boolTo(system, "，系统账号", "")))
-				if hasUID {
-					d = append(d, "+ uid "+strconv.Itoa(uid))
-				}
-				if primaryGroup != "" {
-					d = append(d, "+ group "+primaryGroup)
-				}
-				if hasGroups {
-					d = append(d, "+ groups "+strings.Join(groups, ","))
-				}
-				if shell != "" {
-					d = append(d, "+ shell "+shell)
-				}
-				if home != "" {
-					d = append(d, "+ home "+home)
-				}
-				res.Diff = joinLines(d)
-			}
-			return res
-		}
-		if out, bad := rc.exec(script); bad != nil {
-			return bad
-		} else if out.Code != 0 {
-			return Fail("useradd 失败: %s", firstLine(out.Stderr))
-		}
-		return &Result{Changed: true, Msg: fmt.Sprintf("用户 %s 已创建", name)}
+		return userCreate(rc, u)
 	}
+	return userModify(rc, u)
+}
 
-	// present 且已存在：逐属性探测漂移，仅校正漂移项
-	drift, diffLines, bad := userDrift(rc, name, hasUID, uid, primaryGroup, hasGroups, groups, appendGroups, shell, home)
+// userAbsent 删除存在的用户（含 home）。
+func userAbsent(rc *RunContext, name string, exists bool) *Result {
+	if !exists {
+		return &Result{Msg: fmt.Sprintf("用户 %s 不存在", name)}
+	}
+	if !rc.Become {
+		return Fail("删除用户需要 become: true")
+	}
+	if rc.CheckMode {
+		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] 用户 %s 将删除（含 home）", name)}
+		if rc.DiffMode {
+			res.Diff = fmt.Sprintf("- %s（用户将删除）", name)
+		}
+		return res
+	}
+	if out, bad := rc.exec(fmt.Sprintf("userdel -r %s", shellquote.Quote(name))); bad != nil {
+		return bad
+	} else if out.Code != 0 {
+		return Fail("userdel 失败: %s", firstLine(out.Stderr))
+	}
+	return &Result{Changed: true, Msg: fmt.Sprintf("用户 %s 已删除", name)}
+}
+
+// userCreate 创建缺失用户（useradd flags 组装；check 模式输出创建内容 diff）。
+func userCreate(rc *RunContext, u *userReq) *Result {
+	if !rc.Become {
+		return Fail("创建用户需要 become: true")
+	}
+	var flags []string
+	if u.system {
+		flags = append(flags, "-r")
+	}
+	if u.hasUID {
+		flags = append(flags, "-u", strconv.Itoa(u.uid))
+	}
+	if u.primaryGroup != "" {
+		flags = append(flags, "-g", shellquote.Quote(u.primaryGroup))
+	}
+	if u.hasGroups {
+		flags = append(flags, "-G", shellquote.Quote(strings.Join(u.groups, ",")))
+	}
+	if u.shell != "" {
+		flags = append(flags, "-s", shellquote.Quote(u.shell))
+	}
+	if u.home != "" {
+		flags = append(flags, "-d", shellquote.Quote(u.home), "-m")
+	}
+	if u.password != "" {
+		flags = append(flags, "-p", shellquote.Quote(u.password))
+	}
+	script := fmt.Sprintf("useradd %s %s", strings.Join(flags, " "), shellquote.Quote(u.name))
+	if rc.CheckMode {
+		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] 用户 %s 将创建", u.name)}
+		if rc.DiffMode {
+			var d []string
+			d = append(d, fmt.Sprintf("+ %s（新建用户%s）", u.name, boolTo(u.system, "，系统账号", "")))
+			if u.hasUID {
+				d = append(d, "+ uid "+strconv.Itoa(u.uid))
+			}
+			if u.primaryGroup != "" {
+				d = append(d, "+ group "+u.primaryGroup)
+			}
+			if u.hasGroups {
+				d = append(d, "+ groups "+strings.Join(u.groups, ","))
+			}
+			if u.shell != "" {
+				d = append(d, "+ shell "+u.shell)
+			}
+			if u.home != "" {
+				d = append(d, "+ home "+u.home)
+			}
+			res.Diff = joinLines(d)
+		}
+		return res
+	}
+	if out, bad := rc.exec(script); bad != nil {
+		return bad
+	} else if out.Code != 0 {
+		return Fail("useradd 失败: %s", firstLine(out.Stderr))
+	}
+	return &Result{Changed: true, Msg: fmt.Sprintf("用户 %s 已创建", u.name)}
+}
+
+// userModify 校正已存在用户的属性漂移（探测漂移项，usermod 仅调整漂移项）。
+func userModify(rc *RunContext, u *userReq) *Result {
+	drift, diffLines, bad := userDrift(rc, u)
 	if bad != nil {
 		return bad
 	}
 	if len(drift) == 0 {
-		return &Result{Msg: fmt.Sprintf("用户 %s 已是目标状态", name)}
+		return &Result{Msg: fmt.Sprintf("用户 %s 已是目标状态", u.name)}
 	}
 	if !rc.Become {
-		return Fail("用户 %s 属性漂移（%s），校正需要 become: true", name, strings.Join(drift, "、"))
+		return Fail("用户 %s 属性漂移（%s），校正需要 become: true", u.name, strings.Join(drift, "、"))
 	}
 	if rc.CheckMode {
 		return &Result{
 			Changed: true,
-			Msg:     fmt.Sprintf("[check] 用户 %s: 将调整 %s", name, strings.Join(drift, "、")),
+			Msg:     fmt.Sprintf("[check] 用户 %s: 将调整 %s", u.name, strings.Join(drift, "、")),
 			Diff:    joinLines(diffLines),
 		}
 	}
 	var flags []string
-	if hasUID && containsStr(drift, "uid") {
-		flags = append(flags, "-u", strconv.Itoa(uid))
+	if u.hasUID && containsStr(drift, "uid") {
+		flags = append(flags, "-u", strconv.Itoa(u.uid))
 	}
-	if primaryGroup != "" && containsStr(drift, "group") {
-		flags = append(flags, "-g", shellquote.Quote(primaryGroup))
+	if u.primaryGroup != "" && containsStr(drift, "group") {
+		flags = append(flags, "-g", shellquote.Quote(u.primaryGroup))
 	}
-	if hasGroups && containsStr(drift, "groups") {
-		if appendGroups {
-			flags = append(flags, "-aG", shellquote.Quote(strings.Join(groups, ",")))
+	if u.hasGroups && containsStr(drift, "groups") {
+		if u.appendGroups {
+			flags = append(flags, "-aG", shellquote.Quote(strings.Join(u.groups, ",")))
 		} else {
-			flags = append(flags, "-G", shellquote.Quote(strings.Join(groups, ",")))
+			flags = append(flags, "-G", shellquote.Quote(strings.Join(u.groups, ",")))
 		}
 	}
-	if shell != "" && containsStr(drift, "shell") {
-		flags = append(flags, "-s", shellquote.Quote(shell))
+	if u.shell != "" && containsStr(drift, "shell") {
+		flags = append(flags, "-s", shellquote.Quote(u.shell))
 	}
-	if home != "" && containsStr(drift, "home") {
-		flags = append(flags, "-d", shellquote.Quote(home), "-m")
+	if u.home != "" && containsStr(drift, "home") {
+		flags = append(flags, "-d", shellquote.Quote(u.home), "-m")
 	}
-	script := fmt.Sprintf("usermod %s %s", strings.Join(flags, " "), shellquote.Quote(name))
+	script := fmt.Sprintf("usermod %s %s", strings.Join(flags, " "), shellquote.Quote(u.name))
 	if out, bad := rc.exec(script); bad != nil {
 		return bad
 	} else if out.Code != 0 {
 		return Fail("usermod 失败: %s", firstLine(out.Stderr))
 	}
-	return &Result{Changed: true, Msg: fmt.Sprintf("用户 %s: 已调整 %s", name, strings.Join(drift, "、"))}
+	return &Result{Changed: true, Msg: fmt.Sprintf("用户 %s: 已调整 %s", u.name, strings.Join(drift, "、"))}
 }
 
 // userDrift 探测已存在用户的属性漂移，返回（漂移字段名列表、diff 行、失败）。
 // 仅比较显式提供的参数；groups 与主组并集后做集合比较保证幂等。
 // append=true 时 groups 语义为"确保成员"（不删除既有附加组，走 usermod -aG），
 // 避免整体覆盖把既有 wheel/sudo 之类附加组悄悄移除。
-func userDrift(rc *RunContext, name string, hasUID bool, uid int, primaryGroup string, hasGroups bool, groups []string, appendGroups bool, shell, home string) ([]string, []string, *Result) {
+func userDrift(rc *RunContext, u *userReq) ([]string, []string, *Result) {
+	name := u.name
 	var drift, diff []string
-	if hasUID {
+	if u.hasUID {
 		cur, bad := userUID(rc, name)
 		if bad != nil {
 			return nil, nil, bad
 		}
-		if want := strconv.Itoa(uid); cur != want {
+		if want := strconv.Itoa(u.uid); cur != want {
 			drift = append(drift, "uid")
 			diff = append(diff, "- uid "+cur, "+ uid "+want)
 		}
 	}
 	curPrimary := ""
-	if primaryGroup != "" || hasGroups {
+	if u.primaryGroup != "" || u.hasGroups {
 		var bad *Result
 		curPrimary, bad = userPrimaryGroup(rc, name)
 		if bad != nil {
 			return nil, nil, bad
 		}
-		if primaryGroup != "" && primaryGroup != curPrimary {
+		if u.primaryGroup != "" && u.primaryGroup != curPrimary {
 			drift = append(drift, "group")
-			diff = append(diff, "- group "+curPrimary, "+ group "+primaryGroup)
+			diff = append(diff, "- group "+curPrimary, "+ group "+u.primaryGroup)
 		}
 	}
-	if hasGroups {
+	if u.hasGroups {
 		curFull, bad := userGroups(rc, name)
 		if bad != nil {
 			return nil, nil, bad
 		}
-		wantPrimary := primaryGroup
+		wantPrimary := u.primaryGroup
 		if wantPrimary == "" {
 			wantPrimary = curPrimary
 		}
 		var want []string
-		if appendGroups {
+		if u.appendGroups {
 			// 确保成员：目标 = 当前全集 ∪ 附加组（主组恒保留，既有组不丢）
-			want = sortUnique(append(append([]string{}, curFull...), groups...))
+			want = sortUnique(append(append([]string{}, curFull...), u.groups...))
 		} else {
 			// 整体覆盖：目标全集 = 附加组 + 主组
-			want = sortUnique(append(append([]string{}, groups...), wantPrimary))
+			want = sortUnique(append(append([]string{}, u.groups...), wantPrimary))
 		}
 		if joinSorted(curFull) != joinSorted(want) {
 			drift = append(drift, "groups")
 			diff = append(diff, "- groups "+joinSorted(curFull), "+ groups "+joinSorted(want))
 		}
 	}
-	if shell != "" || home != "" {
+	if u.shell != "" || u.home != "" {
 		curHome, curShell, bad := userPasswd(rc, name)
 		if bad != nil {
 			return nil, nil, bad
 		}
-		if shell != "" && shell != curShell {
+		if u.shell != "" && u.shell != curShell {
 			drift = append(drift, "shell")
-			diff = append(diff, "- shell "+curShell, "+ shell "+shell)
+			diff = append(diff, "- shell "+curShell, "+ shell "+u.shell)
 		}
-		if home != "" && home != curHome {
+		if u.home != "" && u.home != curHome {
 			drift = append(drift, "home")
-			diff = append(diff, "- home "+curHome, "+ home "+home)
+			diff = append(diff, "- home "+curHome, "+ home "+u.home)
 		}
 	}
 	return drift, diff, nil

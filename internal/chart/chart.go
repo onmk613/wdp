@@ -11,10 +11,12 @@ import (
 	"strings"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/cyphar/filepath-securejoin"
 	"gopkg.in/yaml.v3"
 
 	"wdp/internal/model"
 	"wdp/internal/playbook"
+	"wdp/internal/render"
 )
 
 // Meta 是 chart.yaml 元数据。
@@ -61,6 +63,15 @@ type Chart struct {
 	tmpDir string // tgz 解包临时目录（Close 时清理）
 }
 
+// IsChartPath 判断路径是否按 chart 目标处理（目录或 .tgz 包；不存在时按后缀判断）。
+func IsChartPath(path string) bool {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return strings.HasSuffix(path, ".tgz")
+	}
+	return fi.IsDir() || strings.HasSuffix(path, ".tgz")
+}
+
 // Load 加载 chart：目录或 .tgz 包。
 // tgz 包会解到临时目录，使用完毕后应调用 Close。
 func Load(path string) (*Chart, error) {
@@ -75,6 +86,26 @@ func Load(path string) (*Chart, error) {
 		return loadTgz(path)
 	}
 	return nil, fmt.Errorf("%s 既不是 chart 目录也不是 .tgz 包", path)
+}
+
+// Open 加载 chart 并完成执行前准备：合并 values 覆盖（-f 文件与 --set 点路径）
+// 并基于 helpers 构建模板引擎。返回的 chart 使用完毕后应调用 Close。
+func Open(path string, valuesFiles, setArgs []string) (*Chart, map[string]any, *render.Engine, error) {
+	ch, err := Load(path)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	values, err := ch.BuildValues(valuesFiles, setArgs)
+	if err != nil {
+		ch.Close()
+		return nil, nil, nil, err
+	}
+	eng, err := render.NewEngine(ch.CollectHelpers())
+	if err != nil {
+		ch.Close()
+		return nil, nil, nil, err
+	}
+	return ch, values, eng, nil
 }
 
 // Close 释放资源（tgz 临时目录）。
@@ -159,6 +190,10 @@ func loadDir(dir string) (*Chart, error) {
 	return c, nil
 }
 
+// maxExtractBytes 是 tgz 解包总量上限（按条目声明 Size 累计）：
+// 防御解压炸弹耗尽磁盘；正常 chart 包远小于此值。
+const maxExtractBytes = 2 << 30 // 2 GiB
+
 // loadTgz 解包到临时目录后按目录加载（防御路径穿越）。
 func loadTgz(path string) (*Chart, error) {
 	f, err := os.Open(path)
@@ -176,6 +211,7 @@ func loadTgz(path string) (*Chart, error) {
 	if err != nil {
 		return nil, err
 	}
+	var total int64 // 已解包累计字节（解压炸弹封顶用）
 	tr := tar.NewReader(gz)
 	for {
 		hdr, err := tr.Next()
@@ -186,11 +222,16 @@ func loadTgz(path string) (*Chart, error) {
 			os.RemoveAll(tmp)
 			return nil, fmt.Errorf("读取 tar 失败: %w", err)
 		}
-		name := filepath.Clean(hdr.Name)
-		if name == "." || strings.HasPrefix(name, "..") {
-			continue
+		// 解包目标经 securejoin 约束在 tmp 内: .. 穿越、绝对路径
+		// 与符号链接条目均收敛为 tmp 内路径, 不会越出解包根目录.
+		target, jerr := securejoin.SecureJoin(tmp, hdr.Name)
+		if jerr != nil {
+			os.RemoveAll(tmp)
+			return nil, fmt.Errorf("解包路径 %q 解析失败: %w", hdr.Name, jerr)
 		}
-		target := filepath.Join(tmp, name)
+		if target == tmp {
+			continue // "." 等退化为解包根本身的条目跳过
+		}
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(target, 0o755); err != nil {
@@ -198,6 +239,11 @@ func loadTgz(path string) (*Chart, error) {
 				return nil, err
 			}
 		case tar.TypeReg:
+			if hdr.Size < 0 || total+hdr.Size > maxExtractBytes {
+				os.RemoveAll(tmp)
+				return nil, fmt.Errorf("chart 包解压超限: %s 声明 %d 字节, 超出总量上限 %d 字节（疑似解压炸弹）",
+					hdr.Name, hdr.Size, maxExtractBytes)
+			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				os.RemoveAll(tmp)
 				return nil, err
@@ -207,11 +253,14 @@ func loadTgz(path string) (*Chart, error) {
 				os.RemoveAll(tmp)
 				return nil, err
 			}
-			if _, err := io.Copy(out, tr); err != nil {
+			// CopyN 按 hdr.Size 拷贝, 与 tar 读取器的条目边界一致;
+			// 流提前截断时返回 ErrUnexpectedEOF
+			if _, err := io.CopyN(out, tr, hdr.Size); err != nil {
 				out.Close()
 				os.RemoveAll(tmp)
 				return nil, err
 			}
+			total += hdr.Size
 			out.Close()
 		}
 	}

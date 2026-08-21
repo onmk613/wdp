@@ -4,7 +4,7 @@ import "testing"
 
 func TestRenderBasic(t *testing.T) {
 	vars := map[string]any{"name": "web", "port": 8080}
-	got, err := Render("hello {{ .name }}:{{ .port }}", vars)
+	got, err := defaultEngine.Render("hello {{ .name }}:{{ .port }}", vars)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -14,14 +14,14 @@ func TestRenderBasic(t *testing.T) {
 }
 
 func TestRenderNoTemplate(t *testing.T) {
-	got, err := Render("plain text", nil)
+	got, err := defaultEngine.Render("plain text", nil)
 	if err != nil || got != "plain text" {
 		t.Fatalf("got %q err %v", got, err)
 	}
 }
 
 func TestRenderMissingKey(t *testing.T) {
-	if _, err := Render("{{ .nope }}", map[string]any{}); err == nil {
+	if _, err := defaultEngine.Render("{{ .nope }}", map[string]any{}); err == nil {
 		t.Fatal("期望未定义变量报错")
 	}
 }
@@ -41,7 +41,7 @@ func TestRenderFuncs(t *testing.T) {
 		{`{{ quote "hi" }}`, `"hi"`},
 	}
 	for _, c := range cases {
-		got, err := Render(c.tpl, vars)
+		got, err := defaultEngine.Render(c.tpl, vars)
 		if err != nil {
 			t.Fatalf("%s: %v", c.tpl, err)
 		}
@@ -58,7 +58,7 @@ func TestRenderValueRecursive(t *testing.T) {
 		"list":   []any{"{{ .h }}", 42, nil},
 		"nested": map[string]any{"x": "http://{{ .h }}"},
 	}
-	out, err := RenderValue(in, vars)
+	out, err := defaultEngine.RenderValue(in, vars)
 	if err != nil {
 		t.Fatal(err)
 	}

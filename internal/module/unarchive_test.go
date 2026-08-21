@@ -1,6 +1,8 @@
 package module
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -266,5 +268,87 @@ func TestUnarchiveValidation(t *testing.T) {
 	r := mod.Run(rc2, map[string]any{"src": dir + "/a.tar", "dest": "/opt/app"}, "")
 	if !r.Failed || !strings.Contains(r.Msg, "不是目录") {
 		t.Fatalf("dest 非目录: %+v", r)
+	}
+}
+
+// nativeConn 包装假连接并实现 NativeExtractor（模拟 agent/push 通道）。
+type nativeConn struct {
+	*connection.Fake
+	calls []string
+	err   error
+}
+
+func (n *nativeConn) NativeExtract(ctx context.Context, src, dest string) error {
+	n.calls = append(n.calls, src+"→"+dest)
+	return n.err
+}
+
+// TestUnarchiveNativePreferred 原生路径优先：目标机没有 unzip 也能解 zip，
+// 且不触发任何 shell 解压命令。
+func TestUnarchiveNativePreferred(t *testing.T) {
+	dir := writeArchive(t, "app.zip", "zip-bytes")
+	rc, fake, sh := newUnarchiveRC(t)
+	sh.cmds["unzip"] = false // 目标机没有 unzip
+	rc.BaseDir = dir
+	nc := &nativeConn{Fake: fake}
+	rc.Conn = nc
+
+	r := (&UnarchiveModule{}).Run(rc, map[string]any{"src": "app.zip", "dest": "/opt/app"}, "")
+	if r.Failed {
+		t.Fatalf("原生解压应成功: %s", r.Msg)
+	}
+	if len(nc.calls) != 1 || !strings.Contains(nc.calls[0], "→/opt/app") {
+		t.Fatalf("应恰好一次原生解压: %v", nc.calls)
+	}
+	for _, s := range sh.runs {
+		if strings.Contains(s, "unzip") || strings.Contains(s, "tar -x") {
+			t.Fatalf("不应触发 shell 解压: %v", sh.runs)
+		}
+	}
+	if !strings.Contains(r.Msg, "原生") {
+		t.Fatalf("消息应标注原生: %q", r.Msg)
+	}
+}
+
+// TestUnarchiveNativeUnsupportedFallsBack 旧版 agent 哨兵 → 回退 shell unzip。
+func TestUnarchiveNativeUnsupportedFallsBack(t *testing.T) {
+	dir := writeArchive(t, "app.zip", "zip-bytes")
+	rc, fake, sh := newUnarchiveRC(t)
+	sh.cmds["unzip"] = true
+	rc.BaseDir = dir
+	nc := &nativeConn{Fake: fake, err: connection.ErrNativeUnsupported}
+	rc.Conn = nc
+
+	r := (&UnarchiveModule{}).Run(rc, map[string]any{"src": "app.zip", "dest": "/opt/app"}, "")
+	if r.Failed {
+		t.Fatalf("回退解压应成功: %s", r.Msg)
+	}
+	found := false
+	for _, s := range sh.runs {
+		if strings.Contains(s, "unzip -o") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("应回退 shell unzip: %v", sh.runs)
+	}
+}
+
+// TestUnarchiveNativeErrorFailsLoud 原生解压真实失败（非哨兵）不回退、显式上抛。
+func TestUnarchiveNativeErrorFailsLoud(t *testing.T) {
+	dir := writeArchive(t, "app.tar.gz", "bytes")
+	rc, fake, sh := newUnarchiveRC(t)
+	rc.BaseDir = dir
+	nc := &nativeConn{Fake: fake, err: errors.New("归档损坏")}
+	rc.Conn = nc
+
+	r := (&UnarchiveModule{}).Run(rc, map[string]any{"src": "app.tar.gz", "dest": "/opt/app"}, "")
+	if !r.Failed || !strings.Contains(r.Msg, "归档损坏") {
+		t.Fatalf("真实失败应上抛: %+v", r)
+	}
+	for _, s := range sh.runs {
+		if strings.Contains(s, "tar -x") {
+			t.Fatalf("不应回退 shell: %v", sh.runs)
+		}
 	}
 }

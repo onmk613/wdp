@@ -110,10 +110,10 @@ func wrapKeyError(cb ssh.HostKeyCallback) ssh.HostKeyCallback {
 		if err != nil {
 			var ke *knownhosts.KeyError
 			if errors.As(err, &ke) && len(ke.Want) == 0 {
-				return fmt.Errorf("主机 %s 的指纹不在 known_hosts 中（首次连接请先执行 `wdp key scan` 采集）: %w", hostname, err)
+				return fmt.Errorf("主机 %s 的指纹不在 known_hosts 中（首次连接请先采集主机指纹）: %w", hostname, err)
 			}
 			if errors.As(err, &ke) && len(ke.Want) > 0 {
-				return fmt.Errorf("主机 %s 指纹与 known_hosts 记录不一致（疑似中间人攻击；确认无误后删除旧记录再 wdp key scan）: %w", hostname, err)
+				return fmt.Errorf("主机 %s 指纹与 known_hosts 记录不一致（疑似中间人攻击；确认无误后删除旧记录重新采集）: %w", hostname, err)
 			}
 		}
 		return err
@@ -467,9 +467,11 @@ func ScanHostKey(h *model.Host) (ssh.PublicKey, error) {
 	return nil, fmt.Errorf("未采集到主机公钥")
 }
 
-// KnownHostsMarker 返回主机在 known_hosts 中的主机段（非 22 端口用 [host]:port 格式）。
+// KnownHostsMarker 返回主机在 known_hosts 中的主机段：非 22 端口或地址含
+// 冒号（IPv6 字面量）一律 [host]:port——对齐 OpenSSH put_host_port 行为，
+// 否则 IPv6@22 写成裸地址，与校验侧 JoinHostPort 产物 [addr]:22 失配。
 func KnownHostsMarker(h *model.Host) string {
-	if h.Port != 22 {
+	if h.Port != 22 || strings.Contains(h.Address, ":") {
 		return fmt.Sprintf("[%s]:%d", h.Address, h.Port)
 	}
 	return h.Address

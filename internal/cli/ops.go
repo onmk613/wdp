@@ -23,7 +23,13 @@ func newReleaseCmd() *cobra.Command {
 		Use:   "release",
 		Short: i18n.T("deployment record viewing (list / show)", "部署记录查看（list / show）"),
 	}
-	listCmd := &cobra.Command{
+	cmd.AddCommand(newReleaseListCmd(), newReleaseShowCmd(), newReleaseDiffCmd())
+	return cmd
+}
+
+// newReleaseListCmd 构造 `wdp release list`。
+func newReleaseListCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "list [chart名前缀]",
 		Short: "列出部署记录（新在前）",
 		Args:  cobra.MaximumNArgs(1),
@@ -55,9 +61,12 @@ func newReleaseCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
 
+// newReleaseShowCmd 构造 `wdp release show`。
+func newReleaseShowCmd() *cobra.Command {
 	var asValues bool
-	showCmd := &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "show <id>",
 		Short: "查看记录详情（--values 输出 values 快照 YAML，可直接 -f 重放）",
 		Args:  cobra.ExactArgs(1),
@@ -88,10 +97,14 @@ func newReleaseCmd() *cobra.Command {
 			return nil
 		},
 	}
-	showCmd.Flags().BoolVar(&asValues, "values", false,
+	cmd.Flags().BoolVar(&asValues, "values", false,
 		i18n.T("print only the values snapshot (YAML)", "仅输出 values 快照（YAML）"))
+	return cmd
+}
 
-	diffCmd := &cobra.Command{
+// newReleaseDiffCmd 构造 `wdp release diff`。
+func newReleaseDiffCmd() *cobra.Command {
+	return &cobra.Command{
 		Use:   "diff <id1> <id2>",
 		Short: "对比两次部署记录的 values 快照（升级前回答这次会改哪些参数）",
 		Args:  cobra.ExactArgs(2),
@@ -110,8 +123,7 @@ func newReleaseCmd() *cobra.Command {
 			out := cmd.OutOrStdout()
 			fmt.Fprintf(out, "对比 %s（%s %s）→ %s（%s %s）\n",
 				a.ID, a.Chart, a.Version, b.ID, b.Chart, b.Version)
-			var lines []string
-			diffValues("", a.Values, b.Values, &lines)
+			lines := release.DiffValues(a.Values, b.Values)
 			if len(lines) == 0 {
 				fmt.Fprintln(out, "values 完全一致（无参数变更）")
 				return nil
@@ -122,9 +134,6 @@ func newReleaseCmd() *cobra.Command {
 			return nil
 		},
 	}
-
-	cmd.AddCommand(listCmd, showCmd, diffCmd)
-	return cmd
 }
 
 // newModulesCmd 构造 `wdp modules`。
@@ -163,42 +172,6 @@ func printYAML(out io.Writer, v any) error {
 	}
 	_, err = out.Write(b)
 	return err
-}
-
-// diffValues 递归对比两份 values，输出 - 路径: 旧值 / + 路径: 新值 行。
-func diffValues(prefix string, a, b map[string]any, out *[]string) {
-	keys := map[string]bool{}
-	for k := range a {
-		keys[k] = true
-	}
-	for k := range b {
-		keys[k] = true
-	}
-	for k := range keys {
-		path := k
-		if prefix != "" {
-			path = prefix + "." + k
-		}
-		av, aok := a[k]
-		bv, bok := b[k]
-		switch {
-		case !aok:
-			*out = append(*out, fmt.Sprintf("+ %s: %v（新增）", path, bv))
-		case !bok:
-			*out = append(*out, fmt.Sprintf("- %s: %v（删除）", path, av))
-		default:
-			am, aIsMap := av.(map[string]any)
-			bm, bIsMap := bv.(map[string]any)
-			if aIsMap && bIsMap {
-				diffValues(path, am, bm, out)
-				continue
-			}
-			if fmt.Sprint(av) != fmt.Sprint(bv) {
-				*out = append(*out, fmt.Sprintf("- %s: %v", path, av))
-				*out = append(*out, fmt.Sprintf("+ %s: %v", path, bv))
-			}
-		}
-	}
 }
 
 func boolLabel(failed bool) string {
