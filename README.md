@@ -395,7 +395,7 @@ wdp release diff <id1> <id2>                # 对比两次部署的 values（升
 | `template` | 本地渲染 Go 模板后分发（幂等同 copy） |
 | `package` | 自动识别 apt/dnf/yum/apk/zypper（读 /etc/os-release） |
 | `service` | systemd 状态与自启管理 |
-| `setup` | 采集 facts（os/hostname/cpus/memory/disk/default_ipv4），自动并入变量域 |
+| `setup` | 采集 facts（os/hostname/cpus/memory/disk/default_ipv4/euid），自动并入变量域 |
 | `user` / `group` | 系统用户/组管理（探测漂移才变更，需 become） |
 | `systemd_unit` | 下发 .service 单元 + daemon-reload + enable/状态管理（复用幂等推送） |
 | `unarchive` | 本地/远端 tar(.gz/.xz)/zip 解包（`creates` 幂等守卫） |

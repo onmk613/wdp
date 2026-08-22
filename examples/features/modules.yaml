@@ -7,7 +7,8 @@
 # 复跑验证幂等：file/copy/template/unarchive/lineinfile 等应收敛为 ok/skipped。
 #
 # 系统级模块（package/user/group/service/systemd_unit）读 /etc/os-release 判定家族，
-# 在非 Linux 目标（如 macOS 演练机）上由 when 守卫跳过；alpine 无 systemd 单独排除。
+# 仅在 Linux 且 root（setup 采集的 euid=0）时执行；macOS 演练机与非 root 环境
+# （如 CI runner）由 when 守卫跳过；alpine 无 systemd 单独排除。
 - name: 内置模块全集
   hosts: all
   vars:
@@ -92,7 +93,7 @@
       package:
         name: [curl]
         state: present
-      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (eq .euid 0) }}yes{{ end }}'
       become: true
 
     # ---------- 10. service：systemd 状态管理（systemd 家族） ----------
@@ -101,7 +102,7 @@
         name: cron
         state: started
         enabled: true
-      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") (eq .euid 0) }}yes{{ end }}'
       become: true
 
     # ---------- 11/12. user / group：系统用户组（漂移探测幂等，仅 Linux） ----------
@@ -109,7 +110,7 @@
       group:
         name: demogrp
         system: true
-      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (eq .euid 0) }}yes{{ end }}'
       become: true
 
     - name: user 创建用户
@@ -118,7 +119,7 @@
         group: demogrp
         shell: /usr/sbin/nologin
         system: true
-      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (eq .euid 0) }}yes{{ end }}'
       become: true
 
     # ---------- 13. systemd_unit：下发单元 + daemon-reload + 状态 ----------
@@ -135,7 +136,7 @@
           WantedBy=multi-user.target
         enabled: true
         state: stopped
-      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") (eq .euid 0) }}yes{{ end }}'
       become: true
 
     # ---------- 14. unarchive：解包制品（creates 幂等守卫） ----------
@@ -197,7 +198,7 @@
       user:
         name: demouser
         state: absent
-      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (eq .euid 0) }}yes{{ end }}'
       become: true
 
   handlers:

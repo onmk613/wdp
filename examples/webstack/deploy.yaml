@@ -70,7 +70,7 @@
         src: templates/orders-api.service.tpl
         state: restarted
         enabled: true
-      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") (eq .euid 0) }}yes{{ end }}'
       become: true
       notify: 重启 orders-api
 
@@ -85,7 +85,7 @@
         host: "{{ (index .hosts .inventory_hostname).address }}"
         port: "{{ .app.port }}"
         timeout: 30
-      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") (eq .euid 0) }}yes{{ end }}'
 
     # ---------- 脚本模块：chart 自带健康自检（check 模式默认跳过） ----------
     - name: 应用自检（modules/orders-health）
@@ -116,7 +116,7 @@
       systemd_unit:
         name: "{{ .app.name }}.service"
         state: restarted
-      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") (eq .euid 0) }}yes{{ end }}'
       become: true
 
 - name: lb 反向代理部署（nginx 子 chart 展开）

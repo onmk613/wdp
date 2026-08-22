@@ -6,7 +6,7 @@
       group:
         name: "{{ .group }}"
         system: true
-      when: '{{ if and .os (ne .os.family "unknown") .create_user }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") .create_user (eq .euid 0) }}yes{{ end }}'
       become: true
 
     - name: 应用用户（nologin 系统账户）
@@ -15,7 +15,7 @@
         group: "{{ .group }}"
         shell: /usr/sbin/nologin
         system: true
-      when: '{{ if and .os (ne .os.family "unknown") .create_user }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") .create_user (eq .euid 0) }}yes{{ end }}'
       become: true
 
     - name: 发布目录骨架（releases/ shared/，全平台生效）

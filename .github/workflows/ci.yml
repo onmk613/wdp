@@ -44,7 +44,17 @@ jobs:
           fi
 
       - name: Test（含竞态检测）
-        run: go test -race -count=1 ./...
+        run: |
+          set -o pipefail
+          go test -race -count=1 ./... 2>&1 | tee /tmp/wdp-test.log
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            # 失败行输出为 annotation（仓库公开时匿名 API 可读，便于定位）
+            grep -E '^--- FAIL|^FAIL|^panic|DATA RACE' /tmp/wdp-test.log | head -20 | while IFS= read -r line; do
+              echo "::error::${line:0:200}"
+            done
+            exit $rc
+          fi
 
       - name: golangci-lint（配置见 .golangci.yml）
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1 run

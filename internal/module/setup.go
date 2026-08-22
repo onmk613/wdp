@@ -32,6 +32,7 @@ const setupScript = `echo "hostname=$(hostname 2>/dev/null || echo unknown)"
 echo "kernel=$(uname -r 2>/dev/null)"
 echo "arch=$(uname -m 2>/dev/null)"
 echo "default_ipv4=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{print $7; exit}')"
+echo "euid=$(id -u 2>/dev/null || echo 1)"
 if [ -f /etc/os-release ]; then . /etc/os-release; fi
 echo "os_id=${ID:-unknown}"
 echo "os_name=${NAME:-}"
@@ -62,6 +63,12 @@ func (m *SetupModule) Run(rc *RunContext, args map[string]any, free string) *Res
 		"version": kv["os_version"],
 		"family":  osFamily(kv["os_id"]),
 	}
+	// euid（有效用户 id）：系统级任务（package/user/systemd_unit 等）的
+	// root 守卫依据；采集失败按非 root 处理（守卫侧安全默认=跳过）
+	euid := -1
+	if kv["euid"] != "" {
+		euid = atoi(kv["euid"])
+	}
 	percent := 0
 	if p := strings.TrimSuffix(kv["disk_percent"], "%"); p != "" {
 		percent = atoi(p)
@@ -77,6 +84,7 @@ func (m *SetupModule) Run(rc *RunContext, args map[string]any, free string) *Res
 		"kernel":       kv["kernel"],
 		"arch":         kv["arch"],
 		"default_ipv4": kv["default_ipv4"],
+		"euid":         euid,
 		"cpus":         atoi(kv["cpus"]),
 		"memory_mb":    atoi(kv["memory_mb"]),
 		"os":           osFacts,

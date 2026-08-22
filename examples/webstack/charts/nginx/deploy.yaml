@@ -5,7 +5,7 @@
       package:
         name: [nginx]
         state: present
-      when: '{{ if and .os (ne .os.family "unknown") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (eq .euid 0) }}yes{{ end }}'
       become: true
 
     - name: 配置目录（conf_dir 演练环境为 /tmp，生产为 /etc/nginx/conf.d）
