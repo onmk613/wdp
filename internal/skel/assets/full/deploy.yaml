@@ -60,7 +60,7 @@
       rescue:
         - name: 系统段失败兜底（示例环境无 systemd/无 root 时走这里）
           shell: 'echo "system 段跳过: {{ .block_failed_msgs }}"'
-      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") (eq .euid 0) }}yes{{ end }}'
 
     - name: 应用目录
       file:

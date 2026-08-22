@@ -17,7 +17,7 @@
         name: "{{ .app.name }}.service"
         state: stopped
         enabled: false
-      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") (eq .euid 0) }}yes{{ end }}'
       become: true
       ignore_errors: true
 
@@ -25,7 +25,7 @@
       file:
         path: /etc/systemd/system/{{ .app.name }}.service
         state: absent
-      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") (eq .euid 0) }}yes{{ end }}'
       become: true
 
     - name: 删除应用目录（含 releases/versions、shared、current）
@@ -37,7 +37,7 @@
       user:
         name: "{{ .common.user }}"
         state: absent
-      when: '{{ if and .os (ne .os.family "unknown") .common.create_user }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") .common.create_user (eq .euid 0) }}yes{{ end }}'
       become: true
 
     - name: 卸载完成通知
@@ -61,5 +61,5 @@
       service:
         name: nginx
         state: reloaded
-      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") }}yes{{ end }}'
+      when: '{{ if and .os (ne .os.family "unknown") (ne .os.family "alpine") (eq .euid 0) }}yes{{ end }}'
       become: true
