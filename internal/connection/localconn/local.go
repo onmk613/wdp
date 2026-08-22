@@ -11,14 +11,16 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"wdp/internal/connection"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
 func init() {
-	connection.RegisterFactory("local", func(h *model.Host) (connection.Connection, error) {
+	connection.RegisterFactory("local", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
 		return &Local{host: h.Name}, nil
 	})
 }
@@ -37,12 +39,28 @@ func (l *Local) Close() error { return nil }
 // Hostname 返回主机名。
 func (l *Local) Hostname() string { return l.host }
 
+// warnBecomeIgnored local 通道忽略 become 的一次性告警（每进程一条，
+// 避免多任务重复刷屏）。静默以非预期用户执行比告警更危险。
+var warnBecomeIgnored = func() func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			fmt.Fprintln(os.Stderr, i18n.T(
+				"[warn] local connection ignores become; tasks run as the current user",
+				"[警告] local 通道忽略 become，任务以当前用户执行"))
+		})
+	}
+}()
+
 // Exec 在本地以 sh 执行脚本。
 func (l *Local) Exec(ctx context.Context, req connection.ExecRequest) (connection.ExecResult, error) {
 	if req.TimeoutMs > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, msDur(req.TimeoutMs))
 		defer cancel()
+	}
+	if req.BecomeUser != "" {
+		warnBecomeIgnored()
 	}
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", req.Script)
 	cmd.Dir = "/"
@@ -91,7 +109,7 @@ func (l *Local) UploadFile(ctx context.Context, dst string, r io.Reader, mode fs
 		return err
 	}
 	if err := os.Rename(tmpName, dst); err != nil {
-		return fmt.Errorf("落盘 %s 失败: %w", dst, err)
+		return fmt.Errorf(i18n.T("failed to write %s to disk: %w", "落盘 %s 失败: %w"), dst, err)
 	}
 	return nil
 }

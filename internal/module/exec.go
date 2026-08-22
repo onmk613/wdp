@@ -53,7 +53,7 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 		}
 	}
 	if script == "" {
-		return Fail("shell/command 需要命令内容，如 `shell: uptime`")
+		return Fail("%s", i18n.T("shell/command requires command content, e.g. `shell: uptime`", "shell/command 需要命令内容，如 `shell: uptime`"))
 	}
 	// creates: 文件已存在则跳过（幂等保护）
 	if creates, ok := argStr(args, "creates"); ok && creates != "" {
@@ -62,7 +62,7 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 			return bad
 		}
 		if out.Code == 0 {
-			return &Result{Msg: fmt.Sprintf("%s 已存在，跳过", creates)}
+			return &Result{Msg: fmt.Sprintf(i18n.T("%s already exists, skipping", "%s 已存在，跳过"), creates)}
 		}
 	}
 	// removes: 文件不存在则跳过
@@ -72,14 +72,14 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 			return bad
 		}
 		if out.Code != 0 {
-			return &Result{Msg: fmt.Sprintf("%s 不存在，跳过", removes)}
+			return &Result{Msg: fmt.Sprintf(i18n.T("%s does not exist, skipping", "%s 不存在，跳过"), removes)}
 		}
 	}
 	if cwd, ok := argStr(args, "chdir"); ok && cwd != "" {
 		script = fmt.Sprintf("cd %s && %s", shellquote.Quote(cwd), script)
 	}
 	if rc.CheckMode {
-		return &Result{Changed: true, Msg: "[check] 将执行: " + firstLine(script)}
+		return &Result{Changed: true, Msg: i18n.T("[check] will execute: ", "[check] 将执行: ") + firstLine(script)}
 	}
 	out, bad := rc.exec(script)
 	res := &Result{
@@ -93,7 +93,7 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 	}
 	if out.Code != 0 {
 		res.Failed = true
-		res.Msg = fmt.Sprintf("非零退出码 rc=%d", out.Code)
+		res.Msg = fmt.Sprintf(i18n.T("non-zero exit code rc=%d", "非零退出码 rc=%d"), out.Code)
 	}
 	return res
 }

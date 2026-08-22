@@ -2,26 +2,49 @@ package inventory
 
 import (
 	"fmt"
+	"sync"
 
 	"wdp/internal/config"
 	"wdp/internal/model"
 )
 
-// hostKeys 是主机条目中的连接参数键，其余进入 Vars。
-var hostKeys = map[string]bool{
-	"host": true, "port": true, "user": true, "password": true, "password_env": true,
-	"key_path": true, "key_passphrase": true, "key_passphrase_env": true,
-	"conn": true, "agent_url": true, "agent_port": true,
-	"host_key_check": true, "known_hosts": true, "connect_timeout": true,
-	"ca_file": true, "cert_file": true, "key_file": true,
-	"binary_path": true, "keep_agent": true,
-	"become_password": true, "become_password_env": true,
-	"tls": true, "insecure_skip_verify": true, "tls_skip_host_verify": true, "tls_server_name": true,
+// hostKeys 是主机条目中连接参数键的白名单（其余键进入 Vars）。
+// 内置基线为 SSH 通道与通用键；各连接包经 RegisterHostKeys 在 init 中
+// 注册自己的专属键（与 connection.RegisterFactory 同一 blank-import 路径），
+// 新增连接类型无需改动本包。
+var (
+	hostKeysMu sync.RWMutex
+	hostKeys   = map[string]bool{
+		"host": true, "port": true, "user": true, "password": true, "password_env": true,
+		"key_path": true, "key_passphrase": true, "key_passphrase_env": true,
+		"conn":           true,
+		"host_key_check": true, "known_hosts": true, "connect_timeout": true,
+		"become_password": true, "become_password_env": true,
+	}
+)
+
+// RegisterHostKeys 注册连接类型的专属主机条目键（由连接实现包 init 调用）。
+func RegisterHostKeys(keys ...string) {
+	hostKeysMu.Lock()
+	defer hostKeysMu.Unlock()
+	for _, k := range keys {
+		hostKeys[k] = true
+	}
 }
 
-func buildHost(name string, vars map[string]any) (*model.Host, error) {
-	// 连接默认值取 wdp.cfg 的 [ssh]（主机条目未显式指定的键生效）
-	cfg := config.Current()
+// isHostKey 判断键是否为连接参数键。
+func isHostKey(k string) bool {
+	hostKeysMu.RLock()
+	defer hostKeysMu.RUnlock()
+	return hostKeys[k]
+}
+
+func buildHost(name string, vars map[string]any, cfg *config.Config) (*model.Host, error) {
+	// 连接默认值取调用方显式传入的 wdp.cfg [ssh] 配置（主机条目未显式指定的键生效；
+	// 组合根传 config.Current()，测试与内联构造传 nil 即内置默认）
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
 	h := &model.Host{
 		Name:              name,
 		Vars:              map[string]any{},
@@ -33,7 +56,7 @@ func buildHost(name string, vars map[string]any) (*model.Host, error) {
 		ConnectTimeoutSec: cfg.SSHConnectTimeout(),
 	}
 	for k, v := range vars {
-		if !hostKeys[k] {
+		if !isHostKey(k) {
 			h.Vars[k] = v
 			continue
 		}

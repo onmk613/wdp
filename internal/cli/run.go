@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"wdp/internal/chart"
+	"wdp/internal/config"
 	"wdp/internal/connection"
 	"wdp/internal/executor"
 	"wdp/internal/fmtutil"
@@ -27,12 +28,34 @@ import (
 )
 
 // loadInventories 加载全部 -i 清单（未指定时用内置默认 inventory.yaml）。
+// 显式传入 wdp.cfg：inventory 层不再隐式读全局配置。
 func loadInventories() (*inventory.Inventory, error) {
 	paths := gInventories
 	if len(paths) == 0 {
 		paths = []string{"inventory.yaml"}
 	}
-	return inventory.LoadMerge(paths)
+	return inventory.LoadMergeWithConfig(paths, config.Current())
+}
+
+// connDefaults 从 wdp.cfg 归一出连接层默认值（组合根显式注入，
+// 连接层自身不依赖 config 包）。
+func connDefaults() *connection.Defaults {
+	c := config.Current()
+	return &connection.Defaults{
+		SSHUser:            c.SSHUser(),
+		SSHConnectTimeout:  c.SSHConnectTimeout(),
+		AgentPort:          c.AgentPort(),
+		AgentCertRotateMin: c.AgentCertRotateMin(),
+	}
+}
+
+// maxDownloadBytes 归一 get_url 下载上限（--max-download-mb > wdp.cfg > 内置默认；
+// PreRunE 已把 cfg 折叠进 gMaxDownMB，0 表示用模块内置默认）。
+func maxDownloadBytes() int64 {
+	if gMaxDownMB > 0 {
+		return gMaxDownMB << 20
+	}
+	return 0
 }
 
 // chartValueFlags 声明 chart 公共 flag（-f/--values/--set）。
@@ -106,6 +129,13 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	if opts.diff && !opts.check {
 		opts.check = true // --diff 基于 check 只读对比，自动启用预演
 	}
+	// 全局墙钟超时从进入本函数起计时：覆盖 chart 解包、inventory 加载与
+	// 交互确认（此前只罩 executor 阶段，长解包/人工确认不消耗超时预算）
+	if gTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(gTimeout)*time.Second)
+		defer cancel()
+	}
 	inv, err := loadInventories()
 	if err != nil {
 		return err
@@ -122,11 +152,13 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		DiffMode:    opts.diff,
 		TaskTimeout: gTaskTimeout,
 		WdpVersion:  Version,
+
+		MaxDownloadBytes: maxDownloadBytes(),
 	}
 	var plays []*model.Play
 
 	if chart.IsChartPath(target) {
-		ch, values, eng, err := chart.Open(target, opts.valuesFiles, opts.setArgs)
+		ch, values, eng, err := chart.OpenWithLimits(target, opts.valuesFiles, opts.setArgs, chart.Limits{MaxExtractBytes: config.Current().MaxExtractBytes()})
 		if err != nil {
 			return err
 		}
@@ -162,15 +194,10 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	}
 
 	rep, finish := buildReporter()
-	conns := connection.NewManager()
+	conns := connection.NewManagerWithDefaults(connDefaults())
 	conns.SetConnectConcurrency(2 * gForks)
 	ex := executor.New(inv, conns, rep, eopts)
 
-	if gTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(gTimeout)*time.Second)
-		defer cancel()
-	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -178,7 +205,14 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	conns.CloseAll()
 	finish()
 
-	// 部署记录（chart 版本 + values 快照 + 结果统计）
+	// 部署记录（chart 版本 + values 快照 + 结果统计）。
+	// 预演/列主机/只读相位不产生真实部署，不写审计记录（否则与真实部署无法区分）
+	if opts.check || opts.listHosts || opts.phase == "status" {
+		if failed {
+			return errPlayFailed
+		}
+		return nil
+	}
 	rec := &release.Record{
 		Playbook:  target,
 		ValuesRef: append(append([]string{}, opts.valuesFiles...), opts.setArgs...),
@@ -189,8 +223,24 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		rec.Chart, rec.Version, rec.Values = eopts.Chart.Meta.Name, eopts.Chart.Meta.Version, eopts.Values
 	}
 	if hosts, err := inv.Select(eoptsHosts(plays)); err == nil {
-		for _, h := range hosts {
-			rec.Hosts = append(rec.Hosts, h.Name)
+		// 记录实际作用的主机范围：与 executor 一致应用 --limit，
+		// 避免 --limit web1 时审计记录虚报整个 play 的主机清单
+		if eopts.Limit != "" {
+			if limited, lerr := inv.Select(eopts.Limit); lerr == nil {
+				set := map[string]bool{}
+				for _, h := range limited {
+					set[h.Name] = true
+				}
+				for _, h := range hosts {
+					if set[h.Name] {
+						rec.Hosts = append(rec.Hosts, h.Name)
+					}
+				}
+			}
+		} else {
+			for _, h := range hosts {
+				rec.Hosts = append(rec.Hosts, h.Name)
+			}
 		}
 	}
 	if id, err := release.Save(rec); err == nil {
@@ -309,11 +359,12 @@ func newAdhocCmd() *cobra.Command {
 				rep = report.NewFormatter(os.Stdout, format)
 				finish = func() {}
 			}
-			conns := connection.NewManager()
+			conns := connection.NewManagerWithDefaults(connDefaults())
 			conns.SetConnectConcurrency(2 * gForks)
 			ex := executor.New(inv, conns, rep, executor.Options{
 				Forks: gForks, TaskTimeout: gTaskTimeout,
 				CheckMode: check, DiffMode: diff,
+				MaxDownloadBytes: maxDownloadBytes(),
 			})
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 			defer stop()

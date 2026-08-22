@@ -39,13 +39,13 @@ func (m *GroupByModule) Run(rc *RunContext, args map[string]any, free string) *R
 		name = strings.TrimSpace(n)
 	}
 	if name == "" {
-		return Fail("group_by 需要组名（name 参数或 free-form）")
+		return Fail("%s", i18n.T("group_by requires a group name (name parameter or free-form)", "group_by 需要组名（name 参数或 free-form）"))
 	}
 	group := name
 	if prefix, ok := argStr(args, "prefix"); ok && prefix != "" {
 		group = prefix + "-" + name
 	}
-	return &Result{Groups: []string{group}, Msg: fmt.Sprintf("加入动态组 %s", group)}
+	return &Result{Groups: []string{group}, Msg: fmt.Sprintf(i18n.T("joined dynamic group %s", "加入动态组 %s"), group)}
 }
 
 // SortGroups 排序去重组名列表（executor 聚合辅助）。

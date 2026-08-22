@@ -3,11 +3,13 @@
 package playbook
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
 	"gopkg.in/yaml.v3"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -15,7 +17,7 @@ import (
 func Load(path string) ([]*model.Play, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取 playbook 失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to read playbook: %w", "读取 playbook 失败: %w"), err)
 	}
 	plays, err := Parse(data)
 	if err != nil {
@@ -24,7 +26,7 @@ func Load(path string) ([]*model.Play, error) {
 	for _, p := range plays {
 		for _, t := range append(append([]*model.Task{}, p.Tasks...), p.Handlers...) {
 			if t.Module == "" {
-				return nil, fmt.Errorf("play %s 存在未指定模块的任务", p.Name)
+				return nil, fmt.Errorf(i18n.T("play %s has a task without a specified module", "play %s 存在未指定模块的任务"), p.Name)
 			}
 		}
 	}
@@ -35,13 +37,13 @@ func Load(path string) ([]*model.Play, error) {
 func Parse(data []byte) ([]*model.Play, error) {
 	var raw []map[string]any
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("解析 playbook 失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to parse playbook: %w", "解析 playbook 失败: %w"), err)
 	}
 	plays := make([]*model.Play, 0, len(raw))
 	for i, rp := range raw {
 		p, err := parsePlay(rp)
 		if err != nil {
-			return nil, fmt.Errorf("第 %d 个 play: %w", i+1, err)
+			return nil, fmt.Errorf(i18n.T("play #%d: %w", "第 %d 个 play: %w"), i+1, err)
 		}
 		plays = append(plays, p)
 	}
@@ -64,7 +66,7 @@ func parsePlay(rp map[string]any) (*model.Play, error) {
 		p.Hosts = fmt.Sprint(v)
 	}
 	if p.Hosts == "" {
-		return nil, fmt.Errorf("缺少 hosts")
+		return nil, errors.New(i18n.T("missing hosts", "缺少 hosts"))
 	}
 	if v, ok := rp["vars"]; ok {
 		m, err := toAnyMap(v)

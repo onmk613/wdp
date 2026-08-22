@@ -22,7 +22,7 @@ LDFLAGS="-s -w \
   -X 'wdp/internal/cli.BuildDate=${DATE}' \
   -X 'wdp/internal/cli.GoVersion=${GOVERSION}'"
 
-ALL_TARGETS="linux/amd64 linux/arm64 darwin/arm64 windows/amd64"
+ALL_TARGETS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64"
 
 # checksum <产物basename> 写入 bin/SHA256SUMS（同名录内去重后追加）
 checksum() {

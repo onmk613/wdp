@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"wdp/internal/connection"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/module"
 	"wdp/internal/render"
@@ -87,24 +88,28 @@ func (e *Executor) execModule(ctx context.Context, tr *taskRun, item any) *model
 	return retryOnFailure(taskCtx, task, invoke, apply, r)
 }
 
-// resolveModule 解析任务模块：内置注册表优先，chart 本地脚本模块（modules/<名>）回退；
-// 内置模块同时校验参数（未知键/非法 bool/mode 直接报错，杜绝拼写错误静默失效）。
+// resolveModule 解析任务模块（唯一规则见 module.Resolve）：内置注册表优先，
+// chart 本地脚本模块回退；内置模块同时校验参数（未知键/非法 bool/mode 直接报错，
+// 杜绝拼写错误静默失效）。
 func (e *Executor) resolveModule(hr *hostRun, name string, args map[string]any, free string) (module.Module, string, error) {
-	mod, ok := module.Get(name)
+	mod, scriptPath, ok := module.Resolve(name, e.scriptModuleDirs(hr))
 	if !ok {
-		scriptPath := ""
-		if e.Opts.Chart != nil {
-			scriptPath = module.FindScriptModule([]string{hr.baseDir, e.Opts.BaseDir}, name)
-		}
-		if scriptPath == "" {
-			return nil, "", fmt.Errorf("未知模块 %q", name)
-		}
-		return nil, scriptPath, nil
+		return nil, "", fmt.Errorf(i18n.T("unknown module %q", "未知模块 %q"), name)
 	}
-	if verr := module.ValidateArgs(mod, args, free); verr != nil {
-		return nil, "", verr
+	if mod != nil {
+		if verr := module.ValidateArgs(mod, args, free); verr != nil {
+			return nil, "", verr
+		}
 	}
-	return mod, "", nil
+	return mod, scriptPath, nil
+}
+
+// scriptModuleDirs 当前主机的 chart 本地脚本模块查找目录（playbook 目录优先于 chart 根）。
+func (e *Executor) scriptModuleDirs(hr *hostRun) []string {
+	if e.Opts.Chart == nil {
+		return nil
+	}
+	return []string{hr.baseDir, e.Opts.BaseDir}
 }
 
 // buildRunContext 组装模块执行上下文（连接、变量域、提权、check/diff、回滚登记）。
@@ -122,18 +127,21 @@ func (e *Executor) buildRunContext(taskCtx context.Context, tr *taskRun, itemVar
 		TimeoutMs:  int64(timeoutSec) * 1000,
 		CheckMode:  e.Opts.CheckMode,
 		DiffMode:   e.Opts.DiffMode,
+
+		MaxDownloadBytes: e.Opts.MaxDownloadBytes,
 	}
 	// 脚本模块 check 模式需 chart.yaml 显式声明 check_mode: supported
 	if e.Opts.Chart != nil {
 		rc.CheckScriptAllowed = bool(e.Opts.Chart.Meta.CheckMode)
 	}
-	// auto_rollback：注入变更日志（文件类模块登记快照/删除动作）
+	// auto_rollback：注入变更日志（文件类模块登记快照/删除动作）。
+	// 每条记录携带实际执行主机（delegate_to 时回滚必须打到被委托主机）。
 	if tr.p.Strategy != nil && tr.p.Strategy.AutoRollback && !e.Opts.CheckMode && e.rollbackDir != "" {
 		rc.Rollback = &module.RollbackCtx{
 			Dir: e.rollbackDir,
 			Record: func(a module.RollbackAction) {
 				tr.hr.mu.Lock()
-				tr.hr.journal = append(tr.hr.journal, a)
+				tr.hr.journal = append(tr.hr.journal, journalEntry{action: a, execOn: tr.execHost})
 				tr.hr.mu.Unlock()
 			},
 		}
@@ -183,12 +191,14 @@ func (e *Executor) retryUntil(taskCtx context.Context, task *model.Task, itemVar
 	var last *module.Result
 	for i := 0; i < attempts; i++ {
 		if i > 0 {
+			timer := time.NewTimer(time.Duration(delay) * time.Second)
 			select {
 			case <-taskCtx.Done():
+				timer.Stop()
 				r.Unreachable = true
 				r.Msg = taskCtx.Err().Error()
 				return r
-			case <-time.After(time.Duration(delay) * time.Second):
+			case <-timer.C:
 			}
 		}
 		last = invoke()
@@ -201,7 +211,7 @@ func (e *Executor) retryUntil(taskCtx context.Context, task *model.Task, itemVar
 		if err != nil {
 			apply(last)
 			r.Failed = true
-			r.Msg = "until 渲染失败: " + err.Error()
+			r.Msg = i18n.T("until render failed: ", "until 渲染失败: ") + err.Error()
 			return r
 		}
 		if render.Truthy(s) {
@@ -226,12 +236,14 @@ func retryOnFailure(taskCtx context.Context, task *model.Task, invoke func() *mo
 	}
 	for i := 0; i < attempts; i++ {
 		if i > 0 && task.DelaySec > 0 {
+			timer := time.NewTimer(time.Duration(task.DelaySec) * time.Second)
 			select {
 			case <-taskCtx.Done():
+				timer.Stop()
 				r.Unreachable = true
 				r.Msg = taskCtx.Err().Error()
 				return r
-			case <-time.After(time.Duration(task.DelaySec) * time.Second):
+			case <-timer.C:
 			}
 		}
 		mr := invoke()

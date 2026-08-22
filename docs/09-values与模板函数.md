@@ -70,9 +70,9 @@ Go text/template，`missingkey=error`（**未定义变量直接报错**，尽早
 
 `eq ne lt le gt ge and or not len index slice print printf println html js urlquery call`
 
-### sprig v3 全集（Helm 同款）
+### sprig v3（白名单，Helm 同款常用集）
 
-常用函数速查（完整列表见 sprig 文档，全部可用）：
+以下为模板可用的 sprig 函数全集（白名单机制：仅表内函数与 Go 内建、wdp 自有函数可用）：
 
 | 类别 | 函数 |
 |---|---|
@@ -82,12 +82,20 @@ Go text/template，`missingkey=error`（**未定义变量直接报错**，尽早
 | 类型转换 | `toJson` `fromJson` `toPrettyJson` `ternary` `default` `empty` `coalesce` `all` `any` `kindOf` `typeOf` `kindIs` `typeIs` |
 | 数学 | `add` `sub` `mul` `div` `mod` `max` `min` `ceil` `floor` `round` `add1` |
 | 日期 | `now` `date` `dateInZone` `dateModify` `duration` `unixEpoch` `htmlDate` `toDate` |
-| 编码 | `b64enc` `b64dec` `b32enc` `b32dec` `toJson` `toToml` `toYaml`（注：sprig 的 toYaml 返回带引号 YAML；wdp 建议用下述 `to_yaml`） |
+| 编码 | `b64enc` `b64dec` `b32enc` `b32dec` `toJson` |
 | 流程 | `fail` `uuidv4` `semver` `semverCompare` `regexQuoteMeta` |
 
-> **安全说明**：与 Helm 一致，`env` / `expandenv` 已移除——chart 模板不得读取
-> 控制端环境变量（其中可能含 `WDP_CA_PASSPHRASE` 与各类 `*_env` 密钥）；
-> `getHostByName` 同样移除（DNS 查询可被用作隐蔽外传信道）。
+> **安全说明**：模板函数走白名单而非"全集减黑名单"，以下函数不可用：
+> - `env` / `expandenv`——chart 模板不得读取控制端环境变量（其中可能含
+>   `WDP_CA_PASSPHRASE` 与各类 `*_env` 密钥）；`getHostByName` 同理
+>   （DNS 查询可被用作隐蔽外传信道）。
+> - 证书/密钥生成与凭据散列原语——`genPrivateKey` / `genCA` / `genSignedCert` /
+>   `genSelfSignedCert` / `buildCustomCertificate` / `encryptAES` / `decryptAES` /
+>   `bcrypt` / `htpasswd` / `derivePassword` 等。部署模板没有正当理由使用它们，
+>   而它们对不可信 chart 模板是真实的 CPU 滥用与密码学误用面。
+>
+> 注：YAML/TOML 互转不在 sprig 中（Helm 由引擎层提供）；wdp 引擎自带下述
+> `to_yaml` / `from_yaml`，配置文件嵌套首选。
 
 ### wdp 自有函数（覆盖 sprig 同名，保持旧 chart 兼容）
 

@@ -111,7 +111,7 @@ func setupChartWith(t *testing.T, mutate func(dir string), extraValues map[strin
 		t.Fatal(err)
 	}
 
-	connection.RegisterFactory("fake", func(h *model.Host) (connection.Connection, error) {
+	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
 		f := connection.NewFake(h)
 		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
 			return connection.ExecResult{Code: 0, Stdout: "ran: " + req.Script}, nil
@@ -187,7 +187,7 @@ func TestChartScopeIsolation(t *testing.T) {
 	values, _ := ch.BuildValues(nil, nil)
 	eng, _ := render.NewEngine(ch.CollectHelpers())
 
-	connection.RegisterFactory("fake", func(h *model.Host) (connection.Connection, error) {
+	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
 		return connection.NewFake(h), nil
 	})
 	inv, _ := inventory.Parse([]byte(testInv))

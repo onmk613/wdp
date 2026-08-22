@@ -14,6 +14,7 @@
 | `--no-color` | false | 禁用颜色 |
 | `--output` | console | console / json（机器可读） |
 | `--lang` | auto | 输出语言：auto / zh / en（或环境变量 `WDP_LANG`；作用于帮助、模块文档与提示文案） |
+| `--max-download-mb` | 0 | get_url 下载响应体上限 MiB（0 = 跟随 wdp.cfg `[transfer]`，默认 2048） |
 
 未显式指定的 flag 回退 wdp.cfg（见[配置文件](02-配置文件.md)）。
 
@@ -197,15 +198,17 @@ wdp agent [--listen 127.0.0.1:7602]
           [--ca <CA证书> --cert <服务端证书> --key <私钥>]
           [--pin-client-fp sha256:<指纹>（可多次）]
           [--allow-no-auth] [--cleanup-on-shutdown]
+          [--max-request-mb 0]
 ```
 
 | flag | 说明 |
 |---|---|
-| `--listen` | 监听地址（默认仅绑定回环 `127.0.0.1`；对外监听需显式 `0.0.0.0:端口`；端口未指定时跟随 wdp.cfg `[agent].port`） |
+| `--listen` | 监听地址（默认 `127.0.0.1:<wdp.cfg [agent].port>`；对外监听需显式 `0.0.0.0:端口`）。注意：回环无认证只挡远程访问，同机其它用户仍可调用端点，多用户主机请启用 mTLS（启动时打印告警） |
 | `--ca/--cert/--key` | mTLS 三件套 |
 | `--pin-client-fp` | 客户端证书指纹准许名单（精确吊销：移除指纹重启即拒收） |
 | `--allow-no-auth` | 显式允许无认证对外监听（仅限可信内网） |
-| `--cleanup-on-shutdown` | 收到 /shutdown 时删除自身二进制与 mTLS 证书文件（push 临时 agent 用） |
+| `--cleanup-on-shutdown` | 收到 /shutdown 时删除自身二进制与 mTLS 证书文件（push 临时 agent 用；仅清理 /tmp 下 .wdp-agent-* 自举产物，常驻 agent 误用不会误删共享 CA/安装的二进制） |
+| `--max-request-mb` | 请求体大小上限 MiB（0 = 内置默认 64；`/exec`、`/file` 上传等全部端点的请求体超过即拒绝 413） |
 
 端点：`/exec`（命令执行）、`/file`（读写）、`/archive`（原生解压，不依赖目标机工具链）、`/health`、`/shutdown`。
 安全默认：`/exec`、`/file` 提供的是目标机命令执行与文件读写原语，

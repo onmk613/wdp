@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/module"
 )
@@ -30,6 +31,8 @@ func (e *Executor) runBatch(ctx context.Context, p *model.Play, playHosts, hosts
 func (e *Executor) prepareBatchRuns(p *model.Play, playHosts, hosts []*model.Host, stats map[string]*model.Stats, st *playState) []*hostRun {
 	runs := make([]*hostRun, 0, len(hosts))
 	for _, h := range hosts {
+		// 内置变量取值先于合并捕获（inventory_hostname/group_names 由 inventory 层写入 h.Vars）
+		builtinGroups, _ := h.Vars["group_names"]
 		vars := map[string]any{}
 		for k, v := range h.Vars { // inventory 层（最低）
 			vars[k] = v
@@ -40,15 +43,18 @@ func (e *Executor) prepareBatchRuns(p *model.Play, playHosts, hosts []*model.Hos
 		for k, v := range p.Vars { // play vars（最高静态层）
 			vars[k] = v
 		}
-		// 内置变量（强制注入，不可被任何静态层覆盖）：
+		st.seed(h.Name, vars) // 叠加此前批次的运行时变量（register/facts）
+		e.seedFacts(h.Name, vars)
+		// 内置变量最后强制注入，不可被任何静态层/运行时层覆盖：
+		//   inventory_hostname 主机名 / group_names 所属组 /
 		//   play_hosts 当前 play 全部选中主机 / play_batch 当前批次 /
 		//   groups 组→成员（含 children 与 all）/ hosts 主机名→{name,address,port,conn}
+		vars["inventory_hostname"] = h.Name
+		vars["group_names"] = builtinGroups
 		vars["play_hosts"] = hostNames(playHosts)
 		vars["play_batch"] = hostNames(hosts)
 		vars["groups"] = e.Inv.GroupsMap()
 		vars["hosts"] = e.Inv.HostsMeta()
-		st.seed(h.Name, vars) // 叠加此前批次的运行时变量（register/facts）
-		e.seedFacts(h.Name, vars)
 		runs = append(runs, &hostRun{
 			host:       h,
 			vars:       vars,
@@ -74,7 +80,7 @@ func (e *Executor) runBatchTasks(ctx context.Context, p *model.Play, runs []*hos
 	taskFailed := false
 	for _, task := range p.Tasks {
 		if ctx.Err() != nil {
-			e.Rep.PlayMsg("执行已取消（%v），终止剩余任务", ctx.Err())
+			e.Rep.PlayMsg(i18n.T("execution cancelled (%v), terminating remaining tasks", "执行已取消（%v），终止剩余任务"), ctx.Err())
 			return true, true
 		}
 		if !started {
@@ -100,7 +106,7 @@ func (e *Executor) runBatchTasks(ctx context.Context, p *model.Play, runs []*hos
 		}
 		e.Rep.TaskDone()
 		if !anyAlive(runs) {
-			e.Rep.PlayMsg("全部主机不可用，终止本 play 剩余任务")
+			e.Rep.PlayMsg(i18n.T("all hosts unavailable, terminating remaining tasks of this play", "全部主机不可用，终止本 play 剩余任务"))
 			return taskFailed, true
 		}
 	}
@@ -115,7 +121,7 @@ func (e *Executor) flushHandlers(ctx context.Context, p *model.Play, runs []*hos
 		return false
 	}
 	failed := false
-	e.Rep.PlayMsg("触发 handlers: %s", strings.Join(notifiedList, ", "))
+	e.Rep.PlayMsg(i18n.T("triggering handlers: %s", "触发 handlers: %s"), strings.Join(notifiedList, ", "))
 	for _, h := range p.Handlers {
 		if !contains(notifiedList, h.Name) {
 			continue
@@ -183,7 +189,7 @@ type fanResult struct {
 // fanOut 将任务并发派发到所有存活主机。
 func (e *Executor) fanOut(ctx context.Context, p *model.Play, task *model.Task, runs []*hostRun) []fanResult {
 	if task.ChartRef == "" && task.Block == nil {
-		if _, ok := module.Get(task.Module); !ok && !e.hasScriptModule(runs, task.Module) {
+		if _, _, ok := module.Resolve(task.Module, e.allScriptModuleDirs(runs)); !ok {
 			out := make([]fanResult, 0, len(runs))
 			for _, hr := range runs {
 				if !hr.alive {
@@ -227,10 +233,10 @@ func (e *Executor) fanOut(ctx context.Context, p *model.Play, task *model.Task, 
 	return out
 }
 
-// hasScriptModule 判断任务模块是否为 chart 本地脚本模块（fanOut 预检用）。
-func (e *Executor) hasScriptModule(runs []*hostRun, name string) bool {
+// allScriptModuleDirs 汇总批次内全部主机的脚本模块查找目录（chart 根 + 各 playbook 目录）。
+func (e *Executor) allScriptModuleDirs(runs []*hostRun) []string {
 	if e.Opts.Chart == nil {
-		return false
+		return nil
 	}
 	dirs := []string{e.Opts.BaseDir}
 	for _, hr := range runs {
@@ -238,7 +244,7 @@ func (e *Executor) hasScriptModule(runs []*hostRun, name string) bool {
 			dirs = append(dirs, hr.baseDir)
 		}
 	}
-	return module.FindScriptModule(dirs, name) != ""
+	return dirs
 }
 
 // fanOutRunOnce 处理 run_once：首台存活主机执行，结果复制到其余存活主机。

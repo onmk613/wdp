@@ -2,6 +2,7 @@ package executor
 
 import (
 	"fmt"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/module"
 )
@@ -48,7 +49,7 @@ func truncateOut(s string) string {
 	if len(s) <= maxOutLen {
 		return s
 	}
-	return s[:maxOutLen] + fmt.Sprintf("\n…[wdp] 输出超长已截断（%d 字节）", len(s))
+	return s[:maxOutLen] + fmt.Sprintf(i18n.T("\n…[wdp] output truncated (%d bytes)", "\n…[wdp] 输出超长已截断（%d 字节）"), len(s))
 }
 
 func fail(res *model.TaskResult, err error) *model.TaskResult {

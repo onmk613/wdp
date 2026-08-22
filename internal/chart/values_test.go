@@ -67,6 +67,76 @@ func TestSetPath(t *testing.T) {
 	}
 }
 
+// TestSetPathNullDeletes 回归：--set k=null 曾写入 nil 值而非删除键，
+// 与 -f 覆盖文件的 null 删除语义及 README 承诺不一致。
+func TestSetPathNullDeletes(t *testing.T) {
+	m := map[string]any{
+		"image": map[string]any{"repo": "nginx", "tag": "latest"},
+		"keep":  "yes",
+	}
+	// 顶层键删除
+	if _, err := SetPath(m, "keep", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := m["keep"]; exists {
+		t.Fatal("--set k=null 应删除顶层键")
+	}
+	// 嵌套键删除
+	if _, err := SetPath(m, "image.tag", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := m["image"].(map[string]any)["tag"]; exists {
+		t.Fatal("--set image.tag=null 应删除嵌套键")
+	}
+	// 删除不存在的键应为无害 no-op
+	if _, err := SetPath(m, "no.such.key", nil); err != nil {
+		t.Fatalf("删除不存在的键不应报错: %v", err)
+	}
+}
+
+// TestSetPathListNilKeepsPlaceholder 列表元素写 null 保持占位（不移动下标）。
+func TestSetPathListNilKeepsPlaceholder(t *testing.T) {
+	m := map[string]any{"hosts": []any{"h1", "h2"}}
+	if _, err := SetPath(m, "hosts[1]", nil); err != nil {
+		t.Fatal(err)
+	}
+	hosts := m["hosts"].([]any)
+	if len(hosts) != 2 || hosts[0] != "h1" || hosts[1] != nil {
+		t.Fatalf("列表元素置 null 应保持下标: %v", hosts)
+	}
+}
+
+// TestBuildValuesNoAliasPollution 回归：BuildValues 曾浅拷贝默认 values，
+// --set 的原地写会穿透到 c.Values 的嵌套 map 污染 chart 默认值。
+func TestBuildValuesNoAliasPollution(t *testing.T) {
+	c := &Chart{}
+	c.Values = map[string]any{
+		"image": map[string]any{"repo": "nginx", "tag": "1.25"},
+	}
+	if _, err := c.BuildValues(nil, []string{"image.tag=2.0"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Values["image"].(map[string]any)["tag"]; got != "1.25" {
+		t.Fatalf("chart 默认 values 被污染: tag=%v", got)
+	}
+}
+
+// TestSubScopeIsolated 子 chart 作用域与子 chart 默认 values / 父 global 不共享引用。
+func TestSubScopeIsolated(t *testing.T) {
+	sub := &Chart{Meta: Meta{Name: "sub"}}
+	sub.Values = map[string]any{"inner": map[string]any{"x": 1}}
+	parent := map[string]any{"global": map[string]any{"g": 1}}
+	scope := SubScope(sub, parent)
+	scope["inner"].(map[string]any)["x"] = 999
+	scope["global"].(map[string]any)["g"] = 999
+	if sub.Values["inner"].(map[string]any)["x"] != 1 {
+		t.Fatal("子 chart 默认 values 被作用域写入污染")
+	}
+	if parent["global"].(map[string]any)["g"] != 1 {
+		t.Fatal("父 global 被子作用域写入污染")
+	}
+}
+
 func TestSetPathListIndex(t *testing.T) {
 	m := map[string]any{
 		"hosts": []any{"h1", "h2"},

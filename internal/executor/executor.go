@@ -17,6 +17,7 @@ import (
 	"wdp/internal/report"
 
 	"gopkg.in/yaml.v3"
+	"wdp/internal/i18n"
 )
 
 // Options 是执行选项。
@@ -34,6 +35,10 @@ type Options struct {
 	DiffMode    bool   // diff 模式：check 下输出内容级差异（copy/template/file 等）
 	Phase       string // chart 生命周期相位：deploy（缺省）| uninstall | status
 	WdpVersion  string // 控制端版本（release marker 记录）
+
+	// MaxDownloadBytes 是 get_url 下载响应体上限（字节；0 = 内置默认 2GiB）。
+	// 组合根从 --max-download-mb / wdp.cfg [transfer].max_download_mb 注入。
+	MaxDownloadBytes int64
 
 	Chart  *chart.Chart   // chart 模式（nil = 裸 playbook 模式）
 	Values map[string]any // chart 合并后的最终 values
@@ -73,8 +78,15 @@ type hostRun struct {
 	alive      bool
 	notified   map[string]bool
 	stats      *model.Stats
-	journal    []module.RollbackAction // 变更日志（auto_rollback 时快照恢复依据）
-	chartDepth int                     // chart 引用展开深度（防自引用/互引用递归崩溃）
+	journal    []journalEntry // 变更日志（auto_rollback 时快照恢复依据）
+	chartDepth int            // chart 引用展开深度（防自引用/互引用递归崩溃）
+}
+
+// journalEntry 一条变更日志：动作 + 实际执行主机。delegate_to 时变更发生在
+// 被委托主机上（快照也在那里），回滚与快照清理必须打到实际执行主机。
+type journalEntry struct {
+	action module.RollbackAction
+	execOn *model.Host // nil = 登记主机自身（无委托）
 }
 
 // maxChartDepth 是 chart 引用展开的深度上限：
@@ -85,14 +97,14 @@ const maxChartDepth = 32
 // register/facts 变量与回滚变更日志在批次间保持（修复原批次间 register 丢失）。
 type playState struct {
 	mu      sync.Mutex
-	vars    map[string]map[string]any          // 主机名 → 最新变量域
-	journal map[string][]module.RollbackAction // 主机名 → 累积变更日志
+	vars    map[string]map[string]any // 主机名 → 最新变量域
+	journal map[string][]journalEntry // 主机名 → 累积变更日志
 }
 
 func newPlayState() *playState {
 	return &playState{
 		vars:    map[string]map[string]any{},
-		journal: map[string][]module.RollbackAction{},
+		journal: map[string][]journalEntry{},
 	}
 }
 
@@ -131,10 +143,10 @@ func (s *playState) harvest(runs []*hostRun) {
 }
 
 // takeJournal 取走主机已累积的回滚日志作为本批起点。
-func (s *playState) takeJournal(host string) []module.RollbackAction {
+func (s *playState) takeJournal(host string) []journalEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return append([]module.RollbackAction{}, s.journal[host]...)
+	return append([]journalEntry{}, s.journal[host]...)
 }
 
 // splitHookTasks 按生命周期相位切分任务：相位匹配的 hook 任务归 pre/post，
@@ -209,7 +221,7 @@ func (e *Executor) Run(ctx context.Context, plays []*model.Play) bool {
 	anyFail := false
 	for _, p := range plays {
 		if ctx.Err() != nil {
-			e.Rep.PlayMsg("执行已取消（%v），终止剩余 play", ctx.Err())
+			e.Rep.PlayMsg(i18n.T("execution cancelled (%v), terminating remaining plays", "执行已取消（%v），终止剩余 play"), ctx.Err())
 			return true
 		}
 		if e.runPlay(ctx, p) {

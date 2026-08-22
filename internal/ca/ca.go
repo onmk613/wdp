@@ -27,6 +27,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -36,6 +37,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/pbkdf2"
+	"wdp/internal/i18n"
 )
 
 // CAFile / KeyFile 是 CA 产物文件名。
@@ -50,7 +52,10 @@ const (
 
 	encPEMType   = "WDP ENCRYPTED EC PRIVATE KEY"
 	plainPEMType = "EC PRIVATE KEY"
-	kdfIter      = 100000
+	// PBKDF2 迭代轮数：新写 60 万（OWASP 2023 指南，此前 10 万是 2010 年代
+	// 基线）；轮数不写入信封，解密时先按新轮数、失败回退旧轮数兼容旧文件
+	kdfIter       = 600000
+	legacyKdfIter = 100000
 )
 
 // PassphraseFromEnv 返回环境变量中的 CA 口令。
@@ -66,7 +71,7 @@ func Init(dir, passphrase string) (string, string, string, error) {
 	}
 	caPath, keyPath := filepath.Join(dir, CAFile), filepath.Join(dir, KeyFile)
 	if _, err := os.Stat(caPath); err == nil {
-		return "", "", "", fmt.Errorf("%s 已存在（如需重建请先删除）", caPath)
+		return "", "", "", fmt.Errorf(i18n.T("%s already exists (delete it first to rebuild)", "%s 已存在（如需重建请先删除）"), caPath)
 	}
 
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -112,28 +117,28 @@ func Import(dir, certSrc, keySrc, passphrase string) (string, string, string, er
 	}
 	caPath, keyPath := filepath.Join(dir, CAFile), filepath.Join(dir, KeyFile)
 	if _, err := os.Stat(caPath); err == nil {
-		return "", "", "", fmt.Errorf("%s 已存在（如需替换请先删除）", caPath)
+		return "", "", "", fmt.Errorf(i18n.T("%s already exists (delete it first to replace)", "%s 已存在（如需替换请先删除）"), caPath)
 	}
 	cert, err := parseCertificate(certSrc)
 	if err != nil {
-		return "", "", "", fmt.Errorf("读取 CA 证书失败: %w", err)
+		return "", "", "", fmt.Errorf(i18n.T("failed to read CA certificate: %w", "读取 CA 证书失败: %w"), err)
 	}
 	if !cert.IsCA {
-		return "", "", "", fmt.Errorf("%s 不是 CA 证书（BasicConstraints CA=false）", certSrc)
+		return "", "", "", fmt.Errorf(i18n.T("%s is not a CA certificate (BasicConstraints CA=false)", "%s 不是 CA 证书（BasicConstraints CA=false）"), certSrc)
 	}
 	if time.Now().After(cert.NotAfter) {
-		return "", "", "", fmt.Errorf("CA 证书已过期（%s），无法用于签发", cert.NotAfter.Format(time.RFC3339))
+		return "", "", "", fmt.Errorf(i18n.T("CA certificate has expired (%s), cannot be used for signing", "CA 证书已过期（%s），无法用于签发"), cert.NotAfter.Format(time.RFC3339))
 	}
 	der, err := readKey(keySrc, passphrase)
 	if err != nil {
-		return "", "", "", fmt.Errorf("读取 CA 私钥失败: %w", err)
+		return "", "", "", fmt.Errorf(i18n.T("failed to read CA private key: %w", "读取 CA 私钥失败: %w"), err)
 	}
 	signer, err := parsePrivateKey(der)
 	if err != nil {
-		return "", "", "", fmt.Errorf("读取 CA 私钥失败: %w", err)
+		return "", "", "", fmt.Errorf(i18n.T("failed to read CA private key: %w", "读取 CA 私钥失败: %w"), err)
 	}
 	if !pubEqual(cert.PublicKey, signer.Public()) {
-		return "", "", "", fmt.Errorf("CA 证书与私钥不匹配（%s / %s）", certSrc, keySrc)
+		return "", "", "", fmt.Errorf(i18n.T("CA certificate and private key do not match (%s / %s)", "CA 证书与私钥不匹配（%s / %s）"), certSrc, keySrc)
 	}
 	if err := writePEM(caPath, "CERTIFICATE", cert.Raw, 0o644); err != nil {
 		return "", "", "", err
@@ -149,7 +154,7 @@ func Import(dir, certSrc, keySrc, passphrase string) (string, string, string, er
 func LoadCAAt(certPath, keyPath, passphrase string) (*x509.Certificate, crypto.Signer, error) {
 	cert, err := parseCertificate(certPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("读取 CA 证书失败: %w", err)
+		return nil, nil, fmt.Errorf(i18n.T("failed to read CA certificate: %w", "读取 CA 证书失败: %w"), err)
 	}
 	der, err := readKey(keyPath, firstNonEmpty(passphrase, PassphraseFromEnv()))
 	if err != nil {
@@ -158,6 +163,11 @@ func LoadCAAt(certPath, keyPath, passphrase string) (*x509.Certificate, crypto.S
 	key, err := parsePrivateKey(der)
 	if err != nil {
 		return nil, nil, err
+	}
+	// 证书/私钥错配校验（与 Import 一致）：签发用 key、颁发者用 cert，
+	// 标准库不会报错——产出链不上去的废证书，问题拖到 mTLS 握手才暴露
+	if !pubEqual(cert.PublicKey, key.Public()) {
+		return nil, nil, fmt.Errorf(i18n.T("CA certificate and private key do not match (%s / %s)", "CA 证书与私钥不匹配（%s / %s）"), certPath, keyPath)
 	}
 	return cert, key, nil
 }
@@ -211,7 +221,7 @@ func Renew(o RenewOptions, name string) (string, string, string, error) {
 	certPath := filepath.Join(o.Dir, name+".crt")
 	old, err := parseCertificate(certPath)
 	if err != nil {
-		return "", "", "", fmt.Errorf("读取原证书失败（%s）: %w", certPath, err)
+		return "", "", "", fmt.Errorf(i18n.T("failed to read original certificate (%s): %w", "读取原证书失败（%s）: %w"), certPath, err)
 	}
 
 	tpl, err := leafTemplate("", nil, false, o.Days) // 基础模板，字段随后从旧证书继承（SAN 全量继承）
@@ -231,10 +241,10 @@ func Renew(o RenewOptions, name string) (string, string, string, error) {
 	} else {
 		keyDER, err := readKey(filepath.Join(o.Dir, name+".key"), "")
 		if err != nil {
-			return "", "", "", fmt.Errorf("读取原私钥失败: %w", err)
+			return "", "", "", fmt.Errorf(i18n.T("failed to read original private key: %w", "读取原私钥失败: %w"), err)
 		}
 		if key, err = x509.ParseECPrivateKey(keyDER); err != nil {
-			return "", "", "", fmt.Errorf("解析原私钥失败: %w", err)
+			return "", "", "", fmt.Errorf(i18n.T("failed to parse original private key: %w", "解析原私钥失败: %w"), err)
 		}
 	}
 	return signAndWrite(o.Dir, o.CACertPath, o.CAKeyPath, o.Passphrase, name, tpl, key)
@@ -255,7 +265,7 @@ func leafTemplate(name string, sans []string, client bool, days int) (*x509.Cert
 	}
 	if client {
 		if len(sans) > 0 {
-			return nil, fmt.Errorf("SAN 仅用于服务端证书（--client 客户端证书不含 SAN）")
+			return nil, errors.New(i18n.T("SAN is only for server certificates (--client client certificates have no SAN)", "SAN 仅用于服务端证书（--client 客户端证书不含 SAN）"))
 		}
 		tpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
 		return tpl, nil
@@ -355,18 +365,31 @@ func encryptDER(der []byte, passphrase string) ([]byte, error) {
 
 func decryptDER(payload []byte, passphrase string) ([]byte, error) {
 	if len(payload) < 16+12+16 {
-		return nil, fmt.Errorf("加密私钥内容不完整")
+		return nil, errors.New(i18n.T("encrypted private key payload is incomplete", "加密私钥内容不完整"))
 	}
 	salt, nonce, ct := payload[:16], payload[16:28], payload[28:]
-	aead, err := newAEAD(passphrase, salt)
+	der, err := openAEAD(passphrase, salt, nonce, ct, kdfIter)
+	if err != nil {
+		// 旧版信封（10 万轮）：轮数未写入文件，先按新轮数解，失败回退
+		der, err = openAEAD(passphrase, salt, nonce, ct, legacyKdfIter)
+		if err != nil {
+			return nil, errors.New(i18n.T("failed to decrypt private key (wrong passphrase or corrupted file)", "私钥解密失败（口令错误或文件损坏）"))
+		}
+	}
+	return der, nil
+}
+
+func openAEAD(passphrase string, salt, nonce, ct []byte, iter int) ([]byte, error) {
+	key := pbkdf2.Key([]byte(passphrase), salt, iter, 32, sha256.New)
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	der, err := aead.Open(nil, nonce, ct, nil)
+	aead, err := cipher.NewGCM(block)
 	if err != nil {
-		return nil, fmt.Errorf("私钥解密失败（口令错误或文件损坏）")
+		return nil, err
 	}
-	return der, nil
+	return aead.Open(nil, nonce, ct, nil)
 }
 
 func newAEAD(passphrase string, salt []byte) (cipher.AEAD, error) {
@@ -382,22 +405,22 @@ func newAEAD(passphrase string, salt []byte) (cipher.AEAD, error) {
 func readKey(path, passphrase string) ([]byte, error) {
 	keyPEM, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("读取私钥失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to read private key: %w", "读取私钥失败: %w"), err)
 	}
 	block, _ := pem.Decode(keyPEM)
 	if block == nil {
-		return nil, fmt.Errorf("解析私钥 PEM 失败")
+		return nil, errors.New(i18n.T("failed to parse private key PEM", "解析私钥 PEM 失败"))
 	}
 	switch block.Type {
 	case encPEMType:
 		if passphrase == "" {
-			return nil, fmt.Errorf("CA 私钥已加密：需要 --passphrase 或环境变量 %s", PassphraseEnv)
+			return nil, fmt.Errorf(i18n.T("CA private key is encrypted: requires --passphrase or environment variable %s", "CA 私钥已加密：需要 --passphrase 或环境变量 %s"), PassphraseEnv)
 		}
 		return decryptDER(block.Bytes, passphrase)
 	case plainPEMType, "PRIVATE KEY":
 		return block.Bytes, nil
 	default:
-		return nil, fmt.Errorf("未知的私钥类型 %q", block.Type)
+		return nil, fmt.Errorf(i18n.T("unknown private key type %q", "未知的私钥类型 %q"), block.Type)
 	}
 }
 
@@ -417,7 +440,7 @@ func FingerprintFile(path string) (string, error) {
 	}
 	block, _ := pem.Decode(pemBytes)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return "", fmt.Errorf("%s 不是证书 PEM", path)
+		return "", fmt.Errorf(i18n.T("%s is not a certificate PEM", "%s 不是证书 PEM"), path)
 	}
 	return FingerprintDER(block.Bytes), nil
 }
@@ -429,7 +452,7 @@ func ParsePin(s string) (string, error) {
 	s = strings.ToLower(s)
 	raw, err := hex.DecodeString(s)
 	if err != nil || len(raw) != 32 {
-		return "", fmt.Errorf("非法指纹 %q（需要 SHA256）", s)
+		return "", fmt.Errorf(i18n.T("invalid fingerprint %q (SHA256 required)", "非法指纹 %q（需要 SHA256）"), s)
 	}
 	return s, nil
 }
@@ -444,7 +467,7 @@ func parseCertificate(path string) (*x509.Certificate, error) {
 	}
 	block, _ := pem.Decode(pemBytes)
 	if block == nil || block.Type != "CERTIFICATE" {
-		return nil, fmt.Errorf("%s 不是证书 PEM", path)
+		return nil, fmt.Errorf(i18n.T("%s is not a certificate PEM", "%s 不是证书 PEM"), path)
 	}
 	return x509.ParseCertificate(block.Bytes)
 }
@@ -457,11 +480,11 @@ func parsePrivateKey(der []byte) (crypto.Signer, error) {
 	}
 	key, err := x509.ParsePKCS8PrivateKey(der)
 	if err != nil {
-		return nil, fmt.Errorf("解析私钥失败（支持 SEC1 EC / PKCS8）: %w", err)
+		return nil, fmt.Errorf(i18n.T("failed to parse private key (SEC1 EC / PKCS8 supported): %w", "解析私钥失败（支持 SEC1 EC / PKCS8）: %w"), err)
 	}
 	signer, ok := key.(crypto.Signer)
 	if !ok {
-		return nil, fmt.Errorf("私钥类型 %T 不支持签名", key)
+		return nil, fmt.Errorf(i18n.T("private key type %T does not support signing", "私钥类型 %T 不支持签名"), key)
 	}
 	return signer, nil
 }
@@ -482,12 +505,33 @@ func keyPEMType(der []byte) string {
 }
 
 func writePEM(path, blockType string, der []byte, mode os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+	// 原子写：临时文件 + rename（O_TRUNC 原地重写，进程在截断后写完前
+	// 崩溃或磁盘满即私钥/证书永久损坏）。rename 落盘文件的权限即临时文件
+	// 的 chmod 结果，重写已存在的宽松权限文件时自动收紧到 mode
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".wdp-ca-*")
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	return pem.Encode(f, &pem.Block{Type: blockType, Bytes: der})
+	tmpName := tmp.Name()
+	abort := func(e error) error {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return e
+	}
+	if err := pem.Encode(tmp, &pem.Block{Type: blockType, Bytes: der}); err != nil {
+		return abort(err)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return abort(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return abort(err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 func randomSerial() *big.Int {

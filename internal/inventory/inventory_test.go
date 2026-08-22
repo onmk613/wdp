@@ -1,6 +1,14 @@
-package inventory
+package inventory_test
 
-import "testing"
+import (
+	"testing"
+
+	"wdp/internal/inventory"
+
+	// 测试样例使用 agent 连接参数键，需注册白名单（与 cli 组合根同路径；
+	// 外部测试包避免 import cycle）
+	_ "wdp/internal/connection/agentconn"
+)
 
 const sample = `
 all:
@@ -24,9 +32,9 @@ prod:
     tier: production
 `
 
-func load(t *testing.T) *Inventory {
+func load(t *testing.T) *inventory.Inventory {
 	t.Helper()
-	inv, err := Parse([]byte(sample))
+	inv, err := inventory.Parse([]byte(sample))
 	if err != nil {
 		t.Fatal(err)
 	}

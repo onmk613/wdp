@@ -69,11 +69,9 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, free string) *R
 		}
 	}
 	path, hasPath := argStr(args, "path")
-	state, _ := argStr(args, "state")
-	switch state {
-	case "", "present", "absent":
-	default:
-		return Fail("不支持的 state %q（可选: present/absent）", state)
+	state, ok := parseState(args, "present", "present", "absent")
+	if !ok {
+		return Fail(i18n.T("unsupported state %q (options: present/absent)", "不支持的 state %q（可选: present/absent）"), state)
 	}
 	absent := state == "absent"
 
@@ -81,31 +79,31 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, free string) *R
 	if s, ok := argStr(args, "port"); ok && strings.TrimSpace(s) != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil || n < 1 || n > 65535 {
-			return Fail("port 应为 1-65535 的整数")
+			return Fail("%s", i18n.T("port must be an integer between 1 and 65535", "port 应为 1-65535 的整数"))
 		}
 		port = n
 	}
 	if port == 0 && !hasPath {
-		return Fail("wait_for 需要 port 或 path 参数")
+		return Fail("%s", i18n.T("wait_for requires a port or path parameter", "wait_for 需要 port 或 path 参数"))
 	}
 	if port != 0 && hasPath {
-		return Fail("port 与 path 只能二选一")
+		return Fail("%s", i18n.T("port and path are mutually exclusive", "port 与 path 只能二选一"))
 	}
 	if hasPath && path == "" {
-		return Fail("path 不能为空")
+		return Fail("%s", i18n.T("path must not be empty", "path 不能为空"))
 	}
 
 	timeoutSec, ok := argSecs(args, "timeout", 300)
 	if !ok || timeoutSec <= 0 {
-		return Fail("timeout 应为正整数")
+		return Fail("%s", i18n.T("timeout must be a positive integer", "timeout 应为正整数"))
 	}
 	delaySec, ok := argSecs(args, "delay", 0)
 	if !ok {
-		return Fail("delay 应为非负整数")
+		return Fail("%s", i18n.T("delay must be a non-negative integer", "delay 应为非负整数"))
 	}
 	sleepSec, ok := argSecs(args, "sleep", 1)
 	if !ok || sleepSec < 0 {
-		return Fail("sleep 应为非负整数")
+		return Fail("%s", i18n.T("sleep must be a non-negative integer", "sleep 应为非负整数"))
 	}
 	customMsg, _ := argStr(args, "msg")
 
@@ -200,10 +198,12 @@ func waitInterruptible(ctx context.Context, d time.Duration) bool {
 	if ctx == nil || ctx.Err() != nil {
 		return false
 	}
+	timer := time.NewTimer(d)
+	defer timer.Stop() // ctx 提前取消时立即释放定时器（time.After 需等到期才回收）
 	select {
 	case <-ctx.Done():
 		return false
-	case <-time.After(d):
+	case <-timer.C:
 		return true
 	}
 }

@@ -272,7 +272,8 @@ func TestTgzExtractSizeCap(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := Load(tgz); err == nil || !strings.Contains(err.Error(), "解压超限") {
+	// 断言用上限数字（语言无关）：中英文案均含该值
+	if _, err := Load(tgz); err == nil || !strings.Contains(err.Error(), "2147483648") {
 		t.Fatalf("应拒绝超限包, got %v", err)
 	}
 }

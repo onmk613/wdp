@@ -7,8 +7,8 @@ import (
 	"strings"
 
 	"wdp/internal/connection"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
-	"wdp/internal/module"
 	"wdp/internal/shellquote"
 )
 
@@ -83,6 +83,9 @@ func (e *Executor) runGate(ctx context.Context, p *model.Play, gate *model.Task,
 		e.Rep.HostResult(r.hr.host.Name, r.res)
 		if r.res.Failed || r.res.Unreachable {
 			gateFailed = true
+			// 健康门失败的主机处于未知状态：标记死亡，后续 play 不再在其上执行
+			r.hr.alive = false
+			e.markDead(r.hr.host.Name)
 		}
 	}
 	e.Rep.TaskDone()
@@ -91,24 +94,25 @@ func (e *Executor) runGate(ctx context.Context, p *model.Play, gate *model.Task,
 
 // rollbackBatch 按变更日志逆序回滚一批主机（快照恢复/新建删除）。
 // 覆盖文件类变更（copy/template/file）；shell 等过程性变更无法自动回滚。
+// 每条动作打到其实际执行主机上（delegate_to 时快照在被委托主机）。
 func (e *Executor) rollbackBatch(ctx context.Context, p *model.Play, runs []*hostRun, stats map[string]*model.Stats) {
-	rolled := 0
+	rolled, rollFailed := 0, 0
 	for _, hr := range runs {
 		hr.mu.Lock()
-		acts := append([]module.RollbackAction{}, hr.journal...)
+		acts := append([]journalEntry{}, hr.journal...)
 		hr.mu.Unlock()
 		if len(acts) == 0 {
 			continue
 		}
-		conn, err := e.Conns.Get(ctx, hr.host)
-		if err != nil {
-			e.Rep.PlayMsg("%s 回滚失败（连接不可用）: %v", hr.host.Name, err)
-			continue
-		}
-		rolled++
+		hostOK := true
 		// 逆序恢复：后发生的变更先回滚
 		for i := len(acts) - 1; i >= 0; i-- {
-			a := acts[i]
+			je := acts[i]
+			a := je.action
+			target := je.execOn
+			if target == nil {
+				target = hr.host
+			}
 			var script string
 			switch a.Kind {
 			case "restore":
@@ -119,26 +123,50 @@ func (e *Executor) rollbackBatch(ctx context.Context, p *model.Play, runs []*hos
 			default:
 				continue
 			}
+			msg := a.Kind + " " + a.Path
+			if target.Name != hr.host.Name {
+				msg += " @" + target.Name // 委托产生的变更，标注实际执行主机
+			}
 			res := &model.TaskResult{
 				Host: hr.host.Name, Task: "auto-rollback", Module: "rollback",
-				Msg: a.Kind + " " + a.Path,
+				Msg: msg,
 			}
-			out, err := conn.Exec(ctx, connection.ExecRequest{Script: script, TimeoutMs: 30_000})
-			switch {
-			case err != nil:
+			conn, err := e.Conns.Get(ctx, target)
+			if err != nil {
 				res.Failed = true
-				res.Msg += " 失败: " + err.Error()
-			case out.Code != 0:
-				res.Failed = true
-				res.Msg += fmt.Sprintf(" 失败 rc=%d: %s", out.Code, strings.TrimSpace(out.Stderr))
-			default:
-				res.Changed = true
+				res.Msg += i18n.T(" failed (connection unavailable): ", " 失败（连接不可用）: ") + err.Error()
+				hostOK = false
+			} else {
+				out, err := conn.Exec(ctx, connection.ExecRequest{Script: script, TimeoutMs: 30_000})
+				switch {
+				case err != nil:
+					res.Failed = true
+					res.Msg += i18n.T(" failed: ", " 失败: ") + err.Error()
+					hostOK = false
+				case out.Code != 0:
+					res.Failed = true
+					res.Msg += fmt.Sprintf(i18n.T(" failed rc=%d: %s", " 失败 rc=%d: %s"), out.Code, strings.TrimSpace(out.Stderr))
+					hostOK = false
+				default:
+					res.Changed = true
+				}
 			}
 			e.recordResult(hr, res, stats, false)
 			e.Rep.HostResult(hr.host.Name, res)
 		}
+		if hostOK {
+			rolled++
+		} else {
+			rollFailed++
+		}
 	}
-	e.Rep.PlayMsg("自动回滚完成：%d 台主机按快照恢复（过程性变更如 shell 无法自动回滚）", rolled)
+	if rollFailed > 0 {
+		e.Rep.PlayMsg(i18n.T("auto rollback finished: %d hosts restored, %d hosts FAILED (manual check required); procedural changes like shell cannot be auto-rolled-back",
+			"自动回滚结束：%d 台主机已恢复，%d 台失败（需人工检查）；过程性变更如 shell 无法自动回滚"), rolled, rollFailed)
+	} else {
+		e.Rep.PlayMsg(i18n.T("auto rollback complete: %d hosts restored from snapshots (procedural changes like shell cannot be auto-rolled-back)",
+			"自动回滚完成：%d 台主机按快照恢复（过程性变更如 shell 无法自动回滚）"), rolled)
+	}
 }
 
 func pathDir(p string) string {

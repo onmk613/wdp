@@ -53,7 +53,7 @@ func (m *StatModule) Example() string {
 func (m *StatModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	path, ok := argStr(args, "path")
 	if !ok || path == "" {
-		return Fail("stat 需要 path 参数")
+		return Fail("%s", i18n.T("stat requires a path parameter", "stat 需要 path 参数"))
 	}
 	getChecksum := true
 	if b, ok := argBool(args, "get_checksum"); ok {
@@ -79,12 +79,14 @@ func (m *StatModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 		return bad
 	}
 	if kind == "missing" {
-		return &Result{Msg: fmt.Sprintf("%s 不存在", path), Facts: map[string]any{"stat": facts}}
+		return &Result{Msg: fmt.Sprintf(i18n.T("%s does not exist", "%s 不存在"), path), Facts: map[string]any{"stat": facts}}
 	}
 	facts["exists"] = true
 	origKind := kind
 
-	// follow：符号链接解析到最终目标再统计（解析失败按原路径，islink 仍如实报告）
+	// follow：符号链接解析到最终目标再统计（解析失败按原路径，islink 仍如实报告）。
+	// follow=false 时 helper 的 stat 不带 -L（lstat 口径），mode/size/owner
+	// 报链接自身的属性——两种口径各自一致
 	target := path
 	if follow && origKind == "link" {
 		if resolved := canonicalLink(rc, path); resolved != "" {
@@ -127,14 +129,14 @@ func (m *StatModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 		}
 	}
 
-	msg := fmt.Sprintf("%s 存在（%s", path, kind)
+	msg := fmt.Sprintf(i18n.T("%s exists (%s", "%s 存在（%s"), path, kind)
 	if s, _ := facts["mode"].(string); s != "" {
 		msg += ", mode " + s
 	}
 	if kind == "file" && sizeKnown {
-		msg += fmt.Sprintf(", %d 字节", fileSize)
+		msg += fmt.Sprintf(i18n.T(", %d bytes", ", %d 字节"), fileSize)
 	}
-	msg += "）"
+	msg += i18n.T(")", "）")
 	return &Result{Msg: msg, Facts: map[string]any{"stat": facts}}
 }
 
@@ -164,11 +166,11 @@ exit 0`, shellquote.Quote(path))
 	case 3:
 		return 0, false, nil
 	default:
-		return 0, false, Fail("读取大小失败: %s", firstLine(out.Stderr))
+		return 0, false, Fail(i18n.T("failed to read size: %s", "读取大小失败: %s"), firstLine(out.Stderr))
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(out.Stdout), 10, 64)
 	if err != nil || n < 0 {
-		return 0, false, Fail("无法解析大小 %q", out.Stdout)
+		return 0, false, Fail(i18n.T("unable to parse size %q", "无法解析大小 %q"), out.Stdout)
 	}
 	return n, true, nil
 }

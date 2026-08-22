@@ -11,6 +11,7 @@ import (
 
 	"github.com/pmezard/go-difflib/difflib"
 
+	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -37,11 +38,11 @@ exit $?`, shellquote.Quote(path))
 		return "", false, nil
 	}
 	if out.Code != 0 {
-		return "", false, Fail("读取远端校验和失败 rc=%d: %s", out.Code, firstLine(out.Stderr))
+		return "", false, Fail(i18n.T("failed to read remote checksum rc=%d: %s", "读取远端校验和失败 rc=%d: %s"), out.Code, firstLine(out.Stderr))
 	}
 	sum := strings.Fields(out.Stdout)
 	if len(sum) == 0 {
-		return "", false, Fail("无法解析校验和输出: %q", out.Stdout)
+		return "", false, Fail(i18n.T("unable to parse checksum output: %q", "无法解析校验和输出: %q"), out.Stdout)
 	}
 	return sum[0], true, nil
 }
@@ -58,7 +59,7 @@ func sha256hex(data []byte) string {
 func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMode bool, owner, group string) (bool, *Result) {
 	// 属主要求提权（与 file 模块行为一致：显式报错而非静默跳过）
 	if (owner != "" || group != "") && !rc.Become {
-		return false, Fail("设置 owner/group 需要 become: true（%s）", dest)
+		return false, Fail(i18n.T("setting owner/group requires become: true (%s)", "设置 owner/group 需要 become: true（%s）"), dest)
 	}
 	sum := sha256hex(data)
 	remote, exists, bad := remoteChecksum(rc, dest)
@@ -66,27 +67,42 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 		return false, bad
 	}
 	changed := !exists || remote != sum
+	// ownerDrift 探测属主漂移（check 预演与实跑判定共用；此前 check 模式
+	// 完全不评估属主，实跑修复了属主却报 changed=false，notify 不触发）
+	ownerDrift := false
+	if !changed && (owner != "" || group != "") {
+		curOwner, curGroup, ok, obad := remoteOwnerGroup(rc, dest)
+		if obad != nil {
+			return false, obad
+		}
+		ownerDrift = !ok || curOwner != owner || curGroup != group
+	}
 	if rc.CheckMode {
 		if !changed && hasMode {
-			if cur, ok, mbad := remoteMode(rc, dest); mbad == nil && ok && cur != mode {
+			if cur, ok, mbad := remoteMode(rc, dest); mbad != nil {
+				return false, mbad
+			} else if ok && cur != mode {
 				changed = true
 			}
+		}
+		if ownerDrift {
+			changed = true
 		}
 		var res *Result
 		if changed {
 			if !exists || remote != sum {
-				res = &Result{Changed: true, Msg: fmt.Sprintf("[check] %s 将写入（%d 字节）", dest, len(data))}
+				res = &Result{Changed: true, Msg: fmt.Sprintf(i18n.T("[check] %s will be written (%d bytes)", "[check] %s 将写入（%d 字节）"), dest, len(data))}
 				if rc.DiffMode {
 					res.Diff = contentDiff(rc, dest, exists, string(data))
 				}
 			} else {
-				res = &Result{Changed: true, Msg: fmt.Sprintf("[check] %s 内容一致，权限将校正", dest)}
+				res = &Result{Changed: true, Msg: fmt.Sprintf(i18n.T("[check] %s content is unchanged, attributes will be corrected", "[check] %s 内容一致，属性将校正"), dest)}
 				if rc.DiffMode {
 					res.Diff = modeDiff(rc, dest, mode)
 				}
 			}
 		} else {
-			res = &Result{Changed: false, Msg: fmt.Sprintf("[check] %s 内容与权限一致", dest)}
+			res = &Result{Changed: false, Msg: fmt.Sprintf(i18n.T("[check] %s content and attributes are unchanged", "[check] %s 内容与属性一致"), dest)}
 		}
 		return changed, res
 	}
@@ -99,10 +115,11 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 				changed = true
 			}
 		}
-		if (owner != "" || group != "") && rc.Become {
+		if ownerDrift {
 			if bad := chownPath(rc, dest, owner, group); bad != nil {
 				return false, bad
 			}
+			changed = true
 		}
 		return changed, nil
 	}
@@ -112,7 +129,7 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 		if out, bad := rc.exec(script); bad != nil {
 			return false, bad
 		} else if out.Code != 0 {
-			return false, Fail("备份失败: %s", firstLine(out.Stderr))
+			return false, Fail(i18n.T("backup failed: %s", "备份失败: %s"), firstLine(out.Stderr))
 		}
 	}
 	// 变更前登记回滚动作（auto_rollback）：已存在 → 快照恢复；新建 → 回滚时删除
@@ -124,7 +141,7 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 		}
 	}
 	if err := uploadBytes(rc, dest, data, mode, hasMode); err != nil {
-		return false, Fail("上传失败: %v", err)
+		return false, Fail(i18n.T("upload failed: %v", "上传失败: %v"), err)
 	}
 	if (owner != "" || group != "") && rc.Become {
 		if bad := chownPath(rc, dest, owner, group); bad != nil {
@@ -144,13 +161,13 @@ func chmodIfDiffers(rc *RunContext, path string, mode int64) (bool, *Result) {
 		return false, nil
 	}
 	if !ok {
-		return false, Fail("路径不存在: %s", path)
+		return false, Fail(i18n.T("path does not exist: %s", "路径不存在: %s"), path)
 	}
 	script := fmt.Sprintf("chmod %04o %s", mode, shellquote.Quote(path))
 	if out, bad := rc.exec(script); bad != nil {
 		return false, bad
 	} else if out.Code != 0 {
-		return false, Fail("chmod 失败: %s", firstLine(out.Stderr))
+		return false, Fail(i18n.T("chmod failed: %s", "chmod 失败: %s"), firstLine(out.Stderr))
 	}
 	return true, nil
 }
@@ -172,11 +189,11 @@ exit 0`, shellquote.Quote(path))
 	case 3:
 		return 0, false, nil
 	default:
-		return 0, false, Fail("读取权限失败: %s", firstLine(out.Stderr))
+		return 0, false, Fail(i18n.T("failed to read permission: %s", "读取权限失败: %s"), firstLine(out.Stderr))
 	}
 	var m int64
 	if _, err := fmt.Sscanf(strings.TrimSpace(out.Stdout), "%o", &m); err != nil {
-		return 0, false, Fail("无法解析权限 %q", out.Stdout)
+		return 0, false, Fail(i18n.T("unable to parse permission %q", "无法解析权限 %q"), out.Stdout)
 	}
 	return m, true, nil
 }
@@ -193,7 +210,7 @@ func chownPath(rc *RunContext, path, owner, group string) *Result {
 	if out, bad := rc.exec(script); bad != nil {
 		return bad
 	} else if out.Code != 0 {
-		return Fail("chown 失败: %s", firstLine(out.Stderr))
+		return Fail(i18n.T("chown failed: %s", "chown 失败: %s"), firstLine(out.Stderr))
 	}
 	return nil
 }
@@ -221,16 +238,16 @@ const maxDiffBytes = 1 << 20
 // check 专用只读路径，远端不存在时全部为新增行）。
 func contentDiff(rc *RunContext, dest string, exists bool, want string) string {
 	if !exists {
-		return diffText("", want, "(远端不存在)", dest)
+		return diffText("", want, i18n.T("(remote does not exist)", "(远端不存在)"), dest)
 	}
 	var buf bytes.Buffer
 	if err := rc.Conn.DownloadFile(rc.Ctx, dest, &buf); err != nil {
-		return fmt.Sprintf("(远端内容读取失败: %v)", err)
+		return fmt.Sprintf(i18n.T("(failed to read remote content: %v)", "(远端内容读取失败: %v)"), err)
 	}
 	if buf.Len() > maxDiffBytes {
-		return fmt.Sprintf("(远端文件 %d 字节超过 diff 上限，仅显示变更摘要)", buf.Len())
+		return fmt.Sprintf(i18n.T("(remote file is %d bytes, over the diff limit; showing change summary only)", "(远端文件 %d 字节超过 diff 上限，仅显示变更摘要)"), buf.Len())
 	}
-	return diffText(buf.String(), want, "远端 "+dest, "目标 "+dest)
+	return diffText(buf.String(), want, i18n.T("remote ", "远端 ")+dest, i18n.T("target ", "目标 ")+dest)
 }
 
 // diffText 生成 unified diff（无差异返回空串）。

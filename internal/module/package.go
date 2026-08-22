@@ -2,6 +2,7 @@ package module
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"wdp/internal/i18n"
@@ -27,13 +28,11 @@ func (m *PackageModule) Desc() string {
 func (m *PackageModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	names, ok := argStrList(args, "name")
 	if !ok || len(names) == 0 {
-		return Fail("package 需要 name 参数")
+		return Fail("%s", i18n.T("package requires a name parameter", "package 需要 name 参数"))
 	}
-	state, _ := argStr(args, "state")
-	switch state {
-	case "", "present", "latest", "absent":
-	default:
-		return Fail("不支持的 state %q（可选: present/latest/absent）", state)
+	state, ok := parseState(args, "present", "present", "latest", "absent")
+	if !ok {
+		return Fail(i18n.T("unsupported state %q (options: present/latest/absent)", "不支持的 state %q（可选: present/latest/absent）"), state)
 	}
 
 	mgr, bad := detectPkgManager(rc)
@@ -55,11 +54,11 @@ func (m *PackageModule) Run(rc *RunContext, args map[string]any, free string) *R
 			switch {
 			case state == "absent" && installed:
 				would = true
-				logs = append(logs, name+" 将卸载")
+				logs = append(logs, name+i18n.T(" will be removed", " 将卸载"))
 				diffLines = append(diffLines, "- "+name)
 			case state != "absent" && !installed:
 				would = true
-				logs = append(logs, name+" 将安装")
+				logs = append(logs, name+i18n.T(" will be installed", " 将安装"))
 				diffLines = append(diffLines, "+ "+name)
 			case state == "latest" && installed:
 				up, bad := mgr.upgradable(rc, name)
@@ -68,13 +67,13 @@ func (m *PackageModule) Run(rc *RunContext, args map[string]any, free string) *R
 				}
 				if up {
 					would = true
-					logs = append(logs, name+" 将升级")
+					logs = append(logs, name+i18n.T(" will be upgraded", " 将升级"))
 					diffLines = append(diffLines, "~ "+name)
 				} else {
 					logs = append(logs, name+" 已是最新")
 				}
 			default:
-				logs = append(logs, name+" 已是目标状态")
+				logs = append(logs, name+i18n.T(" is already in the target state", " 已是目标状态"))
 			}
 		}
 		return &Result{Changed: would, Msg: "[check] " + strings.Join(logs, "; "), Diff: strings.Join(diffLines, "\n")}
@@ -93,13 +92,13 @@ func (m *PackageModule) Run(rc *RunContext, args map[string]any, free string) *R
 				return bad
 			}
 			changed = true
-			logs = append(logs, name+" 已卸载")
+			logs = append(logs, name+i18n.T(" removed", " 已卸载"))
 		case state != "absent" && !installed:
 			if bad := mgr.install(rc, name); bad != nil {
 				return bad
 			}
 			changed = true
-			logs = append(logs, name+" 已安装")
+			logs = append(logs, name+i18n.T(" installed", " 已安装"))
 		case state == "latest" && installed:
 			// 幂等：先探测是否存在可用升级，无升级则跳过（不再每次无脑 upgrade）
 			up, bad := mgr.upgradable(rc, name)
@@ -114,9 +113,9 @@ func (m *PackageModule) Run(rc *RunContext, args map[string]any, free string) *R
 				return bad
 			}
 			changed = true
-			logs = append(logs, name+" 已升级")
+			logs = append(logs, name+i18n.T(" upgraded", " 已升级"))
 		default:
-			logs = append(logs, name+" 已是目标状态")
+			logs = append(logs, name+i18n.T(" is already in the target state", " 已是目标状态"))
 		}
 	}
 	return &Result{Changed: changed, Msg: strings.Join(logs, "; ")}
@@ -174,7 +173,7 @@ echo "like=${ID_LIKE:-}"`
 	case contains("suse", "opensuse"):
 		return &pkgManager{kind: "zypper", family: "suse"}, nil
 	default:
-		return nil, Fail("无法识别包管理器（os id=%s like=%s）", id, like)
+		return nil, Fail(i18n.T("unable to detect the package manager (os id=%s like=%s)", "无法识别包管理器（os id=%s like=%s）"), id, like)
 	}
 }
 
@@ -223,46 +222,80 @@ func (p *pkgManager) upgrade(rc *RunContext, name string) *Result {
 	case "zypper":
 		return p.run(rc, fmt.Sprintf("zypper update -y %s", shellquote.Quote(name)))
 	}
-	return Fail("未知包管理器 %s", p.kind)
+	return Fail(i18n.T("unknown package manager %s", "未知包管理器 %s"), p.kind)
 }
 
 // upgradable 探测包是否存在可用升级（state: latest 的幂等判定依据）。
-// 探测失败（如 dnf 源暂时不可用）返回 error，不静默跳过。
+// 探测命令不带管道（sh 管道退出码取最后一段，包管理器自身错误——源不可用、
+// 锁冲突——会被 awk/grep 吞成"无升级"，造成假幂等），输出在控制端解析；
+// 探测失败返回错误，不静默跳过。
 func (p *pkgManager) upgradable(rc *RunContext, name string) (bool, *Result) {
 	q := shellquote.Quote(name)
 	var script string
 	switch p.kind {
 	case "apt":
-		// 模拟升级并解析 "N upgraded" 汇总行：N>0 即存在可用升级。
-		// "already the newest version" 时无该行，awk 默认 0 → 无升级。
-		script = fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get -s install --only-upgrade %s 2>/dev/null | awk '/^[0-9]+ upgraded/{ if ($1+0 > 0) exit 1 }'", q)
+		// 模拟升级输出 "N upgraded, M newly installed" 汇总行，
+		// "already the newest version" 时无该行
+		script = fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get -s install --only-upgrade %s", q)
 	case "dnf", "yum":
-		// check-update 语义：返回 100 = 有可用更新，0 = 无
-		script = fmt.Sprintf("%s check-update %s >/dev/null 2>&1; rc=$?; [ $rc -eq 100 ] || [ $rc -eq 0 ] || exit $rc", p.kind, q)
+		// check-update 语义：100 = 有可用更新，0 = 无，其它 = 错误
+		script = fmt.Sprintf("%s check-update %s", p.kind, q)
 	case "apk":
-		// apk version -l '<' 仅列出存在可用升级的包
-		script = fmt.Sprintf("apk version -l '<' %s 2>/dev/null | grep -q .", q)
+		// -l '<' 由 apk 自身按包名过滤，仅输出存在升级的包行
+		script = fmt.Sprintf("apk version -l '<' %s", q)
 	case "zypper":
-		// list-updates 输出表头后存在包行即存在升级
-		script = fmt.Sprintf("zypper --non-interactive list-updates %s 2>/dev/null | tail -n +5 | grep -q .", q)
+		// list-updates 的位置参数是仓库名而非包名（此前误传包名恒报
+		// "无升级"），改为全量列表 + 控制端按包名列精确匹配
+		script = "zypper --non-interactive list-updates"
 	default:
-		return false, Fail("未知包管理器 %s", p.kind)
+		return false, Fail(i18n.T("unknown package manager %s", "未知包管理器 %s"), p.kind)
 	}
 	out, bad := rc.exec(script)
 	if bad != nil {
 		return false, bad
 	}
-	switch p.kind {
-	case "dnf", "yum":
-		// 脚本保证 rc ∈ {0,100}（其它值已提前 exit 原码）
-		return out.Code == 100, nil
-	case "apt":
-		// awk 发现 >0 行时 exit 1；apt 自身网络错误为其它非零码，不误判
-		return out.Code == 1, nil
-	default:
-		// grep 探测：0 = 有升级，1 = 无升级
-		return out.Code == 0, nil
+	probeFail := func() (bool, *Result) {
+		return false, Fail(i18n.T("upgrade detection failed rc=%d: %s", "升级探测失败 rc=%d: %s"), out.Code, firstLine(out.Stderr))
 	}
+	switch p.kind {
+	case "apt":
+		if out.Code != 0 {
+			return probeFail()
+		}
+		for _, line := range strings.Split(out.Stdout, "\n") {
+			f := strings.Fields(line)
+			if len(f) >= 2 && strings.TrimSuffix(f[1], ",") == "upgraded" {
+				n, err := strconv.Atoi(f[0])
+				return err == nil && n > 0, nil
+			}
+		}
+		return false, nil
+	case "dnf", "yum":
+		if out.Code != 0 && out.Code != 100 {
+			return probeFail()
+		}
+		return out.Code == 100, nil
+	case "apk":
+		if out.Code != 0 {
+			return probeFail()
+		}
+		// apk 已按包名过滤，存在任何输出行即存在升级
+		return strings.TrimSpace(out.Stdout) != "", nil
+	case "zypper":
+		if out.Code != 0 {
+			return probeFail()
+		}
+		// 表格式 "S | Repository | Name | Current | Available | Arch"，
+		// Name 列（第 3 列）精确匹配（表头/分隔行不会等于包名）
+		for _, line := range strings.Split(out.Stdout, "\n") {
+			cols := strings.Split(line, "|")
+			if len(cols) >= 6 && strings.TrimSpace(cols[2]) == name {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	return false, nil
 }
 
 func (p *pkgManager) cmd(verb, name string) string {
@@ -284,7 +317,7 @@ func (p *pkgManager) run(rc *RunContext, script string) *Result {
 		return bad
 	}
 	if out.Code != 0 {
-		return Fail("包操作失败 rc=%d: %s", out.Code, firstLine(out.Stderr))
+		return Fail(i18n.T("package operation failed rc=%d: %s", "包操作失败 rc=%d: %s"), out.Code, firstLine(out.Stderr))
 	}
 	return nil
 }

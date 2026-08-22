@@ -120,6 +120,23 @@ func TestAnalyze(t *testing.T) {
 	}
 }
 
+// TestAnalyzePartialReversible 回归：unarchive 曾因硬编码名单遗漏被误判为
+// 完全不可逆。现在按模块自声明能力归类为"部分可逆"。
+func TestAnalyzePartialReversible(t *testing.T) {
+	c := &Chart{Deploy: []*model.Play{{Tasks: []*model.Task{
+		{Module: "unarchive"},
+		{Module: "shell", FreeForm: "x"},
+	}}}}
+	r := c.Analyze()
+	if r.Partial != 1 || r.Irreversible != 1 {
+		t.Fatalf("unarchive 应计为部分可逆: %+v", r)
+	}
+	s := r.Summary()
+	if !strings.Contains(s, "部分可逆 1") || !strings.Contains(s, "覆盖已有文件不恢复") {
+		t.Fatalf("摘要应说明部分可逆边界: %s", s)
+	}
+}
+
 func TestMarkerContent(t *testing.T) {
 	c, err := Load(writeLifecycleChart(t))
 	if err != nil {

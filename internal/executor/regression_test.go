@@ -172,7 +172,7 @@ func TestChartSelfReferenceNoCrash(t *testing.T) {
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host) (connection.Connection, error) {
+	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
 		return connection.NewFake(h), nil
 	})
 	inv, err := inventory.Parse([]byte(testInv))

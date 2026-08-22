@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -41,6 +43,7 @@ type Server struct {
 	Listen      string
 	middlewares []func(http.Handler) http.Handler
 
+	maxRequestBody    int64 // 请求体上限字节（0 = 默认 64MiB；--max-request-mb 可配）
 	tlsCAFile         string
 	tlsCertFile       string
 	tlsKeyFile        string
@@ -56,6 +59,22 @@ func New(listen string) *Server {
 	return &Server{Listen: listen}
 }
 
+// SetMaxRequestBody 设置请求体上限（MiB；<=0 回退内置默认 64MiB）。
+func (s *Server) SetMaxRequestBody(mb int64) {
+	if mb <= 0 {
+		mb = 64
+	}
+	s.maxRequestBody = mb << 20
+}
+
+// maxRequestBodyLimit 返回生效的请求体上限（字节）。
+func (s *Server) maxRequestBodyLimit() int64 {
+	if s.maxRequestBody > 0 {
+		return s.maxRequestBody
+	}
+	return 64 << 20
+}
+
 // Use 追加 middleware。
 func (s *Server) Use(mw func(http.Handler) http.Handler) {
 	s.middlewares = append(s.middlewares, mw)
@@ -65,15 +84,15 @@ func (s *Server) Use(mw func(http.Handler) http.Handler) {
 func (s *Server) ConfigureAuth(ca, cert, key string) error {
 	if ca != "" || cert != "" || key != "" {
 		if ca == "" || cert == "" || key == "" {
-			return fmt.Errorf("mTLS 需要 --ca/--cert/--key 同时提供")
+			return errors.New(i18n.T("mTLS requires --ca/--cert/--key all together", "mTLS 需要 --ca/--cert/--key 同时提供"))
 		}
 		pool := x509.NewCertPool()
 		caPEM, err := os.ReadFile(ca)
 		if err != nil {
-			return fmt.Errorf("读取 CA 证书失败: %w", err)
+			return fmt.Errorf(i18n.T("failed to read CA certificate: %w", "读取 CA 证书失败: %w"), err)
 		}
 		if !pool.AppendCertsFromPEM(caPEM) {
-			return fmt.Errorf("解析 CA 证书失败: %s", ca)
+			return fmt.Errorf(i18n.T("failed to parse CA certificate: %s", "解析 CA 证书失败: %s"), ca)
 		}
 		s.clientCAs = pool
 		s.tlsCAFile, s.tlsCertFile, s.tlsKeyFile = ca, cert, key
@@ -114,10 +133,10 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
 	mux.HandleFunc("POST /exec", s.handleExec)
-		mux.HandleFunc("PUT /file", s.handleUpload)
-		mux.HandleFunc("GET /file", s.handleDownload)
-		mux.HandleFunc("POST /archive", s.handleArchive)
-		mux.HandleFunc("POST /shutdown", s.handleShutdown)
+	mux.HandleFunc("PUT /file", s.handleUpload)
+	mux.HandleFunc("GET /file", s.handleDownload)
+	mux.HandleFunc("POST /archive", s.handleArchive)
+	mux.HandleFunc("POST /shutdown", s.handleShutdown)
 
 	var h http.Handler = mux
 	if s.clientPins != nil {
@@ -229,20 +248,21 @@ type execReq struct {
 }
 
 type execResp struct {
-	Code     int    `json:"code"`
-	Stdout   string `json:"stdout"`
-	Stderr   string `json:"stderr"`
-	TimedOut bool   `json:"timed_out"`
+	Code      int    `json:"code"`
+	Stdout    string `json:"stdout"`
+	Stderr    string `json:"stderr"`
+	TimedOut  bool   `json:"timed_out"`
+	Cancelled bool   `json:"cancelled"` // 控制端取消/断开（区别于超时）
 }
 
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	var req execReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, 64<<20)).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, execResp{Code: -1, Stderr: "请求体解析失败: " + err.Error()})
+	if err := json.NewDecoder(io.LimitReader(r.Body, s.maxRequestBodyLimit())).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, execResp{Code: -1, Stderr: i18n.T("request body parse failed: ", "请求体解析失败: ") + err.Error()})
 		return
 	}
 	if req.Script == "" {
-		writeJSON(w, http.StatusBadRequest, execResp{Code: -1, Stderr: "script 为空"})
+		writeJSON(w, http.StatusBadRequest, execResp{Code: -1, Stderr: i18n.T("script is empty", "script 为空")})
 		return
 	}
 
@@ -255,29 +275,58 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
 		defer cancel()
 	}
+	// become 时环境变量写进脚本内部（sudo 默认 env_reset 会剥夺外层注入的
+	// 变量；脚本内 export 在 sudo 之后执行不受影响），非 become 走进程环境
+	env := os.Environ()
+	if req.BecomeUser != "" && len(req.Env) > 0 {
+		var sb strings.Builder
+		for k, v := range req.Env {
+			if envKeyRe.MatchString(k) {
+				fmt.Fprintf(&sb, "export %s=%s\n", k, shellquote.Quote(v))
+			}
+		}
+		script = sb.String() + script
+	} else {
+		for k, v := range req.Env {
+			env = append(env, k+"="+v)
+		}
+	}
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	setPgrp(cmd) // 独立进程组：超时整组击杀（sudo 提权的 root 子进程不残留）
+	cmd.Cancel = func() error { return killGroup(cmd) }
+	cmd.WaitDelay = 3 * time.Second
 	cmd.Dir = req.Cwd
 	if cmd.Dir == "" {
 		cmd.Dir = "/"
-	}
-	env := os.Environ()
-	for k, v := range req.Env {
-		env = append(env, k+"="+v)
 	}
 	cmd.Env = env
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
-	var stdout, stderr bytes.Buffer
+	// 输出上限（每流 1MiB，与控制端截断对齐）：防高输出命令把常驻 agent 撑爆
+	var stdout, stderr capWriter
+	stdout.limit, stderr.limit = maxExecOutputBytes, maxExecOutputBytes
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 
 	resp := execResp{Stdout: stdout.String(), Stderr: stderr.String()}
+	if stdout.truncated {
+		resp.Stdout += "\n[wdp-agent] " + i18n.T("stdout exceeded 1MiB and was truncated", "stdout 超过 1MiB 已截断")
+	}
+	if stderr.truncated {
+		resp.Stderr += "\n[wdp-agent] " + i18n.T("stderr exceeded 1MiB and was truncated", "stderr 超过 1MiB 已截断")
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil && err != nil {
-		resp.TimedOut = true
 		resp.Code = -1
-		resp.Stderr += "\n[wdp-agent] 执行超时被终止"
+		if errors.Is(ctxErr, context.DeadlineExceeded) {
+			resp.TimedOut = true
+			resp.Stderr += "\n[wdp-agent] " + i18n.T("execution timed out and was terminated", "执行超时被终止")
+		} else {
+			// 控制端主动取消/断开不是超时，错误归因不能混为一谈
+			resp.Cancelled = true
+			resp.Stderr += "\n[wdp-agent] " + i18n.T("client cancelled or disconnected", "客户端已取消/断开")
+		}
 	} else if err != nil {
 		resp.Code = 1
 		if ee, ok := err.(*exec.ExitError); ok {
@@ -290,7 +339,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
-		http.Error(w, "缺少 path 参数", http.StatusBadRequest)
+		http.Error(w, i18n.T("missing path parameter", "缺少 path 参数"), http.StatusBadRequest)
 		return
 	}
 	mode := fs.FileMode(0o644)
@@ -301,33 +350,41 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		http.Error(w, "创建目录失败: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, i18n.T("failed to create directory: ", "创建目录失败: ")+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".wdp-agent-*")
 	if err != nil {
-		http.Error(w, "创建临时文件失败: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, i18n.T("failed to create temp file: ", "创建临时文件失败: ")+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
 
-	if _, err := io.Copy(tmp, r.Body); err != nil {
-		tmp.Close()
-		http.Error(w, "写入失败: "+err.Error(), http.StatusInternalServerError)
+	// 请求体上限（与 /exec 一致）：无上限 io.Copy 会被大 body 写满磁盘
+	limit := s.maxRequestBodyLimit()
+	n, err := io.Copy(tmp, io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		_ = tmp.Close()
+		http.Error(w, i18n.T("write failed: ", "写入失败: ")+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if n > limit {
+		_ = tmp.Close()
+		http.Error(w, i18n.T("request body exceeds limit", "请求体超过上限"), http.StatusRequestEntityTooLarge)
 		return
 	}
 	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		http.Error(w, "设置权限失败: "+err.Error(), http.StatusInternalServerError)
+		_ = tmp.Close()
+		http.Error(w, i18n.T("failed to set permissions: ", "设置权限失败: ")+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := tmp.Close(); err != nil {
-		http.Error(w, "关闭文件失败: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, i18n.T("failed to close file: ", "关闭文件失败: ")+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		http.Error(w, "落盘失败: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, i18n.T("failed to write to disk: ", "落盘失败: ")+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -336,12 +393,12 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Query().Get("path")
 	if path == "" {
-		http.Error(w, "缺少 path 参数", http.StatusBadRequest)
+		http.Error(w, i18n.T("missing path parameter", "缺少 path 参数"), http.StatusBadRequest)
 		return
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		http.Error(w, "打开文件失败: "+err.Error(), http.StatusNotFound)
+		http.Error(w, i18n.T("failed to open file: ", "打开文件失败: ")+err.Error(), http.StatusNotFound)
 		return
 	}
 	defer f.Close()
@@ -355,7 +412,7 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	src := r.URL.Query().Get("src")
 	dest := r.URL.Query().Get("dest")
 	if src == "" || dest == "" {
-		http.Error(w, "缺少 src/dest 参数", http.StatusBadRequest)
+		http.Error(w, i18n.T("missing src/dest parameter", "缺少 src/dest 参数"), http.StatusBadRequest)
 		return
 	}
 	files, err := ExtractArchive(src, dest)
@@ -375,24 +432,82 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 			s.cleanupFiles()
 		}
 		if s.httpSrv != nil {
-			_ = s.httpSrv.Shutdown(context.Background())
+			// 限时等待活动连接排空：无限期 Shutdown 会被长任务永远挂住，
+			// 超时后强制关停全部连接（自清理后进程退出，残留任务随之终结）
+			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = s.httpSrv.Shutdown(sctx)
+			_ = s.httpSrv.Close()
 		}
 		// httpSrv 为 nil（Handler 被外部嵌入测试）时仅作罢，不退出进程
 	}()
 }
 
+// isPushArtifact 判断路径是否 push 临时 agent 的自举产物
+// （临时目录下 .wdp-agent-* 前缀）。cleanupFiles 只清理这类文件，
+// 防止常驻 agent 误传 --cleanup-on-shutdown 时删掉共享 CA / 安装的二进制。
+func isPushArtifact(p string) bool {
+	if p == "" {
+		return false
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	tmp, err := filepath.Abs(os.TempDir())
+	if err != nil {
+		return false
+	}
+	return strings.HasPrefix(abs, tmp+string(filepath.Separator)) &&
+		strings.HasPrefix(filepath.Base(abs), ".wdp-agent-")
+}
+
 // cleanupFiles 删除自身二进制与 mTLS 材料文件（cleanupOnShutdown 用；
-// 证书/私钥启动时已载入内存，删除不影响运行）。
+// 证书/私钥启动时已载入内存，删除不影响运行）。仅清理 push 自举产物
+// 路径（见 isPushArtifact），共享文件一律不动。
 func (s *Server) cleanupFiles() {
-	if len(os.Args) > 0 {
+	if len(os.Args) > 0 && isPushArtifact(os.Args[0]) {
 		_ = os.Remove(os.Args[0])
 	}
 	for _, f := range []string{s.tlsCAFile, s.tlsCertFile, s.tlsKeyFile} {
-		if f != "" {
+		if isPushArtifact(f) {
 			_ = os.Remove(f)
 		}
 	}
 }
+
+// envKeyRe 是允许注入的环境变量键白名单（与 sshconn 一致）。
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// maxExecOutputBytes 是单条 exec 每个输出流的缓冲上限（与控制端
+// "单任务输出超 1MB 截断"对齐）。
+const maxExecOutputBytes = 1 << 20
+
+// capWriter 是带上限的缓冲 writer：保留前 limit 字节，超出部分丢弃并标记。
+type capWriter struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if w.limit <= 0 {
+		w.limit = maxExecOutputBytes
+	}
+	room := w.limit - w.buf.Len()
+	if room <= 0 {
+		w.truncated = true
+		return len(p), nil
+	}
+	if len(p) > room {
+		p = p[:room]
+		w.truncated = true
+	}
+	w.buf.Write(p)
+	return len(p), nil
+}
+
+func (w *capWriter) String() string { return w.buf.String() }
 
 // becomeScript 生成提权执行脚本与最终 stdin 内容。
 // 密码经 stdin 传递（sudo -S 读首行，余下内容供 sudo 内命令继续读取），

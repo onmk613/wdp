@@ -5,6 +5,7 @@ import (
 	"path"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -30,7 +31,7 @@ func (inv *Inventory) Select(pattern string) ([]*model.Host, error) {
 		for i, seg := range strings.Split(token, ":&") {
 			seg = strings.TrimSpace(seg)
 			if seg == "" {
-				return nil, fmt.Errorf("主机模式 %q 存在空片段", token)
+				return nil, fmt.Errorf(i18n.T("host pattern %q contains an empty segment", "主机模式 %q 存在空片段"), token)
 			}
 			matched, err := inv.matchSegment(seg)
 			if err != nil {
@@ -90,7 +91,7 @@ func (inv *Inventory) matchSegment(seg string) (map[string]bool, error) {
 			}
 		}
 		if !matched {
-			return nil, fmt.Errorf("未找到匹配 %q 的主机或组", seg)
+			return nil, fmt.Errorf(i18n.T("no host or group matches %q", "未找到匹配 %q 的主机或组"), seg)
 		}
 		return out, nil
 	default:
@@ -104,7 +105,7 @@ func (inv *Inventory) matchSegment(seg string) (map[string]bool, error) {
 			out[seg] = true
 			return out, nil
 		}
-		return nil, fmt.Errorf("未找到主机或组: %s", seg)
+		return nil, fmt.Errorf(i18n.T("host or group not found: %s", "未找到主机或组: %s"), seg)
 	}
 }
 

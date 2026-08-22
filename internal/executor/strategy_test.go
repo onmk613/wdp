@@ -34,7 +34,7 @@ func setupStrategy(t *testing.T, gateRC int) (*Executor, *captureReporter) {
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host) (connection.Connection, error) {
+	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
 		f := connection.NewFake(h)
 		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
 			s := req.Script
@@ -127,7 +127,7 @@ func TestBatchFailureRollback(t *testing.T) {
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host) (connection.Connection, error) {
+	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
 		f := connection.NewFake(h)
 		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
 			s := req.Script

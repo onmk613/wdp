@@ -24,6 +24,7 @@ import (
 	"sync"
 
 	"wdp/internal/fmtutil"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -93,7 +94,7 @@ func (c *Console) PlayStart(name string, hosts []string) {
 		c.p.Sprint(fmtutil.Bold, "["+name+"]"),
 		c.p.Sprint(fmtutil.Cyan, strings.Repeat("*", 20)))
 	if len(hosts) > 20 && c.Level < 1 {
-		c.printf("%s %d 台（前 10: %v …）\n\n", c.p.Sprint(fmtutil.Dim, "hosts:"), len(hosts), hosts[:10])
+		c.printf(i18n.T("%s %d hosts (first 10: %v …)\n\n", "%s %d 台（前 10: %v …）\n\n"), c.p.Sprint(fmtutil.Dim, "hosts:"), len(hosts), hosts[:10])
 	} else {
 		c.printf("%s %v\n\n", c.p.Sprint(fmtutil.Dim, "hosts:"), hosts)
 	}
@@ -327,7 +328,7 @@ func (c *Console) TaskDone() {
 		return
 	}
 	c.printf("%s %s\n\n", c.p.Sprint(fmtutil.Dim, "»"),
-		fmt.Sprintf("%d 台: %s %s %s %s %s",
+		fmt.Sprintf(i18n.T("%d hosts: %s %s %s %s %s", "%d 台: %s %s %s %s %s"),
 			hosts,
 			c.p.Sprint(fmtutil.Green, fmt.Sprintf("ok=%d", s.Ok)),
 			c.p.Sprint(fmtutil.Yellow, fmt.Sprintf("changed=%d", s.Changed)),
@@ -406,7 +407,7 @@ func (c *Console) Recap(playName string, stats map[string]*model.Stats) {
 			total.Skipped += s.Skipped
 			total.Ignored += s.Ignored
 		}
-		tb.AddRow(append([]fmtutil.Cell{fmtutil.CC(fmt.Sprintf("TOTAL(%d 台):", len(names)), fmtutil.Bold)}, statCells(total)...)...)
+		tb.AddRow(append([]fmtutil.Cell{fmtutil.CC(fmt.Sprintf(i18n.T("TOTAL(%d hosts):", "TOTAL(%d 台):"), len(names)), fmtutil.Bold)}, statCells(total)...)...)
 		tb.Render()
 		return
 	}

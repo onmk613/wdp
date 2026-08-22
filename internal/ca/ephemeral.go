@@ -19,6 +19,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"time"
+	"wdp/internal/i18n"
 )
 
 // ephemeralValidity 临时证书有效期：push agent 生命周期为分钟级，
@@ -121,7 +122,7 @@ func signEphemeralLeaf(caCert *x509.Certificate, caKey *ecdsa.PrivateKey, cn str
 // ecKeyPEM 将 SEC1 EC 私钥 DER 编码为 PEM。
 func ecKeyPEM(der []byte) ([]byte, error) {
 	if _, err := x509.ParseECPrivateKey(der); err != nil {
-		return nil, fmt.Errorf("临时私钥编码异常: %w", err)
+		return nil, fmt.Errorf(i18n.T("ephemeral private key encoding error: %w", "临时私钥编码异常: %w"), err)
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: plainPEMType, Bytes: der}), nil
 }

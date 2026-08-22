@@ -28,15 +28,15 @@ func (m *FetchModule) Desc() string {
 func (m *FetchModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	src, ok := argStr(args, "src")
 	if !ok || src == "" {
-		return Fail("fetch 需要 src 参数")
+		return Fail("%s", i18n.T("fetch requires a src parameter", "fetch 需要 src 参数"))
 	}
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("fetch 需要 dest 参数")
+		return Fail("%s", i18n.T("fetch requires a dest parameter", "fetch 需要 dest 参数"))
 	}
 	flat, _ := argBool(args, "flat")
 	if _, err := os.Stat(dest); err == nil && !isDirLocal(dest) {
-		return Fail("fetch 的 dest 应为目录: %s", dest)
+		return Fail(i18n.T("fetch dest must be a directory: %s", "fetch 的 dest 应为目录: %s"), dest)
 	}
 
 	remote, exists, bad := remoteChecksum(rc, src)
@@ -44,7 +44,7 @@ func (m *FetchModule) Run(rc *RunContext, args map[string]any, free string) *Res
 		return bad
 	}
 	if !exists {
-		return Fail("远端文件不存在: %s", src)
+		return Fail(i18n.T("remote file does not exist: %s", "远端文件不存在: %s"), src)
 	}
 
 	local := m.localPath(rc, src, dest, flat)
@@ -54,26 +54,38 @@ func (m *FetchModule) Run(rc *RunContext, args map[string]any, free string) *Res
 	// 幂等：本地已存在同校验和文件则跳过下载（只读模块，check 模式行为不变）
 	if data, err := os.ReadFile(local); err == nil {
 		if sum := sha256hex(data); sum == remote {
-			return &Result{Msg: fmt.Sprintf("%s 已是最新（sha256 一致）", local)}
+			return &Result{Msg: fmt.Sprintf(i18n.T("%s is already up to date (sha256 matches)", "%s 已是最新（sha256 一致）"), local)}
 		}
 	}
 
 	if rc.CheckMode {
-		return &Result{Changed: true, Msg: fmt.Sprintf("[check] 将拉取 %s 到 %s", src, local)}
+		return &Result{Changed: true, Msg: fmt.Sprintf(i18n.T("[check] will fetch %s to %s", "[check] 将拉取 %s 到 %s"), src, local)}
 	}
 	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
-		return Fail("创建本地目录失败: %v", err)
+		return Fail(i18n.T("failed to create local directory: %v", "创建本地目录失败: %v"), err)
 	}
-	f, err := os.OpenFile(local, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	// 先下载到临时文件、成功后原子改名：直接截断打开本地文件会在远端
+	// 读取失败时把已有旧文件清零，不可恢复
+	tmp, err := os.CreateTemp(filepath.Dir(local), ".wdp-fetch-*")
 	if err != nil {
-		return Fail("创建本地文件失败: %v", err)
+		return Fail(i18n.T("failed to create local file: %v", "创建本地文件失败: %v"), err)
 	}
-	if err := rc.Conn.DownloadFile(rc.Ctx, src, f); err != nil {
-		f.Close()
-		return Fail("下载失败: %v", err)
+	tmpName := tmp.Name()
+	if err := rc.Conn.DownloadFile(rc.Ctx, src, tmp); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return Fail(i18n.T("download failed: %v", "下载失败: %v"), err)
 	}
-	f.Close()
-	return &Result{Changed: true, Msg: fmt.Sprintf("已拉取 %s 到 %s", src, local)}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return Fail(i18n.T("failed to close local file: %v", "关闭本地文件失败: %v"), err)
+	}
+	_ = os.Chmod(tmpName, 0o644)
+	if err := os.Rename(tmpName, local); err != nil {
+		_ = os.Remove(tmpName)
+		return Fail(i18n.T("failed to move the fetched file into place: %v", "落盘改名失败: %v"), err)
+	}
+	return &Result{Changed: true, Msg: fmt.Sprintf(i18n.T("fetched %s to %s", "已拉取 %s 到 %s"), src, local)}
 }
 
 // localPath 计算本地落盘路径：
@@ -91,11 +103,11 @@ func (m *FetchModule) localPath(rc *RunContext, src, dest string, flat bool) str
 func checkLocalPath(dest, local string) error {
 	absDest, err := filepath.Abs(dest)
 	if err != nil {
-		return fmt.Errorf("解析 dest 失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to resolve dest: %w", "解析 dest 失败: %w"), err)
 	}
 	absLocal, err := filepath.Abs(local)
 	if err != nil {
-		return fmt.Errorf("解析目标路径失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to resolve target path: %w", "解析目标路径失败: %w"), err)
 	}
 	absDest = filepath.Clean(absDest)
 	absLocal = filepath.Clean(absLocal)

@@ -18,6 +18,9 @@ type SetupModule struct{}
 // Name 模块名。
 func (m *SetupModule) Name() string { return "setup" }
 
+// ReadOnly 采集 facts 不产生目标机变更。
+func (m *SetupModule) ReadOnly() bool { return true }
+
 // Desc 模块说明。
 func (m *SetupModule) Desc() string {
 	return i18n.T("collect host facts (OS/network/memory/disk)", "采集主机 facts（OS/网络/内存/磁盘）")
@@ -44,7 +47,7 @@ func (m *SetupModule) Run(rc *RunContext, args map[string]any, free string) *Res
 		return bad
 	}
 	if out.Code != 0 {
-		return Fail("facts 采集失败 rc=%d: %s", out.Code, firstLine(out.Stderr))
+		return Fail(i18n.T("facts collection failed rc=%d: %s", "facts 采集失败 rc=%d: %s"), out.Code, firstLine(out.Stderr))
 	}
 	kv := map[string]string{}
 	for _, line := range strings.Split(out.Stdout, "\n") {
@@ -79,7 +82,7 @@ func (m *SetupModule) Run(rc *RunContext, args map[string]any, free string) *Res
 		"os":           osFacts,
 		"disk":         diskFacts,
 	}
-	return &Result{Msg: fmt.Sprintf("facts: %s %s（%s）", kv["hostname"], osFacts["family"], kv["arch"]), Facts: facts}
+	return &Result{Msg: fmt.Sprintf(i18n.T("facts: %s %s (%s)", "facts: %s %s（%s）"), kv["hostname"], osFacts["family"], kv["arch"]), Facts: facts}
 }
 
 // osFamily 归一系统家族（与 package 模块的包管理器探测口径一致）。

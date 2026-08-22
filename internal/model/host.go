@@ -8,6 +8,14 @@ import (
 
 // Host 描述一台受控主机及其连接参数。
 // 特殊连接参数从 inventory 主机条目中提取，其余键进入 Vars。
+//
+// 字段按连接通道分组（保持扁平布局：全库 40+ 处复合字面量依赖平铺语法，
+// 分组嵌入会破坏全部字面量；各通道键的白名单注册见 inventory.RegisterHostKeys）：
+//   - 基础：Name/Address/Port/Conn/Vars
+//   - SSH（含 push 自举阶段）：User/Password(Env)/Key*/HostKey*/ConnectTimeoutSec
+//   - agent/push 通道 TLS：AgentURL/AgentPort/TLS*/CA*/Cert*/Key*(Data)
+//   - push 专属：BinaryPath/KeepAgent
+//   - 提权：BecomePassword(Env)
 type Host struct {
 	Name             string // inventory 中的主机名（inventory_hostname）
 	Address          string // 实际连接地址，缺省等于 Name

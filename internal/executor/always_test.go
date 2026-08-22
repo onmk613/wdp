@@ -21,7 +21,7 @@ func TestAlwaysRunsOnUnreachable(t *testing.T) {
 	fakes = nil
 	fakeMu.Unlock()
 	// 连接建立即失败 → 所有任务 unreachable
-	connection.RegisterFactory("fake", func(h *model.Host) (connection.Connection, error) {
+	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
 		f := connection.NewFake(h)
 		f.ConnectErr = errors.New("connection failed")
 		return f, nil

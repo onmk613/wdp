@@ -9,11 +9,13 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"wdp/internal/config"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
 // build 由原始结构构建 Inventory：排序保证确定性，挂接 group_vars/host_vars 后计算变量域。
-func build(raw rawInventory, varDirs []string) (*Inventory, error) {
+func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, error) {
 
 	inv := &Inventory{
 		Groups:  map[string]*model.Group{},
@@ -60,9 +62,9 @@ func build(raw rawInventory, varDirs []string) (*Inventory, error) {
 	// 构建主机对象并回填组成员
 	inv.Hosts = make([]*model.Host, 0, len(hostRaw))
 	for hname, hvars := range hostRaw {
-		h, err := buildHost(hname, hvars)
+		h, err := buildHost(hname, hvars, cfg)
 		if err != nil {
-			return nil, fmt.Errorf("主机 %s: %w", hname, err)
+			return nil, fmt.Errorf(i18n.T("host %s: %w", "主机 %s: %w"), hname, err)
 		}
 		hostIndex[hname] = h
 		inv.Hosts = append(inv.Hosts, h)
@@ -77,7 +79,7 @@ func build(raw rawInventory, varDirs []string) (*Inventory, error) {
 	for _, grp := range inv.Groups {
 		for _, c := range grp.Children {
 			if _, ok := inv.Groups[c]; !ok {
-				return nil, fmt.Errorf("组 %s 引用了不存在的子组 %s", grp.Name, c)
+				return nil, fmt.Errorf(i18n.T("group %s references nonexistent child group %s", "组 %s 引用了不存在的子组 %s"), grp.Name, c)
 			}
 		}
 	}
@@ -111,7 +113,7 @@ func (inv *Inventory) loadGroupVars(dir string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("读取 %s 失败: %w", dir, err)
+		return fmt.Errorf(i18n.T("failed to read %s: %w", "读取 %s 失败: %w"), dir, err)
 	}
 	for _, e := range entries {
 		if e.IsDir() || !isYAMLName(e.Name()) {
@@ -140,7 +142,7 @@ func (inv *Inventory) loadHostVars(dir string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf("读取 %s 失败: %w", dir, err)
+		return fmt.Errorf(i18n.T("failed to read %s: %w", "读取 %s 失败: %w"), dir, err)
 	}
 	byName := map[string]*model.Host{}
 	for _, h := range inv.Hosts {
@@ -176,7 +178,7 @@ func readVarsYAML(path string) (map[string]any, error) {
 	}
 	var vars map[string]any
 	if err := yaml.Unmarshal(data, &vars); err != nil {
-		return nil, fmt.Errorf("解析失败: %w", err)
+		return nil, fmt.Errorf(i18n.T("parse failed: %w", "解析失败: %w"), err)
 	}
 	return vars, nil
 }

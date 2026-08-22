@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"wdp/internal/chart"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -14,7 +15,7 @@ import (
 func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.Task, hr *hostRun, res *model.TaskResult, base func() map[string]any) *model.TaskResult {
 	if e.Opts.Chart == nil {
 		res.Failed = true
-		res.Msg = "chart 引用仅在 chart 模式下可用（需以 chart 目录或 tgz 包作为入口运行）"
+		res.Msg = i18n.T("chart reference is only available in chart mode (run with a chart directory or .tgz package as entrypoint)", "chart 引用仅在 chart 模式下可用（需以 chart 目录或 tgz 包作为入口运行）")
 		return res
 	}
 	// 环引用防护：chart 自引用/互引用会在此递归展开中无限下钻，
@@ -83,7 +84,7 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 		}
 	}
 	if res.Msg == "" {
-		res.Msg = fmt.Sprintf("chart %s: %d 项执行完成", sub.Meta.Name, len(items))
+		res.Msg = fmt.Sprintf(i18n.T("chart %s: %d items completed", "chart %s: %d 项执行完成"), sub.Meta.Name, len(items))
 		if res.Failed {
 			res.Msg = strings.Join(msgs, "; ")
 		}
@@ -145,14 +146,15 @@ func (e *Executor) chartItemVars(hr *hostRun, scope map[string]any, subPlay *mod
 	for k, v := range subPlay.Vars {
 		vars[k] = v
 	}
-	// 内置变量穿透子 chart 作用域（play_hosts/groups 等在组件内同样可用）
+	// 主机 facts（setup/stat 等运行时数据）同样穿透：属于主机而非 chart 作用域
+	e.seedFacts(hr.host.Name, vars)
+	// 内置变量最后注入：穿透子 chart 作用域（play_hosts/groups 等在组件内同样可用），
+	// 且不被 facts 或子作用域同名键覆盖（与顶层 prepareBatchRuns 的强制注入对齐）
 	for _, k := range builtinVars {
 		if v, ok := savedVars[k]; ok {
 			vars[k] = v
 		}
 	}
-	// 主机 facts（setup/stat 等运行时数据）同样穿透：属于主机而非 chart 作用域
-	e.seedFacts(hr.host.Name, vars)
 	if item != nil {
 		vars[loopVar] = item
 	}
@@ -203,8 +205,19 @@ var builtinVars = []string{
 
 // runBlock 执行 block/rescue/always 任务组（单主机内顺序，支持嵌套）。
 func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task, hr *hostRun, res *model.TaskResult) *model.TaskResult {
+	// block 状态变量只在 block/rescue/always 执行期间可见，任务结束即清理，
+	// 防止后续任务的 when 读到陈旧的 block_failed=true
+	defer func() {
+		delete(hr.vars, "block_failed")
+		delete(hr.vars, "block_failed_msgs")
+	}()
+	// 容器 tags 对子任务生效（继承语义，与顶层单任务一致）
+	effTags := effectiveTags(task, nil)
 	runSeq := func(tasks []*model.Task) (failed bool, unreachable bool, msgs []string) {
 		for _, t := range tasks {
+			if !blockSelected(t, e.Opts, effTags) {
+				continue // block 子任务同样遵循 --tags/--skip-tags 过滤
+			}
 			r := e.runTaskOnHost(ctx, p, t, hr)
 			e.recordResult(hr, r, nil, t.IgnoreErrors)
 			if r.Changed {
@@ -231,7 +244,7 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 			if _, un, amsgs := runSeq(task.Always); un {
 				res.Msg = strings.Join(append(msgs, amsgs...), "; ")
 			} else {
-				res.Msg += "（always 已尝试执行）"
+				res.Msg += i18n.T(" (always attempted)", "（always 已尝试执行）")
 			}
 		}
 		res.Task = task.Label()
@@ -246,7 +259,7 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 		hr.vars["block_failed_msgs"] = strings.Join(msgs, "; ")
 		if len(task.Rescue) == 0 {
 			res.Failed = true
-			res.Msg = "block 失败: " + strings.Join(msgs, "; ")
+			res.Msg = i18n.T("block failed: ", "block 失败: ") + strings.Join(msgs, "; ")
 		} else {
 			rescueFailed, resUnreachable, rmsgs := runSeq(task.Rescue)
 			if resUnreachable {
@@ -262,7 +275,7 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 			}
 			if rescueFailed {
 				res.Failed = true
-				res.Msg = "block 失败且 rescue 失败: " + strings.Join(append(msgs, rmsgs...), "; ")
+				res.Msg = i18n.T("block failed and rescue failed: ", "block 失败且 rescue 失败: ") + strings.Join(append(msgs, rmsgs...), "; ")
 			} else {
 				// rescue 成功兜底：组视为已恢复（changed 保持）
 				res.Msg = "block 失败已由 rescue 恢复: " + strings.Join(msgs, "; ")
@@ -271,9 +284,14 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 		}
 	}
 
-	if _, unreach, amsgs := runSeq(task.Always); unreach {
+	if af, unreach, amsgs := runSeq(task.Always); unreach {
 		res.Unreachable = true
 		res.Msg = strings.Join(amsgs, "; ")
+	} else if af {
+		// always 清理任务失败同样视为 block 失败（控制流与 RECAP 保持一致；
+		// 此前该失败被静默吞掉，部署会误报成功）
+		res.Failed = true
+		res.Msg = i18n.T("always task failed: ", "always 任务失败: ") + strings.Join(amsgs, "; ")
 	}
 	res.Task = task.Label()
 	res.Module = "block"

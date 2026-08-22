@@ -58,3 +58,66 @@ func TestQuoteShellRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+func TestSplit(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"  \t\n ", nil},
+		{"a b c", []string{"a", "b", "c"}},
+		{`--flag "two words"`, []string{"--flag", "two words"}},
+		{`'single quoted' x`, []string{"single quoted", "x"}},
+		{`a\ b`, []string{"a b"}},
+		{`pre"mid"dle`, []string{"premiddle"}}, // 引号段与裸段拼接为同一词
+		{`"it\"s"`, []string{`it"s`}},
+		{`"a\b"`, []string{`a\b`}}, // 双引号内 \b 非特殊，保持字面
+		{`'a\nb'`, []string{`a\nb`}},
+		{`$HOME ;|&&`, []string{"$HOME", ";|&&"}},
+	}
+	for _, c := range cases {
+		got, err := Split(c.in)
+		if err != nil {
+			t.Errorf("Split(%q) 意外出错: %v", c.in, err)
+			continue
+		}
+		if len(got) != len(c.want) {
+			t.Errorf("Split(%q) = %q, want %q", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("Split(%q)[%d] = %q, want %q", c.in, i, got[i], c.want[i])
+			}
+		}
+	}
+}
+
+func TestSplitErrors(t *testing.T) {
+	for _, in := range []string{`'unclosed`, `"unclosed`, `trailing\`} {
+		if _, err := Split(in); err == nil {
+			t.Errorf("Split(%q) 应报错（未闭合）", in)
+		}
+	}
+}
+
+// TestQuoteWordsShellRoundTrip 真实 /bin/sh 验证：free-form 参数经 QuoteWords
+// 后每个元字符词都字面传递，命令替换/反引号不被解释。
+func TestQuoteWordsShellRoundTrip(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no /bin/sh on windows")
+	}
+	quoted, err := QuoteWords(`--tag "a b" $(id) ` + "`id`" + ` ;x`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("/bin/sh", "-c", "printf %s "+quoted).Output()
+	if err != nil {
+		t.Fatalf("sh 执行失败: %v", err)
+	}
+	want := "--taga b$(id)`id`;x" // printf %s 逐参数复用格式，各词直接相连
+	if string(out) != want {
+		t.Errorf("QuoteWords round trip 失败: got=%q want=%q", string(out), want)
+	}
+}

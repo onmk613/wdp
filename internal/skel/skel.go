@@ -27,7 +27,7 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 // ValidName 校验应用名（小写字母数字与连字符，作目录/服务名安全）。
 func ValidName(name string) error {
 	if !nameRe.MatchString(name) {
-		return fmt.Errorf("应用名 %q 不合法（需匹配 ^[a-z][a-z0-9-]*$）", name)
+		return fmt.Errorf(i18n.T("app name %q is invalid (must match ^[a-z][a-z0-9-]*$)", "应用名 %q 不合法（需匹配 ^[a-z][a-z0-9-]*$）"), name)
 	}
 	return nil
 }
@@ -40,7 +40,7 @@ func Scaffold(dst, name string, full bool) (string, error) {
 	}
 	root := filepath.Join(dst, name)
 	if _, err := os.Stat(filepath.Join(root, "chart.yaml")); err == nil {
-		return "", fmt.Errorf("%s 已存在 chart.yaml，拒绝覆盖", root)
+		return "", fmt.Errorf(i18n.T("%s already contains chart.yaml, refusing to overwrite", "%s 已存在 chart.yaml，拒绝覆盖"), root)
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", err
@@ -67,7 +67,7 @@ func Scaffold(dst, name string, full bool) (string, error) {
 		return os.WriteFile(target, []byte(content), 0o644)
 	})
 	if err != nil {
-		return "", fmt.Errorf("生成骨架失败: %w", err)
+		return "", fmt.Errorf(i18n.T("failed to scaffold: %w", "生成骨架失败: %w"), err)
 	}
 
 	if full {

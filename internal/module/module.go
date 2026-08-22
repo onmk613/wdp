@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"wdp/internal/connection"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/render"
 	"wdp/internal/shellquote"
@@ -44,6 +45,9 @@ type RunContext struct {
 	TimeoutMs  int64          // 任务超时毫秒（0 不限），透传给连接层
 	CheckMode  bool           // check 模式：模块预演不实际变更
 	DiffMode   bool           // diff 模式：check 下产出内容级差异
+	// MaxDownloadBytes 是 get_url 下载响应体上限（字节；0 = 内置默认 2GiB）。
+	// 由组合根经 CLI --max-download-mb / wdp.cfg [transfer].max_download_mb 注入。
+	MaxDownloadBytes int64
 	// CheckScriptAllowed 由 executor 依据 chart.yaml 的 check_mode: supported
 	// 声明注入：未声明时脚本模块在 check 模式下直接跳过（脚本是外部代码，
 	// 无法保证预演安全），避免 --check 意外执行第三方脚本造成变更。
@@ -68,7 +72,12 @@ type RollbackCtx struct {
 
 // Snapshot 在变更前把已存在的目标快照到 shadow 区并登记 restore 动作。
 // 快照失败不阻塞部署（该文件将无法自动回滚）。
+// dest 必须是绝对路径：相对路径无法在 shadow 区定位（缺分隔符），
+// 且模块层下发路径均为绝对路径，相对路径即调用方错误。
 func (rb *RollbackCtx) Snapshot(rc *RunContext, dest string) {
+	if !strings.HasPrefix(dest, "/") {
+		return
+	}
 	shadow := rb.Dir + dest
 	script := fmt.Sprintf("mkdir -p -- %s && cp -a -- %s %s",
 		shellquote.Quote(pathDirOf(shadow)), shellquote.Quote(dest), shellquote.Quote(shadow))
@@ -140,6 +149,50 @@ func Usage(m Module) []ParamDoc {
 	return nil
 }
 
+// RollbackCapability 描述模块变更的自动回滚能力。
+type RollbackCapability int
+
+const (
+	RollbackNone    RollbackCapability = iota // 无自动回滚（shell/package/service 等过程性变更）
+	RollbackPartial                           // 部分可回滚（unarchive：仅删除新建目录，覆盖已有文件不恢复）
+	RollbackFull                              // 全量可回滚（copy/template/file：快照恢复 + absent 卸载）
+)
+
+// RollbackProvider 模块可选实现：声明变更的自动回滚能力。
+// 供 chart 可逆性评估使用——取代跨包硬编码模块名单，新增模块声明能力后即被自动归类。
+type RollbackProvider interface {
+	RollbackCapability() RollbackCapability
+}
+
+// ReadOnlyProvider 模块可选实现：声明模块不产生目标机变更（如 setup）。
+type ReadOnlyProvider interface {
+	ReadOnly() bool
+}
+
+// RollbackCapabilityOf 查询模块回滚能力（未实现 RollbackProvider 或未知模块视为 RollbackNone）。
+func RollbackCapabilityOf(name string) RollbackCapability {
+	m, ok := Get(name)
+	if !ok {
+		return RollbackNone
+	}
+	if rp, ok := m.(RollbackProvider); ok {
+		return rp.RollbackCapability()
+	}
+	return RollbackNone
+}
+
+// IsReadOnlyModule 查询模块只读性（未实现 ReadOnlyProvider 视为非只读）。
+func IsReadOnlyModule(name string) bool {
+	m, ok := Get(name)
+	if !ok {
+		return false
+	}
+	if rp, ok := m.(ReadOnlyProvider); ok {
+		return rp.ReadOnly()
+	}
+	return false
+}
+
 // Example 返回模块示例任务（未实现时返回空串）。
 func Example(m Module) string {
 	if up, ok := m.(UsageProvider); ok {
@@ -159,6 +212,19 @@ func Register(m Module) {
 func Get(name string) (Module, bool) {
 	m, ok := registry[name]
 	return m, ok
+}
+
+// Resolve 是模块名解析的唯一规则（executor 与 chart lint 共用）：
+// 内置注册表优先；未命中时回退 chart 本地脚本模块（modules/<名> 可执行文件）。
+// 返回（内置模块或 nil、脚本模块路径、是否可解析）。
+func Resolve(name string, scriptDirs []string) (mod Module, scriptPath string, ok bool) {
+	if m, found := Get(name); found {
+		return m, "", true
+	}
+	if p := FindScriptModule(scriptDirs, name); p != "" {
+		return nil, p, true
+	}
+	return nil, "", false
 }
 
 // Names 返回全部模块名（有序）。
@@ -200,7 +266,7 @@ func (rc *RunContext) execWithEnv(script string, extra map[string]string) (conne
 	}
 	out, err := rc.Conn.Exec(rc.Ctx, req)
 	if err != nil {
-		return out, &Result{Failed: true, Msg: fmt.Sprintf("执行失败: %v", err)}
+		return out, &Result{Failed: true, Msg: fmt.Sprintf(i18n.T("execution failed: %v", "执行失败: %v"), err)}
 	}
 	return out, nil
 }
@@ -283,9 +349,50 @@ func argBool(args map[string]any, key string) (bool, bool) {
 	return false, false
 }
 
+// argInt 解析整数参数（YAML 数值可能是 int/int64/float64，或字符串数字）。
+func argInt(args map[string]any, key string) (int, bool) {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return 0, false
+	}
+	switch x := v.(type) {
+	case int:
+		return x, true
+	case int64:
+		return int(x), true
+	case float64:
+		return int(x), true
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(x))
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	}
+	return 0, false
+}
+
+// parseState 解析各模块重复的 state 参数样板：空值归一为 def，
+// 值不在 allowed 内时返回 (原值, false)（调用方 fail-loud 并回显原值）。
+func parseState(args map[string]any, def string, allowed ...string) (string, bool) {
+	s, _ := argStr(args, "state")
+	if s == "" {
+		s = def
+	}
+	for _, a := range allowed {
+		if s == a {
+			return s, true
+		}
+	}
+	return s, false
+}
+
 // argMode 解析 mode 参数："0755" / 0755(yaml 八进制整数) / 493。
-// yaml.v3 对含 8/9 的纯数字（如 0999）会解析成 float64——八进制里
-// 8/9 非法，一律拒绝（ok=false），不再静默丢弃。
+// 仅接受权限位（0..0o777）：setuid/setgid/sticky（4755/2755/1777 等）
+// 会在全链路 Perm() 中被静默丢弃成完全错误的权限，这里显式拒绝
+// （ok=false）而非静默改错——需要特殊权限位时用 shell 模块显式 chmod。
+// yaml.v3 对含 8/9 的纯数字（如 0999）解析成 float64——八进制里 8/9
+// 非法，一律拒绝；带引号的 "0999" 走字符串分支同样拒绝。
 func argMode(args map[string]any, key string) (fs.FileMode, bool) {
 	v, ok := args[key]
 	if !ok || v == nil {
@@ -293,20 +400,28 @@ func argMode(args map[string]any, key string) (fs.FileMode, bool) {
 	}
 	switch x := v.(type) {
 	case int:
+		if x < 0 || x > 0o777 {
+			return 0, false
+		}
+		return fs.FileMode(x), true
+	case int64:
+		if x < 0 || x > 0o777 {
+			return 0, false
+		}
 		return fs.FileMode(x), true
 	case float64:
-		if x != float64(int64(x)) || x < 0 || x >= 512 {
+		if x != float64(int64(x)) || x < 0 || x > 0o777 {
 			return 0, false
 		}
 		return fs.FileMode(int64(x)), true
 	case string:
 		s := strings.TrimSpace(x)
 		base := 10
-		if strings.HasPrefix(s, "0") && len(s) > 1 && !strings.ContainsAny(s, "89") {
+		if strings.HasPrefix(s, "0") && len(s) > 1 {
 			base = 8
 		}
 		n, err := strconv.ParseUint(s, base, 32)
-		if err != nil {
+		if err != nil || n > 0o777 {
 			return 0, false
 		}
 		return fs.FileMode(n), true
@@ -334,25 +449,25 @@ func ValidateArgs(m Module, args map[string]any, free string) error {
 	}
 	if free != "" {
 		if _, ok := allowed["(free-form)"]; !ok {
-			return fmt.Errorf("模块 %s 不接受 free-form 写法", m.Name())
+			return fmt.Errorf(i18n.T("module %s does not accept free-form syntax", "模块 %s 不接受 free-form 写法"), m.Name())
 		}
 	}
 	for k, v := range args {
 		doc, ok := allowed[k]
 		if !ok {
 			if s := suggestKey(k, params); s != "" {
-				return fmt.Errorf("模块 %s 存在未知参数 %q（是否为 %q？）", m.Name(), k, s)
+				return fmt.Errorf(i18n.T("module %s has unknown parameter %q (did you mean %q?)", "模块 %s 存在未知参数 %q（是否为 %q？）"), m.Name(), k, s)
 			}
-			return fmt.Errorf("模块 %s 存在未知参数 %q", m.Name(), k)
+			return fmt.Errorf(i18n.T("module %s has unknown parameter %q", "模块 %s 存在未知参数 %q"), m.Name(), k)
 		}
 		switch doc.Type {
 		case "bool":
 			if _, ok := argBool(args, k); !ok {
-				return fmt.Errorf("模块 %s 参数 %s 需要布尔值（true/false/yes/no），得到 %v", m.Name(), k, v)
+				return fmt.Errorf(i18n.T("module %s parameter %s requires a boolean (true/false/yes/no), got %v", "模块 %s 参数 %s 需要布尔值（true/false/yes/no），得到 %v"), m.Name(), k, v)
 			}
 		case "mode":
 			if _, ok := argMode(args, k); !ok {
-				return fmt.Errorf("模块 %s 参数 %s 需要合法权限值（如 \"0755\"），得到 %v", m.Name(), k, v)
+				return fmt.Errorf(i18n.T("module %s parameter %s requires a valid permission (e.g. \"0755\"), got %v", "模块 %s 参数 %s 需要合法权限值（如 \"0755\"），得到 %v"), m.Name(), k, v)
 			}
 		}
 	}

@@ -1,0 +1,46 @@
+# golangci-lint 配置：以 gofmt/vet 为基线，聚焦真实缺陷类检查。
+# 本地运行: golangci-lint run ；CI 中作为质量门禁（见 .github/workflows/ci.yml）。
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - govet        # 与 go vet 对齐（含 shadow 之外的全部默认分析）
+    - ineffassign  # 无效赋值
+    - staticcheck  # 静态检查集（错误用法/简化/性能）
+    - errcheck     # 未检查的 error 返回值
+    - unused       # 未使用的代码
+    - misspell     # 拼写
+    - unconvert    # 多余类型转换
+    - copyloopvar  # Go1.22+ 循环变量拷贝冗余
+  settings:
+    errcheck:
+      exclude-functions:
+        # 刻意的 best-effort 调用（本项目约定：清理路径不因次要错误中断）：
+        #   - defer close（连接/归档 reader/临时文件，失败无补救动作）
+        #   - fmt.Fprint* 写 stdout/stderr（写失败无可处理）
+        #   - 清理删除（临时目录/文件，失败留残留但不影响主流程）
+        - (io.Closer).Close
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - os.Remove
+        - os.RemoveAll
+  exclusions:
+    rules:
+      # 测试代码放宽：errcheck 允许忽略断言辅助调用
+      - path: _test\.go
+        linters:
+          - errcheck
+      # 读/清理路径的 defer Close（连接、归档 reader、HTTP body）：
+      # 失败无补救动作，best-effort 是刻意约定（写路径的 Close 已在代码中上抛）
+      - linters: [errcheck]
+        text: 'Error return value of `.+\.Close` is not checked'
+
+formatters:
+  default: none
+  enable:
+    - gofmt

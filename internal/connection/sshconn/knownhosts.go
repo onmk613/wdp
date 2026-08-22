@@ -16,7 +16,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 
-	"wdp/internal/config"
+	"wdp/internal/connection"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -120,13 +121,14 @@ func (kh *KnownHosts) Save() error {
 
 // HostsFromSpecs 解析主机条目列表（host、host:port 或 [ipv6]:port，
 // 单个字面 "all" 展开为 known_hosts 中记录的全部主机）为主机列表。
-func HostsFromSpecs(specs []string, khPath string) ([]*model.Host, error) {
+// dc 为组合根注入的连接默认值（可为 nil）。
+func HostsFromSpecs(specs []string, khPath string, dc *connection.Defaults) ([]*model.Host, error) {
 	if len(specs) == 1 && specs[0] == "all" {
-		return hostsFromKnownHosts(khPath)
+		return hostsFromKnownHosts(khPath, dc)
 	}
 	out := make([]*model.Host, 0, len(specs))
 	for _, spec := range specs {
-		h, err := parseHostSpec(spec)
+		h, err := parseHostSpec(spec, dc)
 		if err != nil {
 			return nil, err
 		}
@@ -137,7 +139,7 @@ func HostsFromSpecs(specs []string, khPath string) ([]*model.Host, error) {
 
 // hostsFromKnownHosts 枚举 known_hosts 普通与 @revoked 条目中的主机模式（去重、按名排序），
 // 跳过通配、哈希等无法直接连接的模式；@cert-authority 是 CA 记录而非主机，不参与。
-func hostsFromKnownHosts(path string) ([]*model.Host, error) {
+func hostsFromKnownHosts(path string, dc *connection.Defaults) ([]*model.Host, error) {
 	entries, err := readKnownHosts(path)
 	if err != nil {
 		return nil, err
@@ -152,7 +154,7 @@ func hostsFromKnownHosts(path string) ([]*model.Host, error) {
 			if seen[m] || !dialableMarker(m) {
 				continue
 			}
-			h, err := parseHostSpec(m)
+			h, err := parseHostSpec(m, dc)
 			if err != nil {
 				continue
 			}
@@ -176,26 +178,25 @@ func dialableMarker(m string) bool {
 }
 
 // parseHostSpec 解析主机条目：host、host:port 或 [ipv6]:port，缺省端口 22。
-// 连接参数（user/超时）沿用 wdp.cfg 的 [ssh] 配置。
-func parseHostSpec(spec string) (*model.Host, error) {
+// 连接参数（user/超时）取组合根注入的默认值（dc 可为 nil，取内置默认）。
+func parseHostSpec(spec string, dc *connection.Defaults) (*model.Host, error) {
 	host, port := spec, 22
 	if h, p, err := net.SplitHostPort(spec); err == nil {
 		n, aerr := strconv.Atoi(p)
 		if aerr != nil || n <= 0 || n > 65535 {
-			return nil, fmt.Errorf("主机 %q 端口无效: %s", spec, p)
+			return nil, fmt.Errorf(i18n.T("host %q has an invalid port: %s", "主机 %q 端口无效: %s"), spec, p)
 		}
 		host, port = h, n
 	} else if strings.Count(spec, ":") > 0 && net.ParseIP(spec) == nil {
-		return nil, fmt.Errorf("主机 %q 格式无效（应为 host、host:port 或 [ipv6]:port）", spec)
+		return nil, fmt.Errorf(i18n.T("host %q has an invalid format (expected host, host:port, or [ipv6]:port)", "主机 %q 格式无效（应为 host、host:port 或 [ipv6]:port）"), spec)
 	}
-	cfg := config.Current()
 	return &model.Host{
 		Name:              spec,
 		Address:           host,
 		Port:              port,
 		Conn:              "ssh",
-		User:              cfg.SSHUser(),
-		ConnectTimeoutSec: cfg.SSHConnectTimeout(),
+		User:              dc.SSHUserOrDefault(),
+		ConnectTimeoutSec: dc.SSHConnectTimeoutOrDefault(),
 	}, nil
 }
 

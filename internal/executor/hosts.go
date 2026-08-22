@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -73,16 +74,21 @@ func contains(list []string, s string) bool {
 
 // splitBatches 按 serial 表达式分批："5"（每批 5 台）/"10%"（百分比）/
 // "5,10,20"（逐批尺寸，最后一个尺寸对剩余主机重复）；空 = 一批。
-func splitBatches(hosts []*model.Host, serial string) [][]*model.Host {
+// 表达式含空段（如 "5," 笔误）时报错，而不是静默回退默认分批。
+func splitBatches(hosts []*model.Host, serial string) ([][]*model.Host, error) {
 	if serial == "" {
-		return [][]*model.Host{hosts}
+		return [][]*model.Host{hosts}, nil
 	}
 	var sizes []int
 	for _, t := range strings.Split(serial, ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			return nil, fmt.Errorf(i18n.T("invalid serial %q: empty segment (check for stray commas)", "serial %q 非法：存在空段（检查多余逗号）"), serial)
+		}
 		sizes = append(sizes, parseBatchSize(t, len(hosts)))
 	}
 	if len(sizes) == 0 {
-		return [][]*model.Host{hosts}
+		return [][]*model.Host{hosts}, nil
 	}
 	var out [][]*model.Host
 	for i := 0; i < len(hosts); {
@@ -97,7 +103,7 @@ func splitBatches(hosts []*model.Host, serial string) [][]*model.Host {
 		out = append(out, hosts[i:end])
 		i = end
 	}
-	return out
+	return out, nil
 }
 
 func anyAlive(runs []*hostRun) bool {

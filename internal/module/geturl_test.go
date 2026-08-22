@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -115,6 +116,52 @@ func TestGetURLHTTPStatusAndArgs(t *testing.T) {
 	}
 	if r := mod.Run(rc, map[string]any{"url": srv.URL, "dest": "/x", "timeout_secs": 0}, ""); !r.Failed {
 		t.Fatal("非法 timeout_secs 应失败")
+	}
+}
+
+// TestGetURLDownloadSizeLimit 回归：下载响应体曾无大小上限，异常/恶意 URL
+// 可在超时窗口内累积数 GB 内存。现在超过 maxDownloadBytes 必须 fail-loud。
+func TestGetURLDownloadSizeLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", strconv.FormatInt(maxDownloadBytes+1, 10))
+		w.WriteHeader(http.StatusOK)
+		// 不真正写 2GiB：客户端读到超限 Content-Length 即拒绝
+	}))
+	defer srv.Close()
+	rc, _ := newTestRC(t)
+	r := (&GetURLModule{}).Run(rc, map[string]any{"url": srv.URL, "dest": "/opt/big"}, "")
+	// 断言用上限数字（语言无关）：中英文案均含该值
+	if !r.Failed || !strings.Contains(r.Msg, "2147483648") {
+		t.Fatalf("超限下载应失败: %+v", r)
+	}
+}
+
+// TestGetURLDownloadLimitOverride --max-download-mb / wdp.cfg 注入的自定义上限
+// 经 RunContext.MaxDownloadBytes 生效（0 = 内置默认 2GiB）。
+func TestGetURLDownloadLimitOverride(t *testing.T) {
+	srv := newHTTPServer(t, strings.Repeat("x", 100)) // 实际 100 字节
+	defer srv.Close()
+
+	rc, _ := newTestRC(t)
+	rc.MaxDownloadBytes = 10 // 自定义上限 10 字节
+	r := (&GetURLModule{}).Run(rc, map[string]any{"url": srv.URL, "dest": "/opt/x"}, "")
+	if !r.Failed {
+		t.Fatal("超过自定义上限应失败")
+	}
+	// 中英文案均含上限数值 10
+	if !strings.Contains(r.Msg, "10") {
+		t.Fatalf("错误消息应包含生效上限值: %s", r.Msg)
+	}
+
+	// 上限内正常下载不受影响
+	rc2, fake := newTestRC(t)
+	rc2.MaxDownloadBytes = 1 << 20
+	r2 := (&GetURLModule{}).Run(rc2, map[string]any{"url": srv.URL, "dest": "/opt/y"}, "")
+	if r2.Failed {
+		t.Fatalf("限额内下载不应失败: %s", r2.Msg)
+	}
+	if got, _ := fake.File("/opt/y"); got != strings.Repeat("x", 100) {
+		t.Fatalf("内容不符: %d bytes", len(got))
 	}
 }
 

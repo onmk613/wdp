@@ -16,7 +16,6 @@ import (
 
 	"wdp/internal/agent"
 	"wdp/internal/ca"
-	"wdp/internal/config"
 	"wdp/internal/connection"
 	"wdp/internal/connection/agentconn"
 	"wdp/internal/model"
@@ -62,7 +61,7 @@ func TestPushMTLSDirectConnect(t *testing.T) {
 		CAData: certs.CACertPEM, CertData: certs.ClientCertPEM, KeyData: certs.ClientKeyPEM,
 		TLSSkipHostVerify: true,
 	}
-	conn := agentconn.New(h)
+	conn := agentconn.New(h, nil)
 	if err := conn.Connect(context.Background()); err != nil {
 		t.Fatalf("健康检查应通过: %v", err)
 	}
@@ -78,7 +77,7 @@ func TestPushMTLSDirectConnect(t *testing.T) {
 	}
 	h2 := *h
 	h2.CAData = other.CACertPEM
-	if err := agentconn.New(&h2).Connect(context.Background()); err == nil {
+	if err := agentconn.New(&h2, nil).Connect(context.Background()); err == nil {
 		t.Fatal("错误 CA 的链校验应拒绝")
 	}
 }
@@ -89,11 +88,11 @@ func TestAgentHostIPv6URL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := New(&model.Host{Name: "x", Address: "fd00::5"})
+	c := New(&model.Host{Name: "x", Address: "fd00::5"}, nil)
 	if got := c.agentHost(7602, certs).AgentURL; got != "https://[fd00::5]:7602" {
 		t.Fatalf("IPv6 URL 应带方括号: %q", got)
 	}
-	c4 := New(&model.Host{Name: "y", Address: "10.0.0.5"})
+	c4 := New(&model.Host{Name: "y", Address: "10.0.0.5"}, nil)
 	if got := c4.agentHost(7602, certs).AgentURL; got != "https://10.0.0.5:7602" {
 		t.Fatalf("IPv4 URL 拼装错误: %q", got)
 	}
@@ -143,7 +142,7 @@ func TestIPv6LoopbackDirectConnect(t *testing.T) {
 		CAData: certs.CACertPEM, CertData: certs.ClientCertPEM, KeyData: certs.ClientKeyPEM,
 		TLSSkipHostVerify: true,
 	}
-	conn := agentconn.New(h)
+	conn := agentconn.New(h, nil)
 	if err := conn.Connect(context.Background()); err != nil {
 		t.Fatalf("IPv6 健康检查应通过: %v", err)
 	}
@@ -170,12 +169,9 @@ func resetCertStore(t *testing.T) {
 	certStore.Unlock()
 }
 
-// setRotateConfig 设置并还原轮换周期配置。
-func setRotateConfig(t *testing.T, minutes int) {
-	t.Helper()
-	old := config.Current().Agent.CertRotateMin
-	config.Current().Agent.CertRotateMin = minutes
-	t.Cleanup(func() { config.Current().Agent.CertRotateMin = old })
+// rotDC 返回启用 30 分钟轮换的显式默认值（DI 后不再改全局配置）。
+func rotDC() *connection.Defaults {
+	return &connection.Defaults{AgentCertRotateMin: 30}
 }
 
 // TestCertRotationStore 验证代数仓库：默认不轮换；到期换新代且新旧信任链独立。
@@ -183,20 +179,19 @@ func TestCertRotationStore(t *testing.T) {
 	resetCertStore(t)
 
 	// 默认（不轮换）：多次取值同代
-	c1, g1, err := certMaterial()
+	c1, g1, err := certMaterial(nil)
 	if err != nil || g1 != 1 {
 		t.Fatalf("首代应为 gen=1: gen=%d err=%v", g1, err)
 	}
-	if _, g2, _ := certMaterial(); g2 != 1 {
+	if _, g2, _ := certMaterial(nil); g2 != 1 {
 		t.Fatalf("未配置轮换不应换代: gen=%d", g2)
 	}
 
 	// 配置 30 分钟，回拨时钟 31 分钟 → 换新代，信任链独立
-	setRotateConfig(t, 30)
 	certStore.Lock()
 	certStore.at = time.Now().Add(-31 * time.Minute)
 	certStore.Unlock()
-	c3, g3, err := certMaterial()
+	c3, g3, err := certMaterial(rotDC())
 	if err != nil || g3 != 2 {
 		t.Fatalf("到期应换为 gen=2: gen=%d err=%v", g3, err)
 	}
@@ -212,7 +207,7 @@ func TestCertRotationStore(t *testing.T) {
 	}
 
 	// 未到期 → 不换
-	if _, g4, _ := certMaterial(); g4 != 2 {
+	if _, g4, _ := certMaterial(nil); g4 != 2 {
 		t.Fatalf("未到期不应换代: gen=%d", g4)
 	}
 }
@@ -220,12 +215,11 @@ func TestCertRotationStore(t *testing.T) {
 // TestRotateIfDueSameGenNoop 当前代连接的轮换检查应直接放行（不触发 SSH）。
 func TestRotateIfDueSameGenNoop(t *testing.T) {
 	resetCertStore(t)
-	setRotateConfig(t, 30)
-	_, gen, err := certMaterial()
+	_, gen, err := certMaterial(rotDC())
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := &Conn{host: &model.Host{Name: "x"}, gen: gen}
+	c := &Conn{host: &model.Host{Name: "x"}, gen: gen, dc: rotDC()}
 	if err := c.rotateIfDue(context.Background()); err != nil {
 		t.Fatalf("同代应放行: %v", err)
 	}
@@ -235,12 +229,11 @@ func TestRotateIfDueSameGenNoop(t *testing.T) {
 // SSH 重连失败时错误显式上抛（连接保留旧代记录，下次任务自愈重试）。
 func TestRotateIfDueStaleGenTriggersMigration(t *testing.T) {
 	resetCertStore(t)
-	setRotateConfig(t, 30)
-	_, gen, err := certMaterial()
+	_, gen, err := certMaterial(rotDC())
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := New(&model.Host{Name: "x", Address: "127.0.0.1", Port: 1})
+	c := New(&model.Host{Name: "x", Address: "127.0.0.1", Port: 1}, rotDC())
 	c.gen = gen - 1
 	if err := c.rotateIfDue(context.Background()); err == nil ||
 		!strings.Contains(err.Error(), "证书轮换") {
@@ -251,7 +244,7 @@ func TestRotateIfDueStaleGenTriggersMigration(t *testing.T) {
 // TestNativeExtractFallbackMode push 自举失败回退 SSH 态（agent 未就绪）时
 // 原生解压应返回不支持哨兵，模块回退 shell 路径。
 func TestNativeExtractFallbackMode(t *testing.T) {
-	c := New(&model.Host{Name: "x", Address: "127.0.0.1", Port: 1})
+	c := New(&model.Host{Name: "x", Address: "127.0.0.1", Port: 1}, nil)
 	if err := c.NativeExtract(context.Background(), "/a.tgz", "/opt/a"); !errors.Is(err, connection.ErrNativeUnsupported) {
 		t.Fatalf("回退态应返回不支持: %v", err)
 	}

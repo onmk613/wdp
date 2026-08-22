@@ -3,9 +3,11 @@ package playbook
 // 任务解析：已知控制属性解析为 Task 字段，剩余唯一键即模块（或 chart 引用）。
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -25,7 +27,7 @@ var taskKeys = map[string]bool{
 func parseTask(raw any, isHandler bool) (*model.Task, error) {
 	m, ok := raw.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("任务必须是 map，实际为 %T", raw)
+		return nil, fmt.Errorf(i18n.T("task must be a map, got %T", "任务必须是 map，实际为 %T"), raw)
 	}
 	t := &model.Task{IsHandler: isHandler}
 	// name 先解析：后续字段报错时 Label() 能带上任务名
@@ -51,7 +53,7 @@ func parseTask(raw any, isHandler bool) (*model.Task, error) {
 		return t, nil
 	}
 	if t.Rescue != nil || t.Always != nil {
-		return nil, fmt.Errorf("任务 %q: rescue/always 必须与 block 同时出现", t.Label())
+		return nil, fmt.Errorf(i18n.T("task %q: rescue/always must appear together with block", "任务 %q: rescue/always 必须与 block 同时出现"), t.Label())
 	}
 	return resolveTaskModule(m, t)
 }
@@ -61,7 +63,7 @@ func parseTaskFlowKeys(m map[string]any, t *model.Task) error {
 	if v, ok := m["when"]; ok {
 		l, ok := strOrList(v)
 		if !ok {
-			return fmt.Errorf("when 仅支持字符串或列表")
+			return errors.New(i18n.T("when only supports a string or a list", "when 仅支持字符串或列表"))
 		}
 		t.When = l
 	}
@@ -94,12 +96,12 @@ func parseTaskFlowKeys(m map[string]any, t *model.Task) error {
 	if v, ok := m["loop_control"]; ok {
 		lc, ok := v.(map[string]any)
 		if !ok {
-			return fmt.Errorf("任务 %q: loop_control 必须是 map（loop_var: 自定义变量名）", t.Label())
+			return fmt.Errorf(i18n.T("task %q: loop_control must be a map (loop_var: custom variable name)", "任务 %q: loop_control 必须是 map（loop_var: 自定义变量名）"), t.Label())
 		}
 		if lv, ok := lc["loop_var"]; ok {
 			t.LoopVar = fmt.Sprint(lv)
 			if t.LoopVar == "" {
-				return fmt.Errorf("任务 %q: loop_var 不能为空", t.Label())
+				return fmt.Errorf(i18n.T("task %q: loop_var cannot be empty", "任务 %q: loop_var 不能为空"), t.Label())
 			}
 		}
 	}
@@ -147,7 +149,7 @@ func parseTaskContextKeys(m map[string]any, t *model.Task) error {
 		switch t.Hook {
 		case "pre_install", "post_install", "pre_uninstall", "post_uninstall":
 		default:
-			return fmt.Errorf("任务 %q: 不支持的 hook %q（可选: pre_install/post_install/pre_uninstall/post_uninstall）",
+			return fmt.Errorf(i18n.T("task %q: unsupported hook %q (options: pre_install/post_install/pre_uninstall/post_uninstall)", "任务 %q: 不支持的 hook %q（可选: pre_install/post_install/pre_uninstall/post_uninstall）"),
 				t.Label(), t.Hook)
 		}
 	}
@@ -244,18 +246,18 @@ func resolveTaskModule(m map[string]any, t *model.Task) (*model.Task, error) {
 			continue
 		}
 		if modName != "" {
-			return nil, fmt.Errorf("任务 %q 同时指定了多个模块（%s、%s）", t.Label(), modName, k)
+			return nil, fmt.Errorf(i18n.T("task %q specifies multiple modules (%s, %s)", "任务 %q 同时指定了多个模块（%s、%s）"), t.Label(), modName, k)
 		}
 		modName, modVal = k, v
 	}
 	if modName == "" {
-		return nil, fmt.Errorf("任务 %q 未指定模块", t.Label())
+		return nil, fmt.Errorf(i18n.T("task %q does not specify a module", "任务 %q 未指定模块"), t.Label())
 	}
 	if modName == "chart" {
 		// `chart: <子chart名>` 引用，展开执行子 chart 任务序列
 		ref, ok := modVal.(string)
 		if !ok || ref == "" {
-			return nil, fmt.Errorf("任务 %q: chart 引用必须是子 chart 名字符串", t.Label())
+			return nil, fmt.Errorf(i18n.T("task %q: chart reference must be a subchart name string", "任务 %q: chart 引用必须是子 chart 名字符串"), t.Label())
 		}
 		t.Module = "chart"
 		t.ChartRef = ref
@@ -263,7 +265,7 @@ func resolveTaskModule(m map[string]any, t *model.Task) (*model.Task, error) {
 		return t, nil
 	}
 	if t.ChartVars != nil {
-		return nil, fmt.Errorf("任务 %q: vars 仅用于 chart 引用任务", t.Label())
+		return nil, fmt.Errorf(i18n.T("task %q: vars is only for chart reference tasks", "任务 %q: vars 仅用于 chart 引用任务"), t.Label())
 	}
 	t.Module = modName
 	switch x := modVal.(type) {
@@ -275,11 +277,11 @@ func resolveTaskModule(m map[string]any, t *model.Task) (*model.Task, error) {
 	case map[string]any:
 		t.Args = x
 	default:
-		return nil, fmt.Errorf("模块 %s 的参数必须是字符串或 map", modName)
+		return nil, fmt.Errorf(i18n.T("module %s parameters must be a string or a map", "模块 %s 的参数必须是字符串或 map"), modName)
 	}
 	if explicitArgs != nil {
 		if t.FreeForm != "" {
-			return nil, fmt.Errorf("任务 %q: 简写参数与 args 不能同时使用", t.Label())
+			return nil, fmt.Errorf(i18n.T("task %q: shorthand params and args cannot be used together", "任务 %q: 简写参数与 args 不能同时使用"), t.Label())
 		}
 		for k, v := range explicitArgs {
 			t.Args[k] = v
@@ -316,5 +318,5 @@ func validateOutputSpec(s string) error {
 			}
 		}
 	}
-	return fmt.Errorf("无法解析 %q（可用: full/none/oneline/head=N/tail=N）", s)
+	return fmt.Errorf(i18n.T("cannot parse %q (use: full/none/oneline/head=N/tail=N)", "无法解析 %q（可用: full/none/oneline/head=N/tail=N）"), s)
 }

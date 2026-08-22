@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -69,8 +70,50 @@ type Connection interface {
 	DownloadFile(ctx context.Context, src string, w io.Writer) error
 }
 
-// Factory 按主机构造连接。
-type Factory func(h *model.Host) (Connection, error)
+// Defaults 是连接层的显式注入默认值：由组合根（cli）从 wdp.cfg 归一后构造，
+// 经 Manager 下发到各连接工厂。取代各连接包散落地读 config 全局单例——
+// 连接层因此不依赖 config 包，测试可传 nil 或自定义值。
+type Defaults struct {
+	SSHUser            string // 默认 SSH 用户（空 = root）
+	SSHConnectTimeout  int    // 连接超时秒（0 = 默认 10）
+	AgentPort          int    // 默认 agent 端口（0 = 7602）
+	AgentCertRotateMin int    // push 临时证书轮换周期分钟（0 = 不轮换）
+}
+
+// SSHUser 归一化默认 SSH 用户。
+func (d *Defaults) SSHUserOrDefault() string {
+	if d != nil && d.SSHUser != "" {
+		return d.SSHUser
+	}
+	return "root"
+}
+
+// SSHConnectTimeoutOrDefault 归一化连接超时秒。
+func (d *Defaults) SSHConnectTimeoutOrDefault() int {
+	if d != nil && d.SSHConnectTimeout > 0 {
+		return d.SSHConnectTimeout
+	}
+	return 10
+}
+
+// AgentPortOrDefault 归一化默认 agent 端口。
+func (d *Defaults) AgentPortOrDefault() int {
+	if d != nil && d.AgentPort > 0 {
+		return d.AgentPort
+	}
+	return 7602
+}
+
+// AgentCertRotateMinOrDefault 归一化 push 证书轮换周期（<=0 = 不轮换）。
+func (d *Defaults) AgentCertRotateMinOrDefault() int {
+	if d == nil {
+		return 0
+	}
+	return d.AgentCertRotateMin
+}
+
+// Factory 按主机构造连接（dc 为组合根注入的默认值，可为 nil）。
+type Factory func(h *model.Host, dc *Defaults) (Connection, error)
 
 var (
 	regMu     sync.RWMutex
@@ -84,13 +127,13 @@ func RegisterFactory(connType string, f Factory) {
 	factories[connType] = f
 }
 
-// NewConnection 按主机的 Conn 类型构造连接。
-func NewConnection(h *model.Host) (Connection, error) {
+// NewConnection 按主机的 Conn 类型构造连接（dc 可为 nil，取内置默认）。
+func NewConnection(h *model.Host, dc *Defaults) (Connection, error) {
 	regMu.RLock()
 	f, ok := factories[h.Conn]
 	regMu.RUnlock()
 	if !ok {
-		return nil, fmt.Errorf("主机 %s: 未知的连接类型 %q（可选: ssh/agent/local）", h.Name, h.Conn)
+		return nil, fmt.Errorf(i18n.T("host %s: unknown connection type %q (options: ssh/agent/local)", "主机 %s: 未知的连接类型 %q（可选: ssh/agent/local）"), h.Name, h.Conn)
 	}
-	return f(h)
+	return f(h, dc)
 }

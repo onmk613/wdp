@@ -77,7 +77,7 @@ func mtlsHost(url, caFile, crt, key string) *model.Host {
 func TestPinAllowsPinnedCert(t *testing.T) {
 	url, caPath, crt, key := startMTLS(t, true, nil) // 名单含本次签发的客户端证书
 
-	conn := agentconn.New(mtlsHost(url, caPath, crt, key))
+	conn := agentconn.New(mtlsHost(url, caPath, crt, key), nil)
 	out, err := conn.Exec(context.Background(), connection.ExecRequest{Script: "echo pinned-ok"})
 	if err != nil || !strings.Contains(out.Stdout, "pinned-ok") {
 		t.Fatalf("准许指纹应放行: %+v err=%v", out, err)
@@ -87,7 +87,7 @@ func TestPinAllowsPinnedCert(t *testing.T) {
 func TestPinRejectsUnpinnedCert(t *testing.T) {
 	// 名单只放一个随机指纹（不是真实客户端证书的）
 	url, caPath, crt, key := startMTLS(t, false, []string{strings.Repeat("ab", 32)})
-	conn := agentconn.New(mtlsHost(url, caPath, crt, key))
+	conn := agentconn.New(mtlsHost(url, caPath, crt, key), nil)
 	if _, err := conn.Exec(context.Background(), connection.ExecRequest{Script: "echo x"}); err == nil {
 		t.Fatal("未在准许名单的证书应被拒")
 	}
@@ -108,21 +108,21 @@ func TestTLSSkipHostVerifyAndServerName(t *testing.T) {
 	ctx := context.Background()
 
 	// 默认：证书 SAN=agent1，连接地址是 127.0.0.1 → 主机名不匹配，拒绝
-	if err := agentconn.New(mtlsHost(url, caPath, crt, key)).Connect(ctx); err == nil {
+	if err := agentconn.New(mtlsHost(url, caPath, crt, key), nil).Connect(ctx); err == nil {
 		t.Fatal("主机名不匹配应拒绝")
 	}
 
 	// tls_server_name=agent1：改按证书 SAN 中的名称校验 → 放行
 	h := mtlsHost(url, caPath, crt, key)
 	h.TLSServerName = "agent1"
-	if err := agentconn.New(h).Connect(ctx); err != nil {
+	if err := agentconn.New(h, nil).Connect(ctx); err != nil {
 		t.Fatalf("tls_server_name 应放行: %v", err)
 	}
 
 	// tls_skip_host_verify：跳过主机名、保留链校验 → 放行
 	h2 := mtlsHost(url, caPath, crt, key)
 	h2.TLSSkipHostVerify = true
-	if err := agentconn.New(h2).Connect(ctx); err != nil {
+	if err := agentconn.New(h2, nil).Connect(ctx); err != nil {
 		t.Fatalf("tls_skip_host_verify 应放行: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestTLSSkipHostVerifyAndServerName(t *testing.T) {
 	}
 	h3 := mtlsHost(url, filepath.Join(other, ca.CAFile), crt, key)
 	h3.TLSSkipHostVerify = true
-	if err := agentconn.New(h3).Connect(ctx); err == nil {
+	if err := agentconn.New(h3, nil).Connect(ctx); err == nil {
 		t.Fatal("链校验应仍然生效（错误 CA 拒绝）")
 	}
 }
@@ -147,7 +147,7 @@ func TestDefaultServerNameFromHost(t *testing.T) {
 	url, caPath, crt, key := startMTLSNamed(t, "10.0.0.14", true, nil)
 	h := &model.Host{Name: "web1", Conn: "agent", Address: "10.0.0.14",
 		AgentURL: url, CAFile: caPath, CertFile: crt, KeyFile: key}
-	if err := agentconn.New(h).Connect(ctx); err != nil {
+	if err := agentconn.New(h, nil).Connect(ctx); err != nil {
 		t.Fatalf("默认按 host 字段校验应放行: %v", err)
 	}
 
@@ -155,7 +155,7 @@ func TestDefaultServerNameFromHost(t *testing.T) {
 	url2, caPath2, crt2, key2 := startMTLSNamed(t, "web1", true, nil)
 	h2 := &model.Host{Name: "web1", Conn: "agent", Address: "web1",
 		AgentURL: url2, CAFile: caPath2, CertFile: crt2, KeyFile: key2}
-	if err := agentconn.New(h2).Connect(ctx); err != nil {
+	if err := agentconn.New(h2, nil).Connect(ctx); err != nil {
 		t.Fatalf("默认按主机名校验应放行: %v", err)
 	}
 
@@ -163,7 +163,7 @@ func TestDefaultServerNameFromHost(t *testing.T) {
 	url3, caPath3, crt3, key3 := startMTLSNamed(t, "other-name", true, nil)
 	h3 := &model.Host{Name: "web1", Conn: "agent", Address: "10.0.0.14",
 		AgentURL: url3, CAFile: caPath3, CertFile: crt3, KeyFile: key3}
-	if err := agentconn.New(h3).Connect(ctx); err == nil {
+	if err := agentconn.New(h3, nil).Connect(ctx); err == nil {
 		t.Fatal("SAN 与主机名/host 字段均不符应拒绝")
 	}
 }
@@ -185,13 +185,13 @@ func TestSystemPoolFailClosed(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	// 无 CA 配置 → 系统池 → 自签证书被拒
-	conn := agentconn.New(&model.Host{Name: "s", Conn: "agent", AgentURL: ts.URL, TLS: true})
+	conn := agentconn.New(&model.Host{Name: "s", Conn: "agent", AgentURL: ts.URL, TLS: true}, nil)
 	if err := conn.Connect(context.Background()); err == nil {
 		t.Fatal("系统池模式下自签证书应被拒绝（fail-closed）")
 	}
 
 	// insecure_skip_verify 显式声明后放行
-	conn2 := agentconn.New(&model.Host{Name: "s", Conn: "agent", AgentURL: ts.URL, TLS: true, InsecureSkipVerify: true})
+	conn2 := agentconn.New(&model.Host{Name: "s", Conn: "agent", AgentURL: ts.URL, TLS: true, InsecureSkipVerify: true}, nil)
 	if err := conn2.Connect(context.Background()); err != nil {
 		t.Fatalf("insecure_skip_verify 应放行: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestFailLoudOnBadCA(t *testing.T) {
 	_, _, crt, key := startMTLS(t, false, nil)
 	host := &model.Host{Name: "b", Conn: "agent", AgentURL: "https://127.0.0.1:1",
 		CAFile: filepath.Join(os.TempDir(), "no-such-ca.crt"), CertFile: crt, KeyFile: key}
-	conn := agentconn.New(host)
+	conn := agentconn.New(host, nil)
 	err := conn.Connect(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "CA") {
 		t.Fatalf("应报 CA 加载错误，实际: %v", err)

@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -16,16 +17,22 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
-	"wdp/internal/config"
 	"wdp/internal/connection"
+	"wdp/internal/i18n"
+	"wdp/internal/inventory"
 	"wdp/internal/model"
 )
 
 func init() {
-	connection.RegisterFactory("agent", func(h *model.Host) (connection.Connection, error) {
-		return New(h), nil
+	// 本连接类型的主机条目专属键（inventory 白名单经 blank-import 注册）
+	inventory.RegisterHostKeys("agent_url", "agent_port",
+		"ca_file", "cert_file", "key_file",
+		"tls", "insecure_skip_verify", "tls_skip_host_verify", "tls_server_name")
+	connection.RegisterFactory("agent", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
+		return New(h, dc), nil
 	})
 }
 
@@ -34,14 +41,15 @@ type Conn struct {
 	host   *model.Host
 	base   string
 	client *http.Client
-	tlsErr error // 构造期 TLS 配置错误（Connect 时显式报出）
+	tlsErr error                // 构造期 TLS 配置错误（Connect 时显式报出）
+	dc     *connection.Defaults // 组合根注入的默认值（nil = 内置默认）
 }
 
 // New 创建 agent 连接。TLS 启用条件（任一）：
 // 显式 tls: true / agent_url 为 https / 配置了 CA 或客户端证书（文件或内联
 // PEM）/ 降级或改名开关。CA 未配置时信任系统证书池（公网 CA 场景）；
 // 证书文件/数据加载失败显式报错。
-func New(h *model.Host) *Conn {
+func New(h *model.Host, dc *connection.Defaults) *Conn {
 	useTLS := h.TLS || h.CAFile != "" || len(h.CAData) > 0 || len(h.CertData) > 0 ||
 		h.InsecureSkipVerify || h.TLSSkipHostVerify || h.TLSServerName != ""
 	base := h.AgentURL
@@ -56,7 +64,7 @@ func New(h *model.Host) *Conn {
 		if _, _, err := net.SplitHostPort(addr); err != nil {
 			port := h.AgentPort
 			if port == 0 {
-				port = config.Current().AgentPort() // wdp.cfg [agent].port，缺省 7602
+				port = dc.AgentPortOrDefault() // wdp.cfg [agent].port 经组合根注入，缺省 7602
 			}
 			addr = net.JoinHostPort(addr, strconv.Itoa(port))
 		}
@@ -69,6 +77,7 @@ func New(h *model.Host) *Conn {
 		host:   h,
 		base:   strings.TrimRight(base, "/"),
 		client: &http.Client{Timeout: 0}, // 单请求超时由 ctx 控制
+		dc:     dc,
 	}
 	if useTLS {
 		tlsCfg, err := buildTLSConfig(h)
@@ -105,16 +114,16 @@ func buildTLSConfig(h *model.Host) (*tls.Config, error) {
 		pool = x509.NewCertPool()
 		pemBytes, err := os.ReadFile(h.CAFile)
 		if err != nil {
-			return nil, fmt.Errorf("读取 CA 证书失败: %w", err)
+			return nil, fmt.Errorf(i18n.T("failed to read CA certificate: %w", "读取 CA 证书失败: %w"), err)
 		}
 		if !pool.AppendCertsFromPEM(pemBytes) {
-			return nil, fmt.Errorf("解析 CA 证书失败（%s）", h.CAFile)
+			return nil, fmt.Errorf(i18n.T("failed to parse CA certificate (%s)", "解析 CA 证书失败（%s）"), h.CAFile)
 		}
 		cfg.RootCAs = pool
 	} else if len(h.CAData) > 0 {
 		pool = x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(h.CAData) {
-			return nil, fmt.Errorf("解析 CA 证书数据失败（内联 PEM）")
+			return nil, errors.New(i18n.T("failed to parse CA certificate data (inline PEM)", "解析 CA 证书数据失败（内联 PEM）"))
 		}
 		cfg.RootCAs = pool
 	}
@@ -140,13 +149,13 @@ func buildTLSConfig(h *model.Host) (*tls.Config, error) {
 	if h.CertFile != "" {
 		cert, err := tls.LoadX509KeyPair(h.CertFile, h.KeyFile)
 		if err != nil {
-			return nil, fmt.Errorf("加载客户端证书对失败: %w", err)
+			return nil, fmt.Errorf(i18n.T("failed to load client certificate pair: %w", "加载客户端证书对失败: %w"), err)
 		}
 		cfg.Certificates = []tls.Certificate{cert}
 	} else if len(h.CertData) > 0 {
 		cert, err := tls.X509KeyPair(h.CertData, h.KeyData)
 		if err != nil {
-			return nil, fmt.Errorf("加载客户端证书对失败（内联 PEM）: %w", err)
+			return nil, fmt.Errorf(i18n.T("failed to load client certificate pair (inline PEM): %w", "加载客户端证书对失败（内联 PEM）: %w"), err)
 		}
 		cfg.Certificates = []tls.Certificate{cert}
 	}
@@ -158,13 +167,13 @@ func buildTLSConfig(h *model.Host) (*tls.Config, error) {
 func chainVerifier(roots *x509.CertPool) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 		if len(rawCerts) == 0 {
-			return fmt.Errorf("服务端未提供证书")
+			return errors.New(i18n.T("server did not provide a certificate", "服务端未提供证书"))
 		}
 		certs := make([]*x509.Certificate, 0, len(rawCerts))
 		for _, raw := range rawCerts {
 			c, err := x509.ParseCertificate(raw)
 			if err != nil {
-				return fmt.Errorf("解析服务端证书失败: %w", err)
+				return fmt.Errorf(i18n.T("failed to parse server certificate: %w", "解析服务端证书失败: %w"), err)
 			}
 			certs = append(certs, c)
 		}
@@ -179,7 +188,7 @@ func chainVerifier(roots *x509.CertPool) func([][]byte, [][]*x509.Certificate) e
 			}
 		}
 		if _, err := certs[0].Verify(opts); err != nil {
-			return fmt.Errorf("服务端证书链校验失败: %w", err)
+			return fmt.Errorf(i18n.T("server certificate chain verification failed: %w", "服务端证书链校验失败: %w"), err)
 		}
 		return nil
 	}
@@ -202,17 +211,21 @@ func (c *Conn) Connect(ctx context.Context) error {
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("agent 不可达 %s: %w", c.base, err)
+		return fmt.Errorf(i18n.T("agent unreachable %s: %w", "agent 不可达 %s: %w"), c.base, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("agent 健康检查失败: HTTP %d", resp.StatusCode)
+		return fmt.Errorf(i18n.T("agent health check failed: HTTP %d", "agent 健康检查失败: HTTP %d"), resp.StatusCode)
 	}
 	return nil
 }
 
-// Close 释放资源（HTTP 无长连接状态）。
-func (c *Conn) Close() error { return nil }
+// Close 释放 HTTP 连接池的空闲连接（幂等；进行中的请求不受影响）。
+// transport 未特化时委托给默认共享实例，仅回收空闲连接，无副作用。
+func (c *Conn) Close() error {
+	c.client.CloseIdleConnections()
+	return nil
+}
 
 // Hostname 返回主机名。
 func (c *Conn) Hostname() string { return c.host.Name }
@@ -223,6 +236,11 @@ func (c *Conn) Exec(ctx context.Context, req connection.ExecRequest) (connection
 	if req.BecomeUser != "" {
 		becomeUser = req.BecomeUser
 		becomePW = model.Secret(c.host.BecomePassword, c.host.BecomePasswordEnv)
+		// 明文 http:// 时提权密码裸奔于网络（无 TLS 加密）：明确告警，
+		// 对外纳管应配置 mTLS（README 已知限制；告警避免无意识踩坑）
+		if becomePW != "" && strings.HasPrefix(c.base, "http://") {
+			warnPlaintextBecome()
+		}
 	}
 	body, _ := json.Marshal(map[string]any{
 		"script":          req.Script,
@@ -247,20 +265,39 @@ func (c *Conn) Exec(ctx context.Context, req connection.ExecRequest) (connection
 		return connection.ExecResult{}, fmt.Errorf("agent exec HTTP %d: %s", resp.StatusCode, string(msg))
 	}
 	var out struct {
-		Code     int    `json:"code"`
-		Stdout   string `json:"stdout"`
-		Stderr   string `json:"stderr"`
-		TimedOut bool   `json:"timed_out"`
+		Code      int    `json:"code"`
+		Stdout    string `json:"stdout"`
+		Stderr    string `json:"stderr"`
+		TimedOut  bool   `json:"timed_out"`
+		Cancelled bool   `json:"cancelled"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return connection.ExecResult{}, fmt.Errorf("解析 agent 响应失败: %w", err)
+		return connection.ExecResult{}, fmt.Errorf(i18n.T("failed to parse agent response: %w", "解析 agent 响应失败: %w"), err)
 	}
 	if out.TimedOut {
 		return connection.ExecResult{Code: out.Code, Stdout: out.Stdout, Stderr: out.Stderr},
 			context.DeadlineExceeded
 	}
+	if out.Cancelled {
+		// 控制端主动取消/断开 ≠ 超时，错误归因分开（此前一律报 DeadlineExceeded）
+		return connection.ExecResult{Code: out.Code, Stdout: out.Stdout, Stderr: out.Stderr},
+			context.Canceled
+	}
 	return connection.ExecResult{Code: out.Code, Stdout: out.Stdout, Stderr: out.Stderr}, nil
 }
+
+// warnPlaintextBecome 明文 http + become 密码的一次性告警（每进程一条，
+// 避免大规模主机重复刷屏）。
+var warnPlaintextBecome = func() func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			fmt.Fprintln(os.Stderr, i18n.T(
+				"[warn] become password is being sent over plain HTTP (no TLS); sniffable on the network. Configure mTLS for the agent.",
+				"[警告] become 密码正以明文 HTTP 传输（未启用 TLS），网内可嗅探；请为 agent 配置 mTLS。"))
+		})
+	}
+}()
 
 // UploadFile 调用 agent 的 /file 上传。
 func (c *Conn) UploadFile(ctx context.Context, dst string, r io.Reader, mode fs.FileMode) error {
@@ -279,7 +316,7 @@ func (c *Conn) UploadFile(ctx context.Context, dst string, r io.Reader, mode fs.
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("agent 上传 HTTP %d: %s", resp.StatusCode, string(msg))
+		return fmt.Errorf(i18n.T("agent upload HTTP %d: %s", "agent 上传 HTTP %d: %s"), resp.StatusCode, string(msg))
 	}
 	return nil
 }
@@ -315,7 +352,7 @@ func (c *Conn) DownloadFile(ctx context.Context, src string, w io.Writer) error 
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("agent 下载 HTTP %d: %s", resp.StatusCode, string(msg))
+		return fmt.Errorf(i18n.T("agent download HTTP %d: %s", "agent 下载 HTTP %d: %s"), resp.StatusCode, string(msg))
 	}
 	_, err = io.Copy(w, resp.Body)
 	return err
@@ -343,7 +380,7 @@ func (c *Conn) NativeExtract(ctx context.Context, src, dest string) error {
 	}
 	if resp.StatusCode != http.StatusOK {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("agent 解压 HTTP %d: %s", resp.StatusCode, string(msg))
+		return fmt.Errorf(i18n.T("agent extract HTTP %d: %s", "agent 解压 HTTP %d: %s"), resp.StatusCode, string(msg))
 	}
 	return nil
 }

@@ -58,6 +58,38 @@ func TestBuiltinVarsImmutable(t *testing.T) {
 	}
 }
 
+// TestBuiltinVarsIdentityNotOverridable 回归：inventory_hostname/group_names
+// 曾只注入在变量叠加的最低层（inventory 层），play vars 可覆盖，
+// 与 README「不可被覆盖」承诺矛盾。现在必须在全部叠加之后强制注入。
+func TestBuiltinVarsIdentityNotOverridable(t *testing.T) {
+	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+		return connection.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
+	})
+	plays := []*model.Play{{
+		Hosts: "webservers",
+		Vars: map[string]any{
+			"inventory_hostname": "PWNED",
+			"group_names":        []any{"PWNED"},
+			"play_hosts":         []any{"PWNED"},
+			"groups":             map[string]any{"PWNED": []any{"PWNED"}},
+		},
+		Tasks: []*model.Task{
+			{Name: "验证", Module: "shell",
+				FreeForm: "self={{ .inventory_hostname }} grp={{ index .group_names 0 }} first={{ index .play_hosts 0 }}"},
+		},
+	}}
+	if ex.Run(context.Background(), plays) {
+		t.Fatalf("不应失败:\n%s", rep.joined())
+	}
+	scripts := joinExecScripts(allFakes())
+	if strings.Contains(scripts, "PWNED") {
+		t.Fatalf("内置变量被 play vars 覆盖:\n%s", scripts)
+	}
+	if !strings.Contains(scripts, "self=h1 grp=webservers first=h1") {
+		t.Fatalf("内置变量应保持真实值:\n%s", scripts)
+	}
+}
+
 // TestMarkerWriteAndRemove 验证 deploy 写 marker、uninstall 清除。
 func TestMarkerWriteAndRemove(t *testing.T) {
 	ch := &chart.Chart{}

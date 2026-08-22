@@ -107,11 +107,15 @@ func TestUnarchiveLocalTar(t *testing.T) {
 	if !found {
 		t.Fatal("未见临时归档上传")
 	}
-	if len(sh.runs) != 2 || !strings.Contains(sh.runs[0], "mkdir -p -- '/opt/app'") {
+	// mkdir + tar + defer 清理临时归档（临时副本总是自动清理）
+	if len(sh.runs) != 3 || !strings.Contains(sh.runs[0], "mkdir -p -- '/opt/app'") {
 		t.Fatalf("执行记录: %v", sh.runs)
 	}
 	if sh.runs[1] != "tar -xzf '"+tempArcPath(fake)+"' -C '/opt/app'" {
 		t.Fatalf("解压命令: %q", sh.runs[1])
+	}
+	if sh.runs[2] != "rm -f -- '"+tempArcPath(fake)+"'" {
+		t.Fatalf("应自动清理临时归档: %q", sh.runs[2])
 	}
 
 	// creates 出现后应跳过（幂等）

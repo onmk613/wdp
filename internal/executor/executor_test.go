@@ -80,7 +80,7 @@ func setup(t *testing.T, script func(host string, req connection.ExecRequest) (c
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host) (connection.Connection, error) {
+	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
 		f := connection.NewFake(h)
 		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
 			return script(h.Name, req)

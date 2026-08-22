@@ -3,11 +3,13 @@
 package chart
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
+	"wdp/internal/i18n"
 )
 
 // Merge 按 Helm 语义深合并：override 写入 base 之上。
@@ -44,25 +46,46 @@ type pathSeg struct {
 // 子 chart 默认 values → 父作用域 <子chart名> 子树 → global（跨层共享，拷贝隔离）。
 // 执行器与 template 预览共用本规则；引用 vars（task 级）由调用方在其上继续叠加。
 func SubScope(sub *Chart, parentScope map[string]any) map[string]any {
-	scope := map[string]any{}
-	for k, v := range sub.Values {
-		scope[k] = v
-	}
+	scope := deepCopyValues(sub.Values)
 	if tree, ok := parentScope[sub.Meta.Name].(map[string]any); ok {
 		scope = Merge(scope, tree)
 	}
 	if g, ok := parentScope["global"].(map[string]any); ok {
-		gc := map[string]any{}
-		for k, v := range g {
-			gc[k] = v
-		}
-		scope["global"] = gc
+		scope["global"] = deepCopyValues(g)
 	}
 	return scope
 }
 
+// deepCopyValues 深拷贝 values（map/[]any 递归，标量直接复制）。
+// 合并与 --set 写入前深拷贝，避免嵌套 map 与 chart 默认 values / 父作用域
+// 共享引用而被原地写污染（浅拷贝只隔离顶层键）。
+func deepCopyValues(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = deepCopyAny(v)
+	}
+	return out
+}
+
+func deepCopyAny(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		return deepCopyValues(x)
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = deepCopyAny(e)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
 // SetPath 按点路径写入值，支持单层列表下标："a.b[0].c"。
 // 中间路径不存在时自动创建；类型冲突时报错。返回根 map（即入参 root）。
+// map 末段写 nil（--set k=null）时删除该键，与 -f 覆盖文件的 null 删除语义
+// 及 README 承诺一致；列表元素写 nil 仍为占位赋值（删除会移动下标，语义不明）。
 func SetPath(root map[string]any, path string, value any) (map[string]any, error) {
 	segs, err := parsePath(path)
 	if err != nil {
@@ -73,13 +96,17 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 		last := i == len(segs)-1
 		if !s.hasID {
 			if last {
+				if value == nil {
+					delete(cur, s.key)
+					return root, nil
+				}
 				cur[s.key] = value
 				return root, nil
 			}
 			next, ok := cur[s.key].(map[string]any)
 			if !ok {
 				if v, exists := cur[s.key]; exists && v != nil {
-					return nil, fmt.Errorf("--set %q: %q 已是非 map 值（%T）", path, s.key, cur[s.key])
+					return nil, fmt.Errorf(i18n.T("--set %q: %q is already a non-map value (%T)", "--set %q: %q 已是非 map 值（%T）"), path, s.key, cur[s.key])
 				}
 				next = map[string]any{}
 				cur[s.key] = next
@@ -92,7 +119,7 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 		if v, ok := cur[s.key].([]any); ok {
 			list = v
 		} else if v, exists := cur[s.key]; exists && v != nil {
-			return nil, fmt.Errorf("--set %q: %q 已是非 list 值（%T）", path, s.key, cur[s.key])
+			return nil, fmt.Errorf(i18n.T("--set %q: %q is already a non-list value (%T)", "--set %q: %q 已是非 list 值（%T）"), path, s.key, cur[s.key])
 		}
 		for len(list) <= s.idx {
 			list = append(list, nil)
@@ -105,7 +132,7 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 		next, ok := list[s.idx].(map[string]any)
 		if !ok {
 			if v := list[s.idx]; v != nil {
-				return nil, fmt.Errorf("--set %q: %s[%d] 已是非 map 值（%T）", path, s.key, s.idx, v)
+				return nil, fmt.Errorf(i18n.T("--set %q: %s[%d] is already a non-map value (%T)", "--set %q: %s[%d] 已是非 map 值（%T）"), path, s.key, s.idx, v)
 			}
 			next = map[string]any{}
 			list[s.idx] = next
@@ -119,7 +146,7 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 // parsePath 解析 "a.b[0].c" 为段序列。
 func parsePath(path string) ([]pathSeg, error) {
 	if path == "" {
-		return nil, fmt.Errorf("空路径")
+		return nil, errors.New(i18n.T("empty path", "空路径"))
 	}
 	var segs []pathSeg
 	i, n := 0, len(path)
@@ -130,32 +157,32 @@ func parsePath(path string) ([]pathSeg, error) {
 		}
 		key := path[start:i]
 		if key == "" {
-			return nil, fmt.Errorf("非法路径 %q（空键段）", path)
+			return nil, fmt.Errorf(i18n.T("invalid path %q (empty key segment)", "非法路径 %q（空键段）"), path)
 		}
 		s := pathSeg{key: key}
 		if i < n && path[i] == '[' {
 			j := strings.IndexByte(path[i:], ']')
 			if j < 0 {
-				return nil, fmt.Errorf("非法路径 %q（缺 ]）", path)
+				return nil, fmt.Errorf(i18n.T("invalid path %q (missing ])", "非法路径 %q（缺 ]）"), path)
 			}
 			v, err := strconv.Atoi(path[i+1 : i+j])
 			if err != nil || v < 0 {
-				return nil, fmt.Errorf("非法下标 %q", path[i+1:i+j])
+				return nil, fmt.Errorf(i18n.T("invalid index %q", "非法下标 %q"), path[i+1:i+j])
 			}
 			s.idx, s.hasID = v, true
 			i += j + 1
 			if i < n && path[i] == '[' {
-				return nil, fmt.Errorf("路径 %q 含多级下标，暂不支持", path)
+				return nil, fmt.Errorf(i18n.T("path %q contains multi-level indices, not supported yet", "路径 %q 含多级下标，暂不支持"), path)
 			}
 		}
 		segs = append(segs, s)
 		if i < n {
 			if path[i] != '.' {
-				return nil, fmt.Errorf("非法路径 %q（期望 . 或 [）", path)
+				return nil, fmt.Errorf(i18n.T("invalid path %q (expected . or [)", "非法路径 %q（期望 . 或 [）"), path)
 			}
 			i++
 			if i == n {
-				return nil, fmt.Errorf("非法路径 %q（以 . 结尾）", path)
+				return nil, fmt.Errorf(i18n.T("invalid path %q (ends with .)", "非法路径 %q（以 . 结尾）"), path)
 			}
 		}
 	}
@@ -167,11 +194,11 @@ func parsePath(path string) ([]pathSeg, error) {
 func ParseSet(pair string) (string, any, error) {
 	k, v, ok := strings.Cut(pair, "=")
 	if !ok {
-		return "", nil, fmt.Errorf("--set 需要 k=v 形式，实际 %q", pair)
+		return "", nil, fmt.Errorf(i18n.T("--set requires k=v form, got %q", "--set 需要 k=v 形式，实际 %q"), pair)
 	}
 	k = strings.TrimSpace(k)
 	if k == "" {
-		return "", nil, fmt.Errorf("--set 键为空: %q", pair)
+		return "", nil, fmt.Errorf(i18n.T("--set key is empty: %q", "--set 键为空: %q"), pair)
 	}
 	return k, inferType(v), nil
 }

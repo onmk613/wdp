@@ -40,6 +40,7 @@ var (
 	gNoColor     bool
 	gOutput      string // console | json
 	gLang        string // auto | zh | en
+	gMaxDownMB   int64  // get_url 下载响应体上限 MiB，0 = 跟随 wdp.cfg / 内置默认
 )
 
 // 命令分组（`wdp --help` 按组分类展示；GroupID 在命令挂载时统一设置）。
@@ -112,6 +113,9 @@ func NewRootCmd() *cobra.Command {
 	pf.StringVar(&gLang, "lang", "auto",
 		i18n.T("output language: auto | zh | en (or "+LangEnv+" env; affects help, module docs, messages)",
 			"输出语言：auto | zh | en（或环境变量 "+LangEnv+"；作用于帮助、模块文档与提示文案）"))
+	pf.Int64Var(&gMaxDownMB, "max-download-mb", 0,
+		i18n.T("get_url download body size limit in MiB (0 = follow wdp.cfg [transfer], default 2048)",
+			"get_url 下载响应体上限（MiB，0 = 跟随 wdp.cfg [transfer]，默认 2048）"))
 
 	// 子命令 RunE 前统一加载 wdp.cfg，未显式指定的全局 flag 回退配置值
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
@@ -144,6 +148,9 @@ func NewRootCmd() *cobra.Command {
 		}
 		if !pf.Changed("no-color") {
 			gNoColor = !c.Color()
+		}
+		if !pf.Changed("max-download-mb") {
+			gMaxDownMB = int64(c.Transfer.MaxDownloadMB)
 		}
 		return nil
 	}

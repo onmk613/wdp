@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 	"wdp/internal/chart"
 	"wdp/internal/connection"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/shellquote"
 )
@@ -17,7 +19,7 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 	e.mergeSubHandlers(p)
 	hosts, err := e.selectHosts(p.Hosts)
 	if err != nil {
-		e.Rep.PlayMsg("选择主机失败: %v", err)
+		e.Rep.PlayMsg(i18n.T("failed to select hosts: %v", "选择主机失败: %v"), err)
 		return true
 	}
 	name := p.Name
@@ -66,8 +68,9 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 
 	if len(preHooks) > 0 && runHooks(preHooks, "[pre-hook]") {
 		failed = true
-		e.Rep.Recap(name, stats)
-		e.Rep.PlayMsg("pre-hook 失败，终止 play")
+		e.Rep.PlayMsg(i18n.T("pre-hook failed, aborting play", "pre-hook 失败，终止 play"))
+		// 与正常路径同样走 finishPlay：清理回滚快照目录、跳过 marker 写入
+		e.finishPlay(ctx, name, stats, failed, executedRuns, hosts)
 		return true
 	}
 
@@ -89,11 +92,12 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 }
 
 // runMainBatches 按策略切批执行主任务列表，返回（是否失败，已执行主机运行态）。
-// rolling/canary 按 batch 切批（canary 首批 1 台金丝雀）；
-// linear（或未配置）维持传统 serial 语义。
+// 配置了 strategy（linear/rolling/canary）时按 batch 切批、批次失败即终止
+// 后续批次（canary 首批 1 台金丝雀；linear 与 rolling 同为按批线性推进）；
+// 未配置 strategy 时维持传统 serial 语义（批次失败不阻断后续批次）。
 func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts []*model.Host, stats map[string]*model.Stats, st *playState) (bool, []*hostRun) {
 	var batches [][]*model.Host
-	if stg := main.Strategy; stg != nil && (stg.Type == "rolling" || stg.Type == "canary") {
+	if stg := main.Strategy; stg != nil {
 		size := parseBatchSize(stg.Batch, len(hosts))
 		if stg.Type == "canary" && len(hosts) > 1 {
 			batches = append(batches, hosts[:1])
@@ -102,14 +106,19 @@ func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts [
 			batches = chunkHosts(hosts, size)
 		}
 	} else {
-		batches = splitBatches(hosts, main.Serial)
+		var err error
+		batches, err = splitBatches(hosts, main.Serial)
+		if err != nil {
+			e.Rep.PlayMsg(i18n.T("batch split failed: %v", "批次切分失败: %v"), err)
+			return true, nil
+		}
 	}
 
 	failed := false
 	var executed []*hostRun
 	for _, batch := range batches {
 		if ctx.Err() != nil {
-			e.Rep.PlayMsg("执行已取消（%v），终止剩余批次", ctx.Err())
+			e.Rep.PlayMsg(i18n.T("execution cancelled (%v), terminating remaining batches", "执行已取消（%v），终止剩余批次"), ctx.Err())
 			failed = true
 			break
 		}
@@ -125,7 +134,7 @@ func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts [
 			if main.Strategy.AutoRollback {
 				e.rollbackBatch(ctx, main, runs, stats)
 			}
-			e.Rep.PlayMsg("批次失败，终止后续批次（strategy=%s）", main.Strategy.Type)
+			e.Rep.PlayMsg(i18n.T("batch failed, aborting subsequent batches (strategy=%s)", "批次失败，终止后续批次（strategy=%s）"), main.Strategy.Type)
 			break
 		}
 		if main.Strategy.Gate != nil && e.runGate(ctx, main, main.Strategy.Gate, runs, stats) {
@@ -145,12 +154,15 @@ func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts [
 func (e *Executor) finishPlay(ctx context.Context, name string, stats map[string]*model.Stats, failed bool, executedRuns []*hostRun, hosts []*model.Host) {
 	e.Rep.Recap(name, stats)
 	if e.Opts.CheckMode {
-		e.Rep.PlayMsg("check 模式：changed 为变更预估（--diff 可看内容级差异）")
+		e.Rep.PlayMsg(i18n.T("check mode: changed is a change estimate (use --diff to see content-level diffs)", "check 模式：changed 为变更预估（--diff 可看内容级差异）"))
 	}
 	// 回滚快照清理：play 结束后 shadow 目录不再有用（成功批次保留变更，
-	// 失败批次已回滚），只清理登记过变更的主机，best-effort 清除避免 /tmp 残留
+	// 失败批次已回滚），只清理登记过变更的主机，best-effort 清除避免 /tmp 残留。
+	// 用独立的限时 ctx：执行取消（Ctrl+C）时父 ctx 已失效，若沿用会静默跳过清理
 	if e.rollbackDir != "" {
-		e.cleanupSnapshots(ctx, executedRuns)
+		cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		e.cleanupSnapshots(cleanCtx, executedRuns)
+		cancel()
 		e.rollbackDir = ""
 	}
 	if e.Opts.Chart != nil && !failed && !e.Opts.CheckMode {
@@ -164,27 +176,38 @@ func (e *Executor) finishPlay(ctx context.Context, name string, stats map[string
 }
 
 // cleanupSnapshots 清除登记过回滚动作的主机上的快照目录（best-effort；
-// 未产生变更的主机不建连）。
+// 未产生变更的主机不建连）。delegate_to 产生的变更快照在执行主机上，
+// 按动作的执行主机去重清理。
 func (e *Executor) cleanupSnapshots(ctx context.Context, runs []*hostRun) {
 	script := fmt.Sprintf("rm -rf -- %s", shellquote.Quote(e.rollbackDir))
 	done := 0
 	for _, hr := range runs {
 		hr.mu.Lock()
-		n := len(hr.journal)
+		acts := append([]journalEntry{}, hr.journal...)
 		hr.mu.Unlock()
-		if n == 0 {
+		if len(acts) == 0 {
 			continue
 		}
-		conn, err := e.Conns.Get(ctx, hr.host)
-		if err != nil {
-			continue
+		targets := map[string]*model.Host{}
+		for _, je := range acts {
+			t := je.execOn
+			if t == nil {
+				t = hr.host
+			}
+			targets[t.Name] = t
 		}
-		if out, bad := conn.Exec(ctx, connection.ExecRequest{Script: script, TimeoutMs: 30_000}); bad == nil && out.Code == 0 {
-			done++
+		for _, t := range targets {
+			conn, err := e.Conns.Get(ctx, t)
+			if err != nil {
+				continue
+			}
+			if out, bad := conn.Exec(ctx, connection.ExecRequest{Script: script, TimeoutMs: 30_000}); bad == nil && out.Code == 0 {
+				done++
+			}
 		}
 	}
 	if done > 0 {
-		e.Rep.PlayMsg("回滚快照已从 %d 台主机清理", done)
+		e.Rep.PlayMsg(i18n.T("rollback snapshots cleaned from %d hosts", "回滚快照已从 %d 台主机清理"), done)
 	}
 }
 
@@ -234,9 +257,9 @@ func (e *Executor) writeMarkers(ctx context.Context, hosts []*model.Host, ch *ch
 		}
 	}
 	if written > 0 {
-		e.Rep.PlayMsg("release marker 已写入 %d 台主机: %s", written, path)
+		e.Rep.PlayMsg(i18n.T("release marker written to %d hosts: %s", "release marker 已写入 %d 台主机: %s"), written, path)
 	} else if len(hosts) > 0 {
-		e.Rep.PlayMsg("警告: release marker 写入失败（uninstall/status 将不可用）: %s", path)
+		e.Rep.PlayMsg(i18n.T("warning: release marker write failed (uninstall/status will be unavailable): %s", "警告: release marker 写入失败（uninstall/status 将不可用）: %s"), path)
 	}
 }
 
@@ -254,7 +277,7 @@ func (e *Executor) removeMarkers(ctx context.Context, hosts []*model.Host, ch *c
 		}
 	}
 	if done > 0 {
-		e.Rep.PlayMsg("release marker 已从 %d 台主机清除", done)
+		e.Rep.PlayMsg(i18n.T("release marker removed from %d hosts", "release marker 已从 %d 台主机清除"), done)
 	}
 }
 
@@ -272,7 +295,7 @@ func (e *Executor) mergeSubHandlers(p *model.Play) {
 		for _, subPlay := range sub.Deploy {
 			for _, h := range subPlay.Handlers {
 				if seen[h.Name] {
-					e.Rep.PlayMsg("handler %q 重名，忽略子 chart %s 的同名 handler", h.Name, sub.Meta.Name)
+					e.Rep.PlayMsg(i18n.T("handler %q duplicated, ignoring the same-named handler from subchart %s", "handler %q 重名，忽略子 chart %s 的同名 handler"), h.Name, sub.Meta.Name)
 					continue
 				}
 				seen[h.Name] = true
@@ -289,9 +312,18 @@ func (e *Executor) mergeSubHandlers(p *model.Play) {
 }
 
 func taskSelected(t *model.Task, opts Options) bool {
+	if t.Block != nil {
+		return blockSelected(t, opts, nil)
+	}
+	return tagsMatch(t.Tags, opts)
+}
+
+// tagsMatch 是 tags 过滤的核心判定（--tags 命中任一即选；--skip-tags
+// 命中任一即排除）。
+func tagsMatch(tags []string, opts Options) bool {
 	if len(opts.Tags) > 0 {
 		for _, want := range opts.Tags {
-			for _, has := range t.Tags {
+			for _, has := range tags {
 				if has == want {
 					return true
 				}
@@ -300,11 +332,55 @@ func taskSelected(t *model.Task, opts Options) bool {
 		return false
 	}
 	for _, skip := range opts.SkipTags {
-		for _, has := range t.Tags {
+		for _, has := range tags {
 			if has == skip {
 				return false
 			}
 		}
+	}
+	return true
+}
+
+// effectiveTags 追加继承的祖先 tags（block 上的 tags 作用于全部子任务）。
+func effectiveTags(t *model.Task, inherited []string) []string {
+	if len(inherited) == 0 {
+		return t.Tags
+	}
+	out := make([]string, 0, len(inherited)+len(t.Tags))
+	out = append(out, inherited...)
+	out = append(out, t.Tags...)
+	return out
+}
+
+// blockSelected 判定任务（含 block 容器）是否被 tags 选中：
+//   - 自身有效 tags（含继承）命中 skip-tags → 整组排除
+//   - --tags 模式下自身或任一后代的有效 tags 命中即选中
+//     （后代命中时容器选中，由 runSeq 在组内再逐子过滤）
+func blockSelected(t *model.Task, opts Options, inherited []string) bool {
+	eff := effectiveTags(t, inherited)
+	for _, skip := range opts.SkipTags {
+		for _, has := range eff {
+			if has == skip {
+				return false
+			}
+		}
+	}
+	if len(opts.Tags) > 0 {
+		for _, want := range opts.Tags {
+			for _, has := range eff {
+				if has == want {
+					return true
+				}
+			}
+		}
+		for _, group := range [][]*model.Task{t.Block, t.Rescue, t.Always} {
+			for _, ch := range group {
+				if blockSelected(ch, opts, eff) {
+					return true
+				}
+			}
+		}
+		return false
 	}
 	return true
 }

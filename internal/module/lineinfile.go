@@ -65,21 +65,24 @@ func (m *LineinfileModule) Example() string {
 func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	path, ok := argStr(args, "path")
 	if !ok || path == "" {
-		return Fail("lineinfile 需要 path 参数")
+		return Fail("%s", i18n.T("lineinfile requires a path parameter", "lineinfile 需要 path 参数"))
 	}
 	line, hasLine := argStr(args, "line")
-	state, _ := argStr(args, "state")
-	switch state {
-	case "", "present", "absent":
-	default:
-		return Fail("不支持的 state %q（可选: present/absent）", state)
+	state, ok := parseState(args, "present", "present", "absent")
+	if !ok {
+		return Fail(i18n.T("unsupported state %q (options: present/absent)", "不支持的 state %q（可选: present/absent）"), state)
 	}
 	if state != "absent" && !hasLine {
-		return Fail("lineinfile 需要 line 参数（state=present）")
+		return Fail("%s", i18n.T("lineinfile requires a line parameter (state=present)", "lineinfile 需要 line 参数（state=present）"))
 	}
-	if state == "absent" && !hasLine {
-		if p, _ := argStr(args, "regexp"); p == "" {
-			return Fail("state=absent 需要 line 或 regexp 之一")
+	if state == "absent" {
+		p, _ := argStr(args, "regexp")
+		// line:"" 显式空串经 argStr 视为"已提供"——但空行匹配会删除文件中
+		// 所有空行，语义上几乎必然是误用，与无 regexp 的 absent 一并拒绝
+		if !hasLine || line == "" {
+			if p == "" {
+				return Fail("%s", i18n.T("state=absent requires a non-empty line or regexp (an empty line would match every blank line)", "state=absent 需要非空 line 或 regexp（空行会匹配全部空行）"))
+			}
 		}
 	}
 	pattern, _ := argStr(args, "regexp")
@@ -93,21 +96,21 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 		mode = int64(mv.Perm())
 	}
 	if (owner != "" || group != "") && !rc.Become {
-		return Fail("设置 owner/group 需要 become: true（%s）", path)
+		return Fail(i18n.T("setting owner/group requires become: true (%s)", "设置 owner/group 需要 become: true（%s）"), path)
 	}
 
 	var re, after *regexp.Regexp
 	if pattern != "" {
 		r, err := regexp.Compile(pattern)
 		if err != nil {
-			return Fail("regexp 无法解析: %v", err)
+			return Fail(i18n.T("unable to parse regexp: %v", "regexp 无法解析: %v"), err)
 		}
 		re = r
 	}
 	if afterPattern != "" && afterPattern != "EOF" {
 		r, err := regexp.Compile(afterPattern)
 		if err != nil {
-			return Fail("insertafter 无法解析: %v", err)
+			return Fail(i18n.T("unable to parse insertafter: %v", "insertafter 无法解析: %v"), err)
 		}
 		after = r
 	}
@@ -119,10 +122,10 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 	if err := rc.Conn.DownloadFile(rc.Ctx, path, &buf); err != nil {
 		exists = false
 		if state == "absent" {
-			return &Result{Msg: fmt.Sprintf("%s 不存在，state=absent 无需变更", path)}
+			return &Result{Msg: fmt.Sprintf(i18n.T("%s does not exist, no change needed for state=absent", "%s 不存在，state=absent 无需变更"), path)}
 		}
 		if !create {
-			return Fail("文件不存在: %s（可用 create: true 创建）", path)
+			return Fail(i18n.T("file does not exist: %s (use create: true to create it)", "文件不存在: %s（可用 create: true 创建）"), path)
 		}
 	} else {
 		oldContent = buf.String()
@@ -133,9 +136,9 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 
 	// check 模式：只读对比返回变更预估（--diff 产出内容级差异），不回写
 	if rc.CheckMode {
-		res := &Result{Changed: changed, Msg: fmt.Sprintf("[check] %s 将%s", path, changeLabel(changed))}
+		res := &Result{Changed: changed, Msg: fmt.Sprintf(i18n.T("[check] %s will %s", "[check] %s 将%s"), path, changeLabel(changed))}
 		if changed && rc.DiffMode {
-			res.Diff = diffText(oldContent, newContent, "远端 "+path, "目标 "+path)
+			res.Diff = diffText(oldContent, newContent, i18n.T("remote ", "远端 ")+path, i18n.T("target ", "目标 ")+path)
 		}
 		return res
 	}
@@ -146,7 +149,7 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 			if out, bad := rc.exec(fmt.Sprintf("cp -a -- %s %s", shellquote.Quote(path), shellquote.Quote(bak))); bad != nil {
 				return bad
 			} else if out.Code != 0 {
-				return Fail("备份失败: %s", firstLine(out.Stderr))
+				return Fail(i18n.T("backup failed: %s", "备份失败: %s"), firstLine(out.Stderr))
 			}
 		}
 		// 变更前登记回滚动作（auto_rollback）：已存在 → 快照恢复；新建 → 回滚时删除
@@ -167,19 +170,24 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 			}
 		}
 		if err := uploadBytes(rc, path, []byte(newContent), uploadMode, true); err != nil {
-			return Fail("上传失败: %v", err)
+			return Fail(i18n.T("upload failed: %v", "上传失败: %v"), err)
 		}
 	}
-	// 内容未变时仍校正属主（与 copy 的幂等收尾一致）
+	// 属主漂移才校正（与 copy 的幂等收尾一致：探测驱动，变更计入 changed）
 	if owner != "" || group != "" {
-		if bad := chownPath(rc, path, owner, group); bad != nil {
-			return bad
+		if co, cg, ok, obad := remoteOwnerGroup(rc, path); obad != nil {
+			return obad
+		} else if !ok || co != owner || cg != group {
+			if bad := chownPath(rc, path, owner, group); bad != nil {
+				return bad
+			}
+			changed = true
 		}
 	}
 
-	msg := fmt.Sprintf("%s 已是期望状态", path)
+	msg := fmt.Sprintf(i18n.T("%s is already in the desired state", "%s 已是期望状态"), path)
 	if changed {
-		msg = fmt.Sprintf("%s 已更新", path)
+		msg = fmt.Sprintf(i18n.T("%s updated", "%s 已更新"), path)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }

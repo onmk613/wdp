@@ -17,7 +17,7 @@ func TestShutdownEndpoint(t *testing.T) {
 	srv := New(":0")
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	conn := agentconn.New(&model.Host{Name: "p", Conn: "agent", AgentURL: ts.URL})
+	conn := agentconn.New(&model.Host{Name: "p", Conn: "agent", AgentURL: ts.URL}, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if err := conn.Shutdown(ctx); err != nil {
@@ -30,7 +30,7 @@ func TestExecBecome(t *testing.T) {
 	srv := New(":0")
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	conn := agentconn.New(&model.Host{Name: "p", Conn: "agent", AgentURL: ts.URL})
+	conn := agentconn.New(&model.Host{Name: "p", Conn: "agent", AgentURL: ts.URL}, nil)
 	// become_user 指向当前用户（sudo 大概率不可用于测试环境，验证脚本包装不崩即可）
 	out, err := conn.Exec(context.Background(), connection.ExecRequest{
 		Script: "id -un", BecomeUser: "",

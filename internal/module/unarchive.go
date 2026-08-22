@@ -23,6 +23,10 @@ type UnarchiveModule struct{}
 // Name 模块名。
 func (m *UnarchiveModule) Name() string { return "unarchive" }
 
+// RollbackCapability 部分可回滚：回滚日志仅登记"删除本次新建目录"
+// （RecordRemove），覆盖已有目录内的文件不恢复快照。
+func (m *UnarchiveModule) RollbackCapability() RollbackCapability { return RollbackPartial }
+
 // Desc 模块说明。
 func (m *UnarchiveModule) Desc() string {
 	return i18n.T("extract tar/zip archives into a remote directory", "解压 tar/zip 归档到远端目录")
@@ -35,7 +39,7 @@ func (m *UnarchiveModule) Params() []ParamDoc {
 		{Name: "dest", Type: "string", Desc: "远端目标目录（不存在时自动创建）"},
 		{Name: "remote_src", Type: "bool", Default: "false", Desc: "src 为远端路径（跳过上传，直接解压）"},
 		{Name: "creates", Type: "string", Desc: "幂等守卫：该路径已存在则跳过任务（控制端看不到归档内容，重复执行需依赖此参数）"},
-		{Name: "remove", Type: "bool", Default: "false", Desc: "解压后删除归档（仅本地 src：清理上传到远端的临时副本）"},
+		{Name: "remove", Type: "bool", Default: "false", Desc: "已废弃（保留兼容）：上传的临时归档副本现在总是自动清理，无需配置"},
 	}
 }
 
@@ -61,17 +65,17 @@ func (m *UnarchiveModule) Example() string {
 func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	src, ok := argStr(args, "src")
 	if !ok || src == "" {
-		return Fail("unarchive 需要 src 参数")
+		return Fail("%s", i18n.T("unarchive requires a src parameter", "unarchive 需要 src 参数"))
 	}
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("unarchive 需要 dest 参数")
+		return Fail("%s", i18n.T("unarchive requires a dest parameter", "unarchive 需要 dest 参数"))
 	}
 	remoteSrc, _ := argBool(args, "remote_src")
 	creates, _ := argStr(args, "creates")
 	remove, _ := argBool(args, "remove")
 	if remove && remoteSrc {
-		return Fail("remove 仅支持本地 src（remote_src 时不会清理远端归档）")
+		return Fail("%s", i18n.T("remove only supports a local src (a remote archive is not cleaned up when remote_src is set)", "remove 仅支持本地 src（remote_src 时不会清理远端归档）"))
 	}
 
 	kind := archiveKind(src)
@@ -100,10 +104,10 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, free string) 
 			}
 			var d []string
 			if cur == "missing" {
-				d = append(d, fmt.Sprintf("+ %s（新建目录并解压 %s）", dest, src))
+				d = append(d, fmt.Sprintf(i18n.T("+ %s (create directory and extract %s)", "+ %s（新建目录并解压 %s）"), dest, src))
 			} else {
-				d = append(d, fmt.Sprintf("- %s（%s）", dest, cur),
-					fmt.Sprintf("+ %s（解压 %s 覆盖，归档内容控制端不可见）", dest, src))
+				d = append(d, fmt.Sprintf(i18n.T("- %s (%s)", "- %s（%s）"), dest, cur),
+					fmt.Sprintf(i18n.T("+ %s (extract %s overwrites, archive content is invisible to the controller)", "+ %s（解压 %s 覆盖，归档内容控制端不可见）"), dest, src))
 			}
 			res.Diff = strings.Join(d, "\n")
 		}
@@ -130,17 +134,21 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, free string) 
 		return Fail("%s 已存在且不是目录", dest)
 	}
 
-	// 本地 src：读取并上传到远端临时路径
+	// 本地 src：读取并上传到远端临时路径。上传的临时副本是本模块的
+	// 实现细节，成败路径都清理（此前默认与失败路径会在远端 /tmp 残留）
 	remoteArc := src
 	if !remoteSrc {
 		data, err := os.ReadFile(resolveLocal(rc, src))
 		if err != nil {
-			return Fail("读取本地归档失败: %v", err)
+			return Fail(i18n.T("failed to read local archive: %v", "读取本地归档失败: %v"), err)
 		}
 		remoteArc = "/tmp/.wdp-arc-" + tempSuffix()
 		if err := uploadBytes(rc, remoteArc, data, 0o600, true); err != nil {
-			return Fail("上传归档失败: %v", err)
+			return Fail(i18n.T("failed to upload archive: %v", "上传归档失败: %v"), err)
 		}
+		defer func() { // best-effort：ctx 已取消时失败可接受（下轮重跑会换新临时名）
+			_, _ = rc.exec(fmt.Sprintf("rm -f -- %s", shellquote.Quote(remoteArc)))
+		}()
 	}
 
 	if rc.Rollback != nil && cur == "missing" {
@@ -152,16 +160,9 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, free string) 
 	// 回退 shell 命令
 	if nx, ok := rc.Conn.(connection.NativeExtractor); ok {
 		if err := nx.NativeExtract(rc.Ctx, remoteArc, dest); err == nil {
-			if remove && !remoteSrc {
-				if out, bad := rc.exec(fmt.Sprintf("rm -f -- %s", shellquote.Quote(remoteArc))); bad != nil {
-					return bad
-				} else if out.Code != 0 {
-					return Fail("清理归档失败: %s", firstLine(out.Stderr))
-				}
-			}
 			return &Result{Changed: true, Msg: fmt.Sprintf("已解压 %s 到 %s（原生）", src, dest)}
 		} else if !errors.Is(err, connection.ErrNativeUnsupported) {
-			return Fail("解压失败: %v", err)
+			return Fail(i18n.T("extract failed: %v", "解压失败: %v"), err)
 		}
 	}
 
@@ -172,14 +173,14 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, free string) 
 			return bad
 		}
 		if out.Code != 0 {
-			return Fail("目标机缺少 unzip（.zip 解压需要先安装 unzip 包）")
+			return Fail("%s", i18n.T("target machine is missing unzip (installing the unzip package is required to extract .zip)", "目标机缺少 unzip（.zip 解压需要先安装 unzip 包）"))
 		}
 	}
 
 	if out, bad := rc.exec(fmt.Sprintf("mkdir -p -- %s", shellquote.Quote(dest))); bad != nil {
 		return bad
 	} else if out.Code != 0 {
-		return Fail("创建目录失败: %s", firstLine(out.Stderr))
+		return Fail(i18n.T("failed to create directory: %s", "创建目录失败: %s"), firstLine(out.Stderr))
 	}
 
 	// 解压命令：tar 系列统一 -C dest；zip 用 unzip -o 覆盖解压
@@ -190,18 +191,9 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, free string) 
 	if out, bad := rc.exec(script); bad != nil {
 		return bad
 	} else if out.Code != 0 {
-		return Fail("解压失败: %s", firstLine(out.Stderr))
+		return Fail(i18n.T("extract failed: %s", "解压失败: %s"), firstLine(out.Stderr))
 	}
-
-	// remove：清理上传的临时归档（仅本地 src）
-	if remove && !remoteSrc {
-		if out, bad := rc.exec(fmt.Sprintf("rm -f -- %s", shellquote.Quote(remoteArc))); bad != nil {
-			return bad
-		} else if out.Code != 0 {
-			return Fail("清理归档失败: %s", firstLine(out.Stderr))
-		}
-	}
-	return &Result{Changed: true, Msg: fmt.Sprintf("已解压 %s 到 %s", src, dest)}
+	return &Result{Changed: true, Msg: fmt.Sprintf(i18n.T("extracted %s to %s", "已解压 %s 到 %s"), src, dest)}
 }
 
 // archiveKind 按扩展名识别归档类型：zip / targz / tarxz / tar（无法识别返回空）。

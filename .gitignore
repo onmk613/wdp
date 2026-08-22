@@ -4,3 +4,4 @@
 .zcode/
 vendor/
 bin/
+.audit-cache/

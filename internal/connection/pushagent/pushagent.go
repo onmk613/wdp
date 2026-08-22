@@ -25,6 +25,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -37,10 +38,11 @@ import (
 	"time"
 
 	"wdp/internal/ca"
-	"wdp/internal/config"
 	"wdp/internal/connection"
 	"wdp/internal/connection/agentconn"
 	"wdp/internal/connection/sshconn"
+	"wdp/internal/i18n"
+	"wdp/internal/inventory"
 	"wdp/internal/model"
 	"wdp/internal/shellquote"
 )
@@ -55,18 +57,19 @@ var certStore struct {
 }
 
 // certMaterial 返回当前代材料与代数（首次调用生成；配置轮换且已到期先换新）。
-func certMaterial() (*ca.EphemeralCerts, uint64, error) {
+// dc 为组合根注入的默认值（轮换周期取自其中；nil = 不轮换 + 内置端口）。
+func certMaterial(dc *connection.Defaults) (*ca.EphemeralCerts, uint64, error) {
 	certStore.Lock()
 	defer certStore.Unlock()
-	if err := refreshDueLocked(); err != nil {
+	if err := refreshDueLocked(dc); err != nil {
 		return nil, 0, err
 	}
 	return certStore.certs, certStore.gen, nil
 }
 
 // refreshDueLocked 材料缺失或超过轮换周期时重新生成（调用方持有锁）。
-func refreshDueLocked() error {
-	interval := config.Current().AgentCertRotateMin()
+func refreshDueLocked(dc *connection.Defaults) error {
+	interval := dc.AgentCertRotateMinOrDefault()
 	if certStore.certs != nil &&
 		(interval <= 0 || time.Since(certStore.at) <= time.Duration(interval)*time.Minute) {
 		return nil
@@ -80,14 +83,17 @@ func refreshDueLocked() error {
 }
 
 func init() {
-	connection.RegisterFactory("push", func(h *model.Host) (connection.Connection, error) {
-		return New(h), nil
+	// 本连接类型的主机条目专属键（inventory 白名单经 blank-import 注册）
+	inventory.RegisterHostKeys("binary_path", "keep_agent")
+	connection.RegisterFactory("push", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
+		return New(h, dc), nil
 	})
 }
 
 // Conn 是 push 临时 agent 连接。
 type Conn struct {
 	host      *model.Host
+	dc        *connection.Defaults // 组合根注入的默认值（nil = 内置默认）
 	ssh       *sshconn.Conn
 	agent     *agentconn.Conn
 	remoteBin string
@@ -99,22 +105,27 @@ type Conn struct {
 }
 
 // New 创建 push 连接（未自举）。
-func New(h *model.Host) *Conn {
-	return &Conn{host: h, ssh: sshconn.New(h)}
+func New(h *model.Host, dc *connection.Defaults) *Conn {
+	return &Conn{host: h, dc: dc, ssh: sshconn.New(h)}
 }
 
-// Connect 自举临时 agent；失败回退纯 SSH。
+// Connect 自举临时 agent；失败回退纯 SSH。幂等：自举成功后重复调用
+// 无副作用（接口契约要求；二次自举会在远端泄漏首个 agent 进程）。
 func (c *Conn) Connect(ctx context.Context) error {
+	if c.started {
+		return nil
+	}
 	if err := c.ssh.Connect(ctx); err != nil {
 		return err
 	}
 	if err := c.bootstrap(ctx); err != nil {
 		c.cleanupArtifacts(ctx)
-		fmt.Fprintf(os.Stderr, "[push] 主机 %s 临时 agent 自举失败，回退纯 SSH: %v\n", c.host.Name, err)
+		fmt.Fprintf(os.Stderr, i18n.T("[push] host %s temporary agent bootstrap failed, falling back to plain SSH: %v\n", "[push] 主机 %s 临时 agent 自举失败，回退纯 SSH: %v\n"), c.host.Name, err)
 		return nil // 降级：保留 SSH 连接继续执行
 	}
 	c.started = true
-	// 自举完成，SSH 连接使命结束（清理由 agent 自删 + shutdown 完成）
+	// 自举完成，SSH 连接使命结束（清理由 agent 自删 + shutdown 完成；
+	// Close 阶段的兜底清理会按需重连）
 	_ = c.ssh.Close()
 	return nil
 }
@@ -125,34 +136,39 @@ func (c *Conn) bootstrap(ctx context.Context) error {
 	if bin == "" {
 		exe, err := os.Executable()
 		if err != nil {
-			return fmt.Errorf("定位自身二进制失败: %w", err)
+			return fmt.Errorf(i18n.T("failed to locate own binary: %w", "定位自身二进制失败: %w"), err)
 		}
 		bin = exe
 	}
 	f, err := os.Open(bin)
 	if err != nil {
-		return fmt.Errorf("读取二进制失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to read binary: %w", "读取二进制失败: %w"), err)
 	}
 	defer f.Close()
 
-	certs, gen, err := certMaterial()
+	certs, gen, err := certMaterial(c.dc)
 	if err != nil {
-		return fmt.Errorf("生成临时 mTLS 材料失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to generate ephemeral mTLS material: %w", "生成临时 mTLS 材料失败: %w"), err)
 	}
 
-	suffix, _ := randToken(8)
+	suffix, err := randToken(8)
+	if err != nil {
+		// 熵源失败时随机后缀为空串，全部材料落到可预测路径（/tmp/.wdp-agent-），
+		// 违背不可预测命名目标，直接失败
+		return fmt.Errorf(i18n.T("failed to generate random suffix: %w", "生成随机后缀失败: %w"), err)
+	}
 	c.remoteBin = fmt.Sprintf("/tmp/.wdp-agent-%s", suffix)
 	if err := c.ssh.UploadFile(ctx, c.remoteBin, f, 0o755); err != nil {
-		return fmt.Errorf("上传二进制失败: %w", err)
+		return fmt.Errorf(i18n.T("failed to upload binary: %w", "上传二进制失败: %w"), err)
 	}
 	if err := c.uploadCerts(ctx, certs); err != nil {
 		return err
 	}
 
-	// 端口序列：显式指定则只用它；默认端口（wdp.cfg [agent].port）+ 随机重试
+	// 端口序列：显式指定则只用它；默认端口（组合根注入的 [agent].port）+ 随机重试
 	ports := []int{c.host.AgentPort}
 	if c.host.AgentPort == 0 {
-		ports = []int{config.Current().AgentPort(), randomPort(), randomPort()}
+		ports = []int{c.dc.AgentPortOrDefault(), randomPort(), randomPort()}
 	}
 	var lastErr error
 	for _, port := range ports {
@@ -162,7 +178,7 @@ func (c *Conn) bootstrap(ctx context.Context) error {
 			continue
 		}
 		// 直连健康检查（真端口开放验证）
-		ac := agentconn.New(c.agentHost(port, certs))
+		ac := agentconn.New(c.agentHost(port, certs), c.dc)
 		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err := ac.Connect(checkCtx)
 		cancel()
@@ -171,7 +187,7 @@ func (c *Conn) bootstrap(ctx context.Context) error {
 			c.port, c.gen = port, gen
 			return nil
 		}
-		lastErr = fmt.Errorf("端口 %d 健康检查失败: %w", port, err)
+		lastErr = fmt.Errorf(i18n.T("health check on port %d failed: %w", "端口 %d 健康检查失败: %w"), port, err)
 		c.killAgent(ctx)
 	}
 	return lastErr
@@ -190,7 +206,7 @@ func (c *Conn) uploadCerts(ctx context.Context, certs *ca.EphemeralCerts) error 
 	}
 	for _, f := range files {
 		if err := c.ssh.UploadFile(ctx, f.dst, bytes.NewReader(f.data), f.mode); err != nil {
-			return fmt.Errorf("上传 mTLS 材料失败: %w", err)
+			return fmt.Errorf(i18n.T("failed to upload mTLS material: %w", "上传 mTLS 材料失败: %w"), err)
 		}
 	}
 	return nil
@@ -210,7 +226,7 @@ func (c *Conn) startAgent(ctx context.Context, port int) error {
 		return err
 	}
 	if out.Code != 0 {
-		return fmt.Errorf("启动失败: %s", firstLine(out.Stderr))
+		return fmt.Errorf(i18n.T("failed to start: %s", "启动失败: %s"), firstLine(out.Stderr))
 	}
 	time.Sleep(300 * time.Millisecond) // 等监听就绪
 	return nil
@@ -260,11 +276,11 @@ func (c *Conn) agentHost(port int, certs *ca.EphemeralCerts) *model.Host {
 // 仓库到期则换新代信任链；本连接落后于当前代则迁移。失败时本次任务报错，
 // 但连接保留旧代记录，下次任务自动重试迁移（自愈）。
 func (c *Conn) rotateIfDue(ctx context.Context) error {
-	if config.Current().AgentCertRotateMin() <= 0 {
+	if c.dc.AgentCertRotateMinOrDefault() <= 0 {
 		return nil
 	}
 	certStore.Lock()
-	if err := refreshDueLocked(); err != nil {
+	if err := refreshDueLocked(c.dc); err != nil {
 		certStore.Unlock()
 		return err
 	}
@@ -294,7 +310,7 @@ func (c *Conn) migrateCerts(ctx context.Context, certs *ca.EphemeralCerts, gen u
 			lastErr = err
 			continue
 		}
-		ac := agentconn.New(c.agentHost(port, certs))
+		ac := agentconn.New(c.agentHost(port, certs), c.dc)
 		checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		err := ac.Connect(checkCtx)
 		cancel()
@@ -304,24 +320,45 @@ func (c *Conn) migrateCerts(ctx context.Context, certs *ca.EphemeralCerts, gen u
 			_ = c.ssh.Close() // 迁移完毕释放 SSH（与自举后行为一致）
 			return nil
 		}
-		lastErr = fmt.Errorf("端口 %d 健康检查失败: %w", port, err)
+		lastErr = fmt.Errorf(i18n.T("health check on port %d failed: %w", "端口 %d 健康检查失败: %w"), port, err)
 	}
 	_ = c.ssh.Close()
 	return fmt.Errorf("证书轮换失败: %w", lastErr)
 }
 
 // Close 关闭：shutdown 临时 agent（自删二进制与证书），keep_agent 时保留。
+// shutdown 失败（agent 假死/网络闪断）时重连 SSH 兜底杀进程并清理产物，
+// 否则目标机会残留运行中的 agent、二进制与私钥。
 func (c *Conn) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock() // 与 Exec/迁移路径串行：防止关闭与在途任务竞态
 	if c.started && c.agent != nil && !c.host.KeepAgent {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = c.agent.Shutdown(ctx)
+		err := c.agent.Shutdown(ctx)
+		cancel()
+		if err != nil {
+			c.shutdownFallback()
+		}
 	}
 	c.agent = nil
 	if c.ssh != nil {
 		_ = c.ssh.Close()
 	}
 	return nil
+}
+
+// shutdownFallback shutdown 失败后的 SSH 兜底清理（独立限时 ctx；
+// 重连 → 杀进程 → 删产物，全部 best-effort，失败时告警残留风险）。
+func (c *Conn) shutdownFallback() {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := c.ssh.Connect(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, i18n.T("[push] host %s agent shutdown failed and SSH reconnect failed; agent process/binary/certs may remain on the target\n", "[push] 主机 %s agent 关闭失败且 SSH 重连失败，目标机可能残留 agent 进程/二进制/证书\n"), c.host.Name)
+		return
+	}
+	c.killAgent(ctx)
+	c.cleanupArtifacts(ctx)
+	_ = c.ssh.Close()
 }
 
 // Hostname 返回主机名。
@@ -389,8 +426,13 @@ func randToken(n int) (string, error) {
 }
 
 func randomPort() int {
+	// crypto/rand 取端口，不可预测（时间戳端口可被同网段探测者提前抢占/扫描）；
 	// 避开常见服务端口段
-	return 20000 + int(time.Now().UnixNano()%40000)
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return 20000 + int(time.Now().UnixNano()%40000) // 极端退化：熵源失败回退时间戳
+	}
+	return 20000 + int(binary.LittleEndian.Uint32(b[:]))%40000
 }
 
 func firstLine(s string) string {

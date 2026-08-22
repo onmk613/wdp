@@ -33,7 +33,7 @@ func (c *slowConn) DownloadFile(context.Context, string, io.Writer) error       
 // 8 台主机各 120ms 握手，串行耗时约 960ms，并行应远小于此。
 func TestManagerConcurrentHandshake(t *testing.T) {
 	var inFlight, maxInFlight atomic.Int64
-	RegisterFactory("slowtest", func(h *model.Host) (Connection, error) {
+	RegisterFactory("slowtest", func(h *model.Host, dc *Defaults) (Connection, error) {
 		cur := inFlight.Add(1)
 		for {
 			m := maxInFlight.Load()
@@ -77,7 +77,7 @@ func TestManagerConcurrentHandshake(t *testing.T) {
 
 // TestManagerSameHostDedup 并发请求同一主机只应保留一条连接，且返回同一实例。
 func TestManagerSameHostDedup(t *testing.T) {
-	RegisterFactory("deduptest", func(h *model.Host) (Connection, error) {
+	RegisterFactory("deduptest", func(h *model.Host, dc *Defaults) (Connection, error) {
 		return &slowConn{name: h.Name}, nil
 	})
 
@@ -111,7 +111,7 @@ func TestManagerSameHostDedup(t *testing.T) {
 
 // TestManagerClosedGetAfterClose 关闭后 Get 报错；关闭前已完成的连接被关闭。
 func TestManagerClosedGetAfterClose(t *testing.T) {
-	RegisterFactory("closedtest", func(h *model.Host) (Connection, error) {
+	RegisterFactory("closedtest", func(h *model.Host, dc *Defaults) (Connection, error) {
 		return &slowConn{name: h.Name}, nil
 	})
 	m := NewManager()

@@ -110,7 +110,7 @@ func TestFileRoundTrip(t *testing.T) {
 func TestAgentConnRoundTrip(t *testing.T) {
 	ts, _ := startAgent(t)
 	host := &model.Host{Name: "t", Conn: "agent", AgentURL: ts.URL, Address: "127.0.0.1"}
-	conn := agentconn.New(host)
+	conn := agentconn.New(host, nil)
 	if err := conn.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}

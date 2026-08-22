@@ -9,28 +9,21 @@ import (
 	"strings"
 	"time"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
+	"wdp/internal/module"
 )
 
 // Reversibility 是应用包的可逆性评估（部署前提示与确认的依据）。
 type Reversibility struct {
-	Reversible   int      // 可回滚任务数（copy/template/file：快照恢复 + 可 absent 卸载）
+	Reversible   int      // 全量可回滚任务数（copy/template/file：快照恢复 + 可 absent 卸载）
+	Partial      int      // 部分可回滚任务数（unarchive：仅删除新建目录，覆盖已有文件不恢复）
 	ReadOnly     int      // 只读任务数（setup）
 	Irreversible int      // 不可逆任务数（shell/script/package/service：无法自动回滚）
 	Examples     []string // 不可逆任务示例（标签，最多 5 个）
 	HasUninstall bool     // 提供 uninstall.yaml
 	HasStatus    bool     // 提供 status.yaml
 	AutoRollback bool     // 任一 play 配置 strategy.auto_rollback
-}
-
-// 可逆模块：变更经快照登记可自动回滚，且可用 file absent 逆操作卸载。
-var reversibleModules = map[string]bool{
-	"copy": true, "template": true, "file": true,
-}
-
-// 只读模块：不产生变更。
-var readOnlyModules = map[string]bool{
-	"setup": true,
 }
 
 // Analyze 评估 chart 部署任务的可逆性（含子 chart 递归）。
@@ -74,11 +67,15 @@ func (r *Reversibility) classify(prefix string, t *model.Task) {
 		return
 	}
 	label := prefix + t.Label()
+	// 可逆性由模块自声明的 RollbackProvider/ReadOnlyProvider 能力决定
+	// （未声明能力的模块保守视为不可逆）
 	switch {
-	case reversibleModules[t.Module]:
-		r.Reversible++
-	case readOnlyModules[t.Module]:
+	case module.IsReadOnlyModule(t.Module):
 		r.ReadOnly++
+	case module.RollbackCapabilityOf(t.Module) == module.RollbackFull:
+		r.Reversible++
+	case module.RollbackCapabilityOf(t.Module) == module.RollbackPartial:
+		r.Partial++
 	default:
 		r.Irreversible++
 		r.Examples = append(r.Examples, label+" ("+t.Module+")")
@@ -88,8 +85,11 @@ func (r *Reversibility) classify(prefix string, t *model.Task) {
 // Summary 渲染人读评估摘要（部署前提示用）。
 func (r *Reversibility) Summary() string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "可逆 %d（copy/template/file）· 只读 %d · 不可逆 %d",
-		r.Reversible, r.ReadOnly, r.Irreversible)
+	fmt.Fprintf(&sb, "可逆 %d（copy/template/file）", r.Reversible)
+	if r.Partial > 0 {
+		fmt.Fprintf(&sb, " · 部分可逆 %d（unarchive 仅删除新建目录，覆盖已有文件不恢复）", r.Partial)
+	}
+	fmt.Fprintf(&sb, " · 只读 %d · 不可逆 %d", r.ReadOnly, r.Irreversible)
 	if len(r.Examples) > 0 {
 		fmt.Fprintf(&sb, "，如: %s", strings.Join(r.Examples, "、"))
 	}
@@ -120,16 +120,16 @@ func (c *Chart) PhasePlays(phase string) ([]*model.Play, error) {
 		return c.Deploy, nil
 	case "uninstall":
 		if c.Uninstall == nil {
-			return nil, fmt.Errorf("chart %s 未提供 uninstall.yaml，不可卸载", c.Meta.Name)
+			return nil, fmt.Errorf(i18n.T("chart %s does not provide uninstall.yaml and cannot be uninstalled", "chart %s 未提供 uninstall.yaml，不可卸载"), c.Meta.Name)
 		}
 		return c.Uninstall, nil
 	case "status":
 		if c.Status == nil {
-			return nil, fmt.Errorf("chart %s 未提供 status.yaml", c.Meta.Name)
+			return nil, fmt.Errorf(i18n.T("chart %s does not provide status.yaml", "chart %s 未提供 status.yaml"), c.Meta.Name)
 		}
 		return c.Status, nil
 	default:
-		return nil, fmt.Errorf("未知 --phase %q（可选: deploy/uninstall/status）", phase)
+		return nil, fmt.Errorf(i18n.T("unknown --phase %q (options: deploy/uninstall/status)", "未知 --phase %q（可选: deploy/uninstall/status）"), phase)
 	}
 }
 
@@ -147,21 +147,36 @@ func (c *Chart) ValidateRequired(values map[string]any) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf("缺少必需配置项（chart.yaml required）: %s（用 -f envs/*.yaml 或 --set 提供）",
+		return fmt.Errorf(i18n.T("missing required config items (chart.yaml required): %s (provide via -f envs/*.yaml or --set)", "缺少必需配置项（chart.yaml required）: %s（用 -f envs/*.yaml 或 --set 提供）"),
 			strings.Join(missing, ", "))
 	}
 	return nil
 }
 
-// pathExists 按点路径检查 values 中是否存在该键。
+// pathExists 按点路径检查 values 中是否存在该键（解析复用 --set 的
+// parsePath，支持下标写法 a.b[0]——此前 "b[0]" 整段当键查找会误报缺失）。
 func pathExists(values map[string]any, path string) bool {
+	segs, err := parsePath(path)
+	if err != nil || len(segs) == 0 {
+		return false
+	}
 	cur := values
-	for i, seg := range strings.Split(path, ".") {
-		v, ok := cur[seg]
-		if !ok || v == nil {
-			return false
+	for i, s := range segs {
+		var v any
+		if !s.hasID {
+			c, ok := cur[s.key]
+			if !ok || c == nil {
+				return false
+			}
+			v = c
+		} else {
+			list, ok := cur[s.key].([]any)
+			if !ok || s.idx >= len(list) || list[s.idx] == nil {
+				return false
+			}
+			v = list[s.idx]
 		}
-		if i == len(strings.Split(path, "."))-1 {
+		if i == len(segs)-1 {
 			return true
 		}
 		next, ok := v.(map[string]any)

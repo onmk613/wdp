@@ -46,7 +46,7 @@ func newScanSshCmd() *cobra.Command {
 			var hosts []*model.Host
 			if len(fromHosts) > 0 {
 				var err error
-				hosts, err = sshconn.HostsFromSpecs(fromHosts, knownHosts)
+				hosts, err = sshconn.HostsFromSpecs(fromHosts, knownHosts, connDefaults())
 				if err != nil {
 					return err
 				}

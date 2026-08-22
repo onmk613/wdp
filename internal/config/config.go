@@ -19,6 +19,10 @@
 //
 //	[agent]
 //	port = 7602
+//
+//	[transfer]
+//	max_download_mb = 2048   # get_url 下载响应体上限（MiB）
+//	max_extract_mb = 2048    # chart tgz 解包总量上限（MiB）
 package config
 
 import (
@@ -35,6 +39,13 @@ type Config struct {
 	Output    OutputConfig
 	SSH       SSHConfig
 	Agent     AgentConfig
+	Transfer  TransferConfig
+}
+
+// TransferConfig 是文件传输相关上限。
+type TransferConfig struct {
+	MaxDownloadMB int `toml:"max_download_mb"` // get_url 下载响应体上限 MiB（0 = 默认 2048）
+	MaxExtractMB  int `toml:"max_extract_mb"`  // chart tgz 解包总量上限 MiB（0 = 默认 2048）
 }
 
 // InventoryConfig 是 inventory 相关默认值。
@@ -164,4 +175,20 @@ func (c *Config) Color() bool {
 		return *c.Output.Color
 	}
 	return true
+}
+
+// MaxDownloadBytes 归一化 get_url 下载响应体上限（字节；0 = 内置默认 2GiB）。
+func (c *Config) MaxDownloadBytes() int64 {
+	if c.Transfer.MaxDownloadMB > 0 {
+		return int64(c.Transfer.MaxDownloadMB) << 20
+	}
+	return 2 << 30
+}
+
+// MaxExtractBytes 归一化 chart tgz 解包总量上限（字节；0 = 内置默认 2GiB）。
+func (c *Config) MaxExtractBytes() int64 {
+	if c.Transfer.MaxExtractMB > 0 {
+		return int64(c.Transfer.MaxExtractMB) << 20
+	}
+	return 2 << 30
 }

@@ -13,12 +13,13 @@ import (
 
 	"github.com/cyphar/filepath-securejoin"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
 // Record 是一次部署记录。
 type Record struct {
-	ID        string                  `json:"id"` // <chart>-<unix>
+	ID        string                  `json:"id"` // <chart>-<unixnano>
 	Time      time.Time               `json:"time"`
 	Chart     string                  `json:"chart,omitempty"`
 	Version   string                  `json:"version,omitempty"`
@@ -55,18 +56,46 @@ func Save(rec *Record) (string, error) {
 	if rec.Time.IsZero() {
 		rec.Time = time.Now()
 	}
-	rec.ID = fmt.Sprintf("%s-%d", name, rec.Time.Unix())
+	// 纳秒粒度 ID：秒级粒度下同名 chart 同秒并发部署会互相覆盖审计记录；
+	// 配合 O_EXCL 创建，冲突（同纳秒）时追加序号重试
+	rec.ID = fmt.Sprintf("%s-%d", name, rec.Time.UnixNano())
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return "", err
 	}
 	// 记录路径经 securejoin 约束在记录目录内: ID 源自 chart 名,
 	// 含 ../ 的名字被收敛为目录内路径, 不会越出 releases 写文件.
-	path, err := securejoin.SecureJoin(dir, rec.ID+".json")
-	if err != nil {
-		return "", err
+	for attempt := 0; ; attempt++ {
+		id := rec.ID
+		if attempt > 0 {
+			id = fmt.Sprintf("%s-%d", rec.ID, attempt)
+		}
+		path, err := securejoin.SecureJoin(dir, id+".json")
+		if err != nil {
+			return "", err
+		}
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if os.IsExist(err) {
+			continue // 极小概率的同名冲突，追加序号重试
+		}
+		if err != nil {
+			return "", err
+		}
+		// 完整写入后无原子性问题（O_EXCL 新文件 + 单次写入），fsync 防宕机截断
+		if _, werr := f.Write(data); werr != nil {
+			f.Close()
+			return "", werr
+		}
+		if werr := f.Sync(); werr != nil {
+			f.Close()
+			return "", werr
+		}
+		if werr := f.Close(); werr != nil {
+			return "", werr
+		}
+		rec.ID = id
+		return id, nil
 	}
-	return rec.ID, os.WriteFile(path, data, 0o600)
 }
 
 // List 列出记录（新在前），chartFilter 非空时按 chart 名前缀过滤。
@@ -113,7 +142,7 @@ func Load(id string) (*Record, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("记录 %s 不存在", id)
+		return nil, fmt.Errorf(i18n.T("record %s does not exist", "记录 %s 不存在"), id)
 	}
 	var rec Record
 	if err := json.Unmarshal(data, &rec); err != nil {
@@ -148,9 +177,9 @@ func diffValues(prefix string, a, b map[string]any, out *[]string) {
 		bv, bok := b[k]
 		switch {
 		case !aok:
-			*out = append(*out, fmt.Sprintf("+ %s: %v（新增）", path, bv))
+			*out = append(*out, fmt.Sprintf(i18n.T("+ %s: %v (added)", "+ %s: %v（新增）"), path, bv))
 		case !bok:
-			*out = append(*out, fmt.Sprintf("- %s: %v（删除）", path, av))
+			*out = append(*out, fmt.Sprintf(i18n.T("- %s: %v (removed)", "- %s: %v（删除）"), path, av))
 		default:
 			am, aIsMap := av.(map[string]any)
 			bm, bIsMap := bv.(map[string]any)
@@ -164,4 +193,14 @@ func diffValues(prefix string, a, b map[string]any, out *[]string) {
 			}
 		}
 	}
+	// 输出按路径排序：map 迭代顺序随机会让同一对记录的 diff 行序每次不同，
+	// 无法用于稳定的回归对比
+	sort.Slice(*out, func(i, j int) bool {
+		pi := strings.Fields((*out)[i])
+		pj := strings.Fields((*out)[j])
+		if len(pi) > 1 && len(pj) > 1 {
+			return pi[1] < pj[1]
+		}
+		return (*out)[i] < (*out)[j]
+	})
 }

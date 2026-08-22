@@ -1,9 +1,11 @@
 package playbook
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -20,7 +22,7 @@ func toStringMap(v any) (map[string]string, error) {
 	case map[string]string:
 		return x, nil
 	default:
-		return nil, fmt.Errorf("需要 map 类型，实际 %T", v)
+		return nil, fmt.Errorf(i18n.T("expected map type, got %T", "需要 map 类型，实际 %T"), v)
 	}
 }
 
@@ -36,14 +38,14 @@ func toAnyMap(v any) (map[string]any, error) {
 		}
 		return out, nil
 	default:
-		return nil, fmt.Errorf("需要 map 类型，实际 %T", v)
+		return nil, fmt.Errorf(i18n.T("expected map type, got %T", "需要 map 类型，实际 %T"), v)
 	}
 }
 
 func toList(v any, what string) ([]any, error) {
 	l, ok := v.([]any)
 	if !ok {
-		return nil, fmt.Errorf("%s 必须是列表，实际 %T", what, v)
+		return nil, fmt.Errorf(i18n.T("%s must be a list, got %T", "%s 必须是列表，实际 %T"), what, v)
 	}
 	return l, nil
 }
@@ -56,7 +58,7 @@ func toAnyList(v any, what string) ([]any, error) {
 		// 单个字符串项
 		return []any{x}, nil
 	default:
-		return nil, fmt.Errorf("%s 必须是列表，实际 %T", what, v)
+		return nil, fmt.Errorf(i18n.T("%s must be a list, got %T", "%s 必须是列表，实际 %T"), what, v)
 	}
 }
 
@@ -76,15 +78,15 @@ func parseSerial(v any) (string, error) {
 			tokens = append(tokens, strings.TrimSpace(fmt.Sprint(it)))
 		}
 	default:
-		return "", fmt.Errorf("需要整数、\"N%%\" 或二者的列表，实际 %T", v)
+		return "", fmt.Errorf(i18n.T("expected an integer, \"N%%\", or a list of them, got %T", "需要整数、\"N%%\" 或二者的列表，实际 %T"), v)
 	}
 	for _, t := range tokens {
 		if t == "" {
-			return "", fmt.Errorf("存在空分批表达式")
+			return "", errors.New(i18n.T("empty batch expression present", "存在空分批表达式"))
 		}
 		body := strings.TrimSuffix(t, "%")
 		if body == "" || strings.Trim(body, "0123456789") != "" {
-			return "", fmt.Errorf("无法解析分批表达式 %q（可用: 5 / \"10%%\" / \"5,10,20\"）", t)
+			return "", fmt.Errorf(i18n.T("cannot parse batch expression %q (use: 5 / \"10%%\" / \"5,10,20\")", "无法解析分批表达式 %q（可用: 5 / \"10%%\" / \"5,10,20\"）"), t)
 		}
 	}
 	return strings.Join(tokens, ","), nil
@@ -111,7 +113,7 @@ func toInt(v any) int {
 func parseStrategy(v any) (*model.Strategy, error) {
 	sm, ok := v.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf("必须是 map（type/batch/gate/auto_rollback）")
+		return nil, errors.New(i18n.T("must be a map (type/batch/gate/auto_rollback)", "必须是 map（type/batch/gate/auto_rollback）"))
 	}
 	st := &model.Strategy{Type: "rolling"}
 	if t, ok := sm["type"]; ok {
@@ -120,7 +122,7 @@ func parseStrategy(v any) (*model.Strategy, error) {
 	switch st.Type {
 	case "linear", "rolling", "canary":
 	default:
-		return nil, fmt.Errorf("不支持的 type %q（可选: linear/rolling/canary）", st.Type)
+		return nil, fmt.Errorf(i18n.T("unsupported type %q (options: linear/rolling/canary)", "不支持的 type %q（可选: linear/rolling/canary）"), st.Type)
 	}
 	if b, ok := sm["batch"]; ok {
 		st.Batch = fmt.Sprint(b)
@@ -135,14 +137,14 @@ func parseStrategy(v any) (*model.Strategy, error) {
 	if g, ok := sm["gate"]; ok {
 		gm, ok := g.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("gate 必须是 map（shell/until/retries/delay）")
+			return nil, errors.New(i18n.T("gate must be a map (shell/until/retries/delay)", "gate 必须是 map（shell/until/retries/delay）"))
 		}
 		gate := &model.Task{Name: "health-gate", Module: "shell"}
 		if s, ok := gm["shell"]; ok {
 			gate.FreeForm = fmt.Sprint(s)
 		}
 		if gate.FreeForm == "" {
-			return nil, fmt.Errorf("gate 需要 shell（健康检查命令）")
+			return nil, errors.New(i18n.T("gate requires shell (health check command)", "gate 需要 shell（健康检查命令）"))
 		}
 		if u, ok := gm["until"]; ok {
 			gate.Until = fmt.Sprint(u)

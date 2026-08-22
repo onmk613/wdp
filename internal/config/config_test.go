@@ -88,3 +88,17 @@ func TestLoadBadTOML(t *testing.T) {
 		t.Fatal("坏 TOML 应报错")
 	}
 }
+
+// TestTransferLimits [transfer] 段归一化：0 = 内置默认 2GiB，显式 MiB 值换算字节。
+func TestTransferLimits(t *testing.T) {
+	current = Config{}
+	c := Current()
+	if c.MaxDownloadBytes() != 2<<30 || c.MaxExtractBytes() != 2<<30 {
+		t.Fatalf("默认上限应为 2GiB: %d/%d", c.MaxDownloadBytes(), c.MaxExtractBytes())
+	}
+	current = Config{Transfer: TransferConfig{MaxDownloadMB: 100, MaxExtractMB: 512}}
+	c = Current()
+	if c.MaxDownloadBytes() != 100<<20 || c.MaxExtractBytes() != 512<<20 {
+		t.Fatalf("自定义上限换算错误: %d/%d", c.MaxDownloadBytes(), c.MaxExtractBytes())
+	}
+}

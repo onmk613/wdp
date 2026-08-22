@@ -1,0 +1,62 @@
+# wdp CI：质量门禁（build/vet/gofmt/tidy/race/golangci-lint）+ 安全扫描。
+# 对含 CA/SSH/root-agent 原语的工具，govulncheck 与回归测试是硬性要求。
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Gofmt（输出差异即失败）
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::以下文件未通过 gofmt:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go mod tidy（产生差异即失败）
+        run: |
+          go mod tidy
+          if ! git diff --exit-code go.mod go.sum; then
+            echo "::error::go.mod/go.sum 与代码不同步，请运行 go mod tidy"
+            exit 1
+          fi
+
+      - name: Test（含竞态检测）
+        run: go test -race -count=1 ./...
+
+      - name: golangci-lint（配置见 .golangci.yml）
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1 run
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Govulncheck（已知漏洞扫描）
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

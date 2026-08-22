@@ -190,7 +190,7 @@ func TestParseHostSpec(t *testing.T) {
 		{"host:22:33", "", 0, true},
 	}
 	for _, c := range cases {
-		h, err := parseHostSpec(c.spec)
+		h, err := parseHostSpec(c.spec, nil)
 		if c.wantErr {
 			if err == nil {
 				t.Errorf("%q 应报错，得到 %+v", c.spec, h)
@@ -243,7 +243,7 @@ func TestHostsFromKnownHostsAll(t *testing.T) {
 	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	hosts, err := hostsFromKnownHosts(path)
+	hosts, err := hostsFromKnownHosts(path, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,16 +269,16 @@ func TestHostsFromSpecsAll(t *testing.T) {
 	if err := os.WriteFile(path, []byte("10.0.0.11 "+testKeyA+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	hosts, err := HostsFromSpecs([]string{"all"}, path)
+	hosts, err := HostsFromSpecs([]string{"all"}, path, nil)
 	if err != nil || len(hosts) != 1 || hosts[0].Address != "10.0.0.11" {
 		t.Fatalf("all 应展开为 known_hosts 主机: %+v, err=%v", hosts, err)
 	}
-	hosts, err = HostsFromSpecs([]string{"10.0.0.2:2222", "10.0.0.3"}, path)
+	hosts, err = HostsFromSpecs([]string{"10.0.0.2:2222", "10.0.0.3"}, path, nil)
 	if err != nil || len(hosts) != 2 ||
 		hosts[0].Port != 2222 || hosts[1].Port != 22 {
 		t.Fatalf("多个主机应按字面解析: %+v, err=%v", hosts, err)
 	}
-	if _, err := HostsFromSpecs([]string{"bad:spec:x"}, path); err == nil {
+	if _, err := HostsFromSpecs([]string{"bad:spec:x"}, path, nil); err == nil {
 		t.Fatal("非法主机格式应报错")
 	}
 }

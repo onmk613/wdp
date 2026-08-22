@@ -18,6 +18,9 @@ type CopyModule struct{}
 // Name 模块名。
 func (m *CopyModule) Name() string { return "copy" }
 
+// RollbackCapability 变更经快照登记可自动回滚，且可用 file absent 逆操作卸载。
+func (m *CopyModule) RollbackCapability() RollbackCapability { return RollbackFull }
+
 // Desc 模块说明。
 func (m *CopyModule) Desc() string {
 	return i18n.T("distribute local files or content to remote hosts", "分发本地文件或 content 内容到远端")
@@ -27,15 +30,15 @@ func (m *CopyModule) Desc() string {
 func (m *CopyModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("copy 需要 dest 参数")
+		return Fail("%s", i18n.T("copy requires a dest parameter", "copy 需要 dest 参数"))
 	}
 	content, _ := argStr(args, "content")
 	src, _ := argStr(args, "src")
 	if content != "" && src != "" {
-		return Fail("copy 的 content 与 src 只能二选一")
+		return Fail("%s", i18n.T("copy accepts either content or src, not both", "copy 的 content 与 src 只能二选一"))
 	}
 	if content == "" && src == "" {
-		return Fail("copy 需要 content 或 src 参数")
+		return Fail("%s", i18n.T("copy requires a content or src parameter", "copy 需要 content 或 src 参数"))
 	}
 	owner, _ := argStr(args, "owner")
 	group, _ := argStr(args, "group")
@@ -47,7 +50,7 @@ func (m *CopyModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 		local := resolveLocal(rc, src)
 		b, err := os.ReadFile(local)
 		if err != nil {
-			return Fail("读取本地文件失败: %v", err)
+			return Fail(i18n.T("failed to read local file: %v", "读取本地文件失败: %v"), err)
 		}
 		data = b
 		if mv, ok := argMode(args, "mode"); ok {
@@ -66,9 +69,9 @@ func (m *CopyModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 	if res != nil {
 		return res // 失败或 check 预估（含 --diff 内容差异）直接透传
 	}
-	msg := fmt.Sprintf("%s 内容一致", dest)
+	msg := fmt.Sprintf(i18n.T("%s content is unchanged", "%s 内容一致"), dest)
 	if changed {
-		msg = fmt.Sprintf("已分发 %d 字节到 %s", len(data), dest)
+		msg = fmt.Sprintf(i18n.T("distributed %d bytes to %s", "已分发 %d 字节到 %s"), len(data), dest)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }

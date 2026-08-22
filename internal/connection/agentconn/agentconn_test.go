@@ -24,13 +24,13 @@ func TestNativeExtract(t *testing.T) {
 	})
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
-	if err := New(&model.Host{AgentURL: ts.URL}).NativeExtract(context.Background(), "/a.tgz", "/opt/a"); err != nil {
+	if err := New(&model.Host{AgentURL: ts.URL}, nil).NativeExtract(context.Background(), "/a.tgz", "/opt/a"); err != nil {
 		t.Fatalf("原生解压应成功: %v", err)
 	}
 
 	old := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(old.Close)
-	err := New(&model.Host{AgentURL: old.URL}).NativeExtract(context.Background(), "/a.tgz", "/opt/a")
+	err := New(&model.Host{AgentURL: old.URL}, nil).NativeExtract(context.Background(), "/a.tgz", "/opt/a")
 	if !errors.Is(err, connection.ErrNativeUnsupported) {
 		t.Fatalf("旧版 agent 应返回不支持哨兵: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestBaseURLAssembly(t *testing.T) {
 		{"TLS方案", &model.Host{Address: "10.0.0.5", TLS: true}, "https://10.0.0.5:7602"},
 	}
 	for _, tc := range cases {
-		if got := New(tc.host).base; got != tc.want {
+		if got := New(tc.host, nil).base; got != tc.want {
 			t.Errorf("%s: base=%q want %q", tc.name, got, tc.want)
 		}
 	}

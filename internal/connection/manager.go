@@ -2,9 +2,11 @@ package connection
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -16,11 +18,17 @@ type Manager struct {
 	closed bool
 
 	connectSem chan struct{} // 并发建连上限（nil 不限）
+	defaults   *Defaults     // 组合根注入的连接默认值（nil = 内置默认）
 }
 
 // NewManager 创建连接管理器（使用注册表工厂，见 NewConnection）。
 func NewManager() *Manager {
 	return &Manager{conns: map[string]Connection{}}
+}
+
+// NewManagerWithDefaults 创建携带显式默认值的管理器（组合根使用）。
+func NewManagerWithDefaults(dc *Defaults) *Manager {
+	return &Manager{conns: map[string]Connection{}, defaults: dc}
 }
 
 // SetConnectConcurrency 设置并发建连上限（应在首次 Get 前调用）。
@@ -36,7 +44,7 @@ func (m *Manager) Get(ctx context.Context, h *model.Host) (Connection, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("连接管理器已关闭")
+		return nil, errors.New(i18n.T("connection manager is closed", "连接管理器已关闭"))
 	}
 	if c, ok := m.conns[h.Name]; ok {
 		m.mu.Unlock()
@@ -56,7 +64,7 @@ func (m *Manager) Get(ctx context.Context, h *model.Host) (Connection, error) {
 
 	// 握手全程不持锁（锁内握手会把并发建连退化成串行，使限流形同虚设）；
 	// 并发下对同一主机的重复建连在落表时收敛，输家关闭自己多余的连接。
-	c, err := NewConnection(h)
+	c, err := NewConnection(h, m.defaults)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +77,7 @@ func (m *Manager) Get(ctx context.Context, h *model.Host) (Connection, error) {
 	if m.closed {
 		m.mu.Unlock()
 		_ = c.Close()
-		return nil, fmt.Errorf("连接管理器已关闭")
+		return nil, errors.New(i18n.T("connection manager is closed", "连接管理器已关闭"))
 	}
 	if old, ok := m.conns[h.Name]; ok { // 双重检查：并发下他人已建
 		m.mu.Unlock()

@@ -18,6 +18,9 @@ type TemplateModule struct{}
 // Name 模块名。
 func (m *TemplateModule) Name() string { return "template" }
 
+// RollbackCapability 变更经快照登记可自动回滚，且可用 file absent 逆操作卸载。
+func (m *TemplateModule) RollbackCapability() RollbackCapability { return RollbackFull }
+
 // Desc 模块说明。
 func (m *TemplateModule) Desc() string {
 	return i18n.T("render Go templates and distribute to remote hosts", "渲染 Go 模板并分发到远端")
@@ -27,15 +30,15 @@ func (m *TemplateModule) Desc() string {
 func (m *TemplateModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	src, ok := argStr(args, "src")
 	if !ok || src == "" {
-		return Fail("template 需要 src 参数")
+		return Fail("%s", i18n.T("template requires a src parameter", "template 需要 src 参数"))
 	}
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("template 需要 dest 参数")
+		return Fail("%s", i18n.T("template requires a dest parameter", "template 需要 dest 参数"))
 	}
 	tpl, err := os.ReadFile(resolveLocal(rc, src))
 	if err != nil {
-		return Fail("读取模板失败: %v", err)
+		return Fail(i18n.T("failed to read template: %v", "读取模板失败: %v"), err)
 	}
 	engine := rc.Engine
 	if engine == nil {
@@ -43,7 +46,7 @@ func (m *TemplateModule) Run(rc *RunContext, args map[string]any, free string) *
 	}
 	rendered, err := engine.Render(string(tpl), rc.Vars)
 	if err != nil {
-		return Fail("模板渲染失败: %v", err)
+		return Fail(i18n.T("template rendering failed: %v", "模板渲染失败: %v"), err)
 	}
 
 	mode := int64(0o644)
@@ -58,9 +61,9 @@ func (m *TemplateModule) Run(rc *RunContext, args map[string]any, free string) *
 	if res != nil {
 		return res
 	}
-	msg := fmt.Sprintf("%s 内容一致", dest)
+	msg := fmt.Sprintf(i18n.T("%s content is unchanged", "%s 内容一致"), dest)
 	if changed {
-		msg = fmt.Sprintf("已渲染 %s 到 %s", src, dest)
+		msg = fmt.Sprintf(i18n.T("rendered %s to %s", "已渲染 %s 到 %s"), src, dest)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }

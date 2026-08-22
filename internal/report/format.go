@@ -5,6 +5,7 @@ import (
 	"io"
 	"sync"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/render"
 )
@@ -51,7 +52,7 @@ func (f *Formatter) HostResult(host string, r *model.TaskResult) {
 	}
 	line, err := f.engine.Render(f.Format, vars)
 	if err != nil {
-		fmt.Fprintf(f.Out, "[format 渲染失败: %v]\n", err)
+		fmt.Fprintf(f.Out, i18n.T("[format render failed: %v]\n", "[format 渲染失败: %v]\n"), err)
 		return
 	}
 	fmt.Fprint(f.Out, line)

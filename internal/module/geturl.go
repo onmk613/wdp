@@ -5,11 +5,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"wdp/internal/i18n"
 )
+
+// maxDownloadBytes 控制端单次下载的响应体上限（与 chart 解包 2GiB 上限对齐）。
+// 无上限时，指向异常/恶意 URL 的下载可在超时窗口内累积数 GB 内存导致 OOM。
+const maxDownloadBytes = 2 << 30
 
 func init() {
 	Register(&GetURLModule{})
@@ -59,16 +64,16 @@ func (m *GetURLModule) Example() string {
 func (m *GetURLModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	url, ok := argStr(args, "url")
 	if !ok || url == "" {
-		return Fail("get_url 需要 url 参数")
+		return Fail("%s", i18n.T("get_url requires a url parameter", "get_url 需要 url 参数"))
 	}
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("get_url 需要 dest 参数")
+		return Fail("%s", i18n.T("get_url requires a dest parameter", "get_url 需要 dest 参数"))
 	}
 	wantSum, _ := argStr(args, "sha256")
 	wantSum = strings.ToLower(strings.TrimSpace(wantSum))
 	if wantSum != "" && !isSHA256Hex(wantSum) {
-		return Fail("sha256 参数应为 64 位十六进制串")
+		return Fail("%s", i18n.T("sha256 parameter must be a 64-character hex string", "sha256 参数应为 64 位十六进制串"))
 	}
 
 	mode := int64(0o644) // 缺省 0644（始终显式下发，覆盖上传缺省）
@@ -80,7 +85,7 @@ func (m *GetURLModule) Run(rc *RunContext, args map[string]any, free string) *Re
 	backup, _ := argBool(args, "backup")
 	timeoutSecs, ok := argSecs(args, "timeout_secs", 30)
 	if !ok || timeoutSecs <= 0 {
-		return Fail("timeout_secs 应为正整数")
+		return Fail("%s", i18n.T("timeout_secs must be a positive integer", "timeout_secs 应为正整数"))
 	}
 	headers, bad := headerMapArg(args, "headers")
 	if bad != nil {
@@ -112,25 +117,36 @@ func (m *GetURLModule) Run(rc *RunContext, args map[string]any, free string) *Re
 	if res != nil {
 		return res // 失败或 check 预估（含 --diff 内容差异）直接透传
 	}
-	msg := fmt.Sprintf("%s 内容一致", dest)
+	msg := fmt.Sprintf(i18n.T("%s content is unchanged", "%s 内容一致"), dest)
 	if changed {
-		msg = fmt.Sprintf("已下载 %s 到 %s", url, dest)
+		msg = fmt.Sprintf(i18n.T("downloaded %s to %s", "已下载 %s 到 %s"), url, dest)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }
 
-// skipDownload 处理远端校验和已一致时的收尾：check 模式仅预估权限变更，
+// skipDownload 处理远端校验和已一致时的收尾：check 模式仅预估属性变更，
 // 实模式校正权限/属主（内容不动，无备份与回滚登记需求）。
+// 属主漂移与权限漂移同权重估/校正（此前 check 漏报属主、实跑修复不报 changed）。
 func (m *GetURLModule) skipDownload(rc *RunContext, dest string, mode int64, owner, group string) *Result {
 	if (owner != "" || group != "") && !rc.Become {
-		return Fail("设置 owner/group 需要 become: true（%s）", dest)
+		return Fail(i18n.T("setting owner/group requires become: true (%s)", "设置 owner/group 需要 become: true（%s）"), dest)
+	}
+	ownerDrift := false
+	if owner != "" || group != "" {
+		co, cg, ok, obad := remoteOwnerGroup(rc, dest)
+		if obad != nil {
+			return obad
+		}
+		ownerDrift = !ok || co != owner || cg != group
 	}
 	if rc.CheckMode {
-		would := false
-		if cur, ok, mbad := remoteMode(rc, dest); mbad == nil && ok && cur != mode {
+		would := ownerDrift
+		if cur, ok, mbad := remoteMode(rc, dest); mbad != nil {
+			return mbad
+		} else if ok && cur != mode {
 			would = true
 		}
-		return &Result{Changed: would, Msg: fmt.Sprintf("[check] %s 内容一致（sha256 匹配）", dest)}
+		return &Result{Changed: would, Msg: fmt.Sprintf(i18n.T("[check] %s content is unchanged (sha256 matches)", "[check] %s 内容一致（sha256 匹配）"), dest)}
 	}
 	changed := false
 	if fixed, bad := chmodIfDiffers(rc, dest, mode); bad != nil {
@@ -138,14 +154,15 @@ func (m *GetURLModule) skipDownload(rc *RunContext, dest string, mode int64, own
 	} else if fixed {
 		changed = true
 	}
-	if (owner != "" || group != "") && rc.Become {
+	if ownerDrift {
 		if bad := chownPath(rc, dest, owner, group); bad != nil {
 			return bad
 		}
+		changed = true
 	}
-	msg := fmt.Sprintf("%s 内容一致（sha256 匹配，跳过下载）", dest)
+	msg := fmt.Sprintf(i18n.T("%s content is unchanged (sha256 matches, download skipped)", "%s 内容一致（sha256 匹配，跳过下载）"), dest)
 	if changed {
-		msg = fmt.Sprintf("%s 权限已校正（内容一致）", dest)
+		msg = fmt.Sprintf(i18n.T("%s attributes corrected (content unchanged)", "%s 属性已校正（内容一致）"), dest)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }
@@ -160,7 +177,7 @@ func (m *GetURLModule) fetch(rc *RunContext, url string, headers map[string]stri
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, Fail("URL 无法解析: %v", err)
+		return nil, Fail(i18n.T("unable to parse URL: %v", "URL 无法解析: %v"), err)
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -168,16 +185,29 @@ func (m *GetURLModule) fetch(rc *RunContext, url string, headers map[string]stri
 	client := &http.Client{Timeout: time.Duration(timeoutSecs) * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, Fail("下载失败 %s: %v", url, err)
+		return nil, Fail(i18n.T("download failed %s: %v", "下载失败 %s: %v"), url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		return nil, Fail("下载失败 %s: HTTP %d", url, resp.StatusCode)
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return nil, Fail(i18n.T("download failed %s: HTTP %d", "下载失败 %s: HTTP %d"), url, resp.StatusCode)
 	}
-	data, err := io.ReadAll(resp.Body)
+	// 响应体上限：RunContext 注入值优先（CLI/配置文件），否则内置默认 2GiB
+	limit := rc.MaxDownloadBytes
+	if limit <= 0 {
+		limit = maxDownloadBytes
+	}
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		if n, perr := strconv.ParseInt(cl, 10, 64); perr == nil && n > limit {
+			return nil, Fail(i18n.T("download failed %s: response body %d bytes exceeds the %d limit", "下载失败 %s: 响应体 %d 字节超过上限 %d"), url, n, limit)
+		}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, Fail("读取响应体失败 %s: %v", url, err)
+		return nil, Fail(i18n.T("failed to read response body %s: %v", "读取响应体失败 %s: %v"), url, err)
+	}
+	if len(data) > int(limit) {
+		return nil, Fail(i18n.T("download failed %s: response body exceeds the %d byte limit (suspected abnormal/malicious URL)", "下载失败 %s: 响应体超过 %d 字节上限（疑似异常/恶意 URL）"), url, limit)
 	}
 	return data, nil
 }
@@ -198,7 +228,7 @@ func headerMapArg(args map[string]any, key string) (map[string]string, *Result) 
 		}
 		return out, nil
 	default:
-		return nil, Fail("%s 参数应为键值映射", key)
+		return nil, Fail(i18n.T("%s parameter must be a key-value mapping", "%s 参数应为键值映射"), key)
 	}
 }
 

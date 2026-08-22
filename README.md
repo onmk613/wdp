@@ -18,7 +18,7 @@ Helm 风格 chart 打包与多环境精准部署。
 |---|---|
 | 控制端环境依赖 | 单静态二进制（交叉编译开箱即用） |
 | 目标端依赖 | SSH 通道仅需 POSIX sh；agent 通道零依赖 |
-| 模板语言复杂度 | Go text/template（sprig 全集 + to_yaml/from_yaml） |
+| 模板语言复杂度 | Go text/template（sprig 白名单 + to_yaml/from_yaml；证书/密钥生成与凭据散列类函数不暴露） |
 | 应用包依赖体系 | chart 子 chart 组合（values 命名空间隔离 + global 共享 + `@版本` 约束） |
 | 每任务重复 SSH 握手 | 连接按主机复用；agent 直连常驻免握手 |
 | 自定义模块扩展成本 | chart 自带脚本模块（`modules/<名>` 可执行文件即模块） |
@@ -76,7 +76,7 @@ ssh target 'wdp agent --listen 0.0.0.0:7602 --ca ca.crt --cert 10.0.0.14.crt \
 **证书安全设计**：
 
 - **CA 私钥加密存储**：`--passphrase`（或 `WDP_CA_PASSPHRASE` 环境变量），
-  PBKDF2-SHA256 十万轮 + AES-256-GCM；CA 设 `PathLen=0` 禁止签发中间 CA
+  PBKDF2-SHA256 六十万轮 + AES-256-GCM；CA 设 `PathLen=0` 禁止签发中间 CA
 - **短周期 + 续期**：叶子证书默认 90 天（`--days` 可调），到期前
   `wdp ca renew --name <n>` 原地续期（保留 SAN/EKU/私钥；`--new-key` 换钥即吊销旧证书）
 - **指纹准许名单（精确吊销）**：agent `--pin-client-fp`（可多次）只接受名单内指纹的
@@ -199,7 +199,8 @@ register 结果在批次间延续（第一批注册的变量第二批可用）�
 ```
 
 - **批次失败或健康门未通过 → 终止后续批次**，`auto_rollback` 时按变更日志逆序回滚该批主机
-- 回滚覆盖文件类变更：copy/template/file/unarchive 新建（删除）与覆盖前快照（恢复）；
+- 回滚覆盖文件类变更：copy/template/file 全量（新建删除 + 覆盖前快照恢复），
+  unarchive 部分可回滚（删除本次新建目录；覆盖已有目录内的文件不恢复快照）；
   shell/package/service/user 等过程性变更无法自动回滚（明确提示）
 - play 正常结束后自动清理目标机上的回滚快照目录（不再残留 /tmp）
 - 与 chart 子任务兼容（父策略对子 chart 任务生效）
@@ -424,7 +425,7 @@ wdp ca init / issue / renew  # mTLS 证书工具（加密 CA / 短周期 / 续�
 wdp scan-ssh <主机模式>            # 采集 SSH 主机指纹到 known_hosts
 wdp release list / show / diff
 wdp agent [--ca/--cert/--key] [--pin-client-fp <指纹>]
-wdp modules [模块名] / version
+wdp modules [模块名]          # 模块列表/详情（版本信息：wdp --version）
 ```
 
 全局 flag（所有子命令继承）：`--config`、`--inventory/-i`（可多次）、`--forks`、
@@ -480,7 +481,11 @@ internal/
                         group_vars/host_vars、模式选择（联合/交集/通配）、动态组
   playbook/             声明式任务编排解析（block/rescue/always/until/hook）
   chart/                chart 加载/values 深合并/lint/package/版本约束子 chart 解析
-  render/               Go text/template 引擎（sprig 全集 + 自有函数 + helpers 命名模板）
+  render/               Go text/template 引擎（sprig 白名单 + 自有函数 + helpers 命名模板）
+  i18n/                 中英双语运行时文案（T(en, zh)，按 locale 自动选择）
+  config/               wdp.cfg 全局默认配置（组合根显式注入各层，无隐式全局读）
+  fmtutil/              终端表格/颜色/打印辅助
+  shellquote/           shell 词法切分与单引号转义（全项目唯一注入防线）
   executor/             编排引擎：forks 并发、when/loop/register/notify/handlers、
                         chart 展开、block 容错、until 轮询、hook、delegate_to/run_once、
                         跨批次变量延续、策略分批/健康门/自动回滚
@@ -501,18 +506,24 @@ internal/
 ## 已知限制与路线图
 
 - push 临时 agent 要求目标机与控制端二进制平台一致（或 `binary_path` 指定预编译产物）
-- become 密码在未启用 mTLS 的常驻 agent 通道经请求体明文传输（对外纳管建议 mTLS）；push 通道全程临时 mTLS 加密
-- `local` 通道忽略 become（本机执行不提权）
+- become 密码在未启用 mTLS 的常驻 agent 通道经请求体明文传输（对外纳管建议 mTLS，
+  连接层会在明文 http + become 密码时打印一次性告警）；push 通道全程临时 mTLS 加密
+- `local` 通道忽略 become（本机执行不提权，首次遇到 become 任务时打印一次性告警）
+- **agent 回环无认证只挡远程访问**：同机其它本地用户仍可调用 `/exec` `/file`
+  （多用户主机务必启用 mTLS；启动时对无认证回环监听打印告警）
+- `mode` 参数仅支持权限位（0..0777）：setuid/setgid/sticky（4755 等）会被显式拒绝
+  （全链路会静默丢弃特殊位产生错误权限），需要特殊位时用 shell 模块 `chmod 4755`
 - `host_key_check` 默认开启：新主机首次连接前需 `wdp scan-ssh <模式>` 采集指纹
   （明确接受风险时可 `host_key_check: false` 关闭）
 - 无 CRL/OCSP：证书吊销依赖指纹名单（`--pin-client-fp`）与短周期轮换（`ca renew --new-key`）
-- 自动回滚覆盖文件类变更（copy/template/file/unarchive）；shell/package/service/user
-  的过程性变更无法自动回滚
+- 自动回滚覆盖文件类变更：copy/template/file 全量，unarchive 部分（仅删除新建目录，
+  覆盖已有文件不恢复）；shell/package/service/user 的过程性变更无法自动回滚；
+  delegate_to 产生的变更按实际执行主机回滚
 - `wait_for` 的端口探测为控制端视角（目标机本地防火墙视角可能不同；需要目标机视角时用 shell + until）
 - `package` 的 `state: latest` 无法精确判定"是否真的升级"，视为 changed
 - `--set` 暂不支持多级下标（`a[0][1]`）
 - 规划：agent 常驻漂移检测（marker values 摘要对比已就绪）、内容寻址分发缓存、
-  远程 chart 仓库、stdout 流式回传
+  远程 chart 仓库、stdout 流式回传、真机集成测试矩阵（SSH 认证链×sudo×mTLS×push 自举）
 
 ## 开发
 
@@ -522,6 +533,10 @@ go build ./... && go test -race ./...
 
 测试基于 `connection.Fake`（内存假连接，尊重 ctx 取消）与 httptest，不依赖真实主机；
 `internal/skel` 的生成物测试（lint + check 演练）构成 `wdp new` 的质量门。
+
+CI（`.github/workflows/ci.yml`）门禁：build / vet / gofmt / `go mod tidy` 一致性 /
+`go test -race` / golangci-lint，另含 govulncheck 已知漏洞扫描；
+本地 lint 用 `golangci-lint run`（配置见 `.golangci.yml`）。
 
 ## 许可证
 

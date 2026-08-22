@@ -17,7 +17,7 @@ func setupFeature(t *testing.T, check bool, script func(string, connection.ExecR
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host) (connection.Connection, error) {
+	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
 		f := connection.NewFake(h)
 		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
 			return script(h.Name, req)

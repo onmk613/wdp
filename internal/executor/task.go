@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/render"
 )
@@ -179,7 +180,7 @@ func (e *Executor) resolveDelegate(task *model.Task, vars map[string]any, origin
 	if dh := e.Inv.HostByName(s); dh != nil {
 		return dh, s, nil
 	}
-	return nil, "", fmt.Errorf("delegate_to 目标主机 %q 不存在于 inventory", s)
+	return nil, "", fmt.Errorf(i18n.T("delegate_to target host %q not found in inventory", "delegate_to 目标主机 %q 不存在于 inventory"), s)
 }
 
 // aggregateLoopResults 聚合 loop 逐项结果到任务级结果；

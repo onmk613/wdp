@@ -10,7 +10,8 @@ import (
 )
 
 // TestAptUpgradableProbe apt 探测：模拟 "1 upgraded" 汇总行 → 有升级；
-// "0 upgraded, 0 newly installed" / "already newest" → 无升级。
+// "0 upgraded, 0 newly installed" / "already newest" → 无升级；
+// apt 自身非零（源/网络错误）→ 报错而非静默判"无升级"。
 func TestAptUpgradableProbe(t *testing.T) {
 	rc, f := newTestRC(t)
 	f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
@@ -19,12 +20,14 @@ func TestAptUpgradableProbe(t *testing.T) {
 		case strings.Contains(s, "dpkg-query"):
 			return connection.ExecResult{Code: 0}, nil // 已安装
 		case strings.Contains(s, "apt-get -s"):
+			if strings.Contains(s, "err-pkg") {
+				return connection.ExecResult{Code: 100, Stderr: "E: Unable to fetch…\n"}, nil
+			}
 			if strings.Contains(s, "old-pkg") {
-				// awk 遇 "0 upgraded" 行不 exit → 退出码 0
+				// apt-get 模拟成功且无升级（退出码 0，汇总行 N=0）
 				return connection.ExecResult{Code: 0, Stdout: "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"}, nil
 			}
-			// awk 遇 "1 upgraded" 行 exit 1
-			return connection.ExecResult{Code: 1, Stdout: "1 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.\n"}, nil
+			return connection.ExecResult{Code: 0, Stdout: "1 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.\n"}, nil
 		default:
 			return connection.ExecResult{Code: 0}, nil
 		}
@@ -43,6 +46,11 @@ func TestAptUpgradableProbe(t *testing.T) {
 	}
 	if up {
 		t.Fatal("0 upgraded 应判为无升级")
+	}
+	// 包管理器自身错误必须显式失败（此前被管道吞成"无升级"假幂等）
+	up, bad = p.upgradable(rc, "err-pkg")
+	if bad == nil || up {
+		t.Fatalf("apt 探测失败应报错: up=%v bad=%v", up, bad)
 	}
 }
 

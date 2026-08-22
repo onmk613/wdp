@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -203,6 +204,64 @@ func TestExtractRejectsSymlinkEscape(t *testing.T) {
 	arc := writeTemp(t, buildTar(t, []tarEntry{{name: "s", linkname: "../../outside"}}, nil))
 	if _, err := ExtractArchive(arc, filepath.Join(t.TempDir(), "out")); err == nil {
 		t.Fatal("越界符号链接应被拒绝")
+	}
+}
+
+// TestExtractRejectsAbsoluteSymlinkTarget 回归：绝对路径符号链接目标曾因
+// safeJoin 剥除前导 "/" 而通过校验、又以原始 Linkname 创建链接，导致链接
+// 指向 dest 之外（后续条目即可写穿任意系统路径）。现在必须拒绝。
+func TestExtractRejectsAbsoluteSymlinkTarget(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("ORIGINAL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 攻击链：① mylink → <外部绝对路径>；② 经 mylink 写外部文件
+	arc := writeTemp(t, buildTar(t, []tarEntry{
+		{name: "mylink", linkname: outside},
+		{name: "mylink/passwd", body: "PWNED"},
+	}, nil))
+	if _, err := ExtractArchive(arc, dest); err == nil {
+		t.Fatal("绝对路径符号链接目标应被拒绝")
+	}
+	if got, _ := os.ReadFile(outside); string(got) != "ORIGINAL" {
+		t.Fatal("外部文件被符号链接逃逸写穿篡改")
+	}
+}
+
+// TestExtractRejectsAbsoluteZipSymlinkTarget 同上，zip 变体。
+func TestExtractRejectsAbsoluteZipSymlinkTarget(t *testing.T) {
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("ORIGINAL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "out")
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	hdr := &zip.FileHeader{Name: "mylink", Method: zip.Store}
+	hdr.SetMode(0o777 | fs.ModeSymlink)
+	w, err := zw.CreateHeader(hdr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(outside)); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	arc := writeTemp(t, buf.Bytes())
+	if _, err := ExtractArchive(arc, dest); err == nil {
+		t.Fatal("zip 绝对路径符号链接目标应被拒绝")
+	}
+	if got, _ := os.ReadFile(outside); string(got) != "ORIGINAL" {
+		t.Fatal("外部文件被 zip 符号链接逃逸写穿篡改")
 	}
 }
 

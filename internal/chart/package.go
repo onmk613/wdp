@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/module"
 	"wdp/internal/render"
@@ -29,11 +30,21 @@ func Package(srcDir, outDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	// 写路径 close 链：tar/gzip flush 的错误必须上抛（defer 会吞掉截断包）
 	gz := gzip.NewWriter(f)
-	defer gz.Close()
 	tw := tar.NewWriter(gz)
-	defer tw.Close()
+	defer func() {
+		closeErr := tw.Close()
+		if closeErr == nil {
+			closeErr = gz.Close()
+		}
+		if closeErr == nil {
+			closeErr = f.Close()
+		}
+		if err == nil && closeErr != nil {
+			err = fmt.Errorf(i18n.T("failed to finalize package: %w", "打包收尾失败: %w"), closeErr)
+		}
+	}()
 
 	err = filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || path == srcDir {
@@ -68,12 +79,16 @@ func Package(srcDir, outDir string) (string, error) {
 		if err != nil {
 			return err
 		}
-		defer src.Close()
-		_, err = io.Copy(tw, src)
-		return err
+		// 立即关闭：defer 会把句柄挂到整个 WalkDir 结束，大 chart 打包时 fd 线性累积
+		_, copyErr := io.Copy(tw, src)
+		closeErr := src.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
 	})
 	if err != nil {
-		return "", fmt.Errorf("打包失败: %w", err)
+		return "", fmt.Errorf(i18n.T("failed to package: %w", "打包失败: %w"), err)
 	}
 	return out, nil
 }
@@ -105,7 +120,7 @@ func Lint(c *Chart, values map[string]any) []LintIssue {
 			if t.ChartRef != "" {
 				if _, err := c.ResolveSub(t.ChartRef); err != nil {
 					issues = append(issues, LintIssue{ERROR, "deploy.yaml",
-						fmt.Sprintf("任务 %q 引用子 chart 失败: %v", label, err)})
+						fmt.Sprintf(i18n.T("task %q failed to reference subchart: %v", "任务 %q 引用子 chart 失败: %v"), label, err)})
 				}
 				return
 			}
@@ -117,12 +132,10 @@ func Lint(c *Chart, values map[string]any) []LintIssue {
 				}
 				return
 			}
-			if _, ok := module.Get(t.Module); !ok {
-				// chart 本地脚本模块（modules/<名>）视为合法
-				if module.FindScriptModule([]string{ch.Dir, c.Dir}, t.Module) == "" {
-					issues = append(issues, LintIssue{ERROR, "deploy.yaml",
-						fmt.Sprintf("任务 %q 使用未知模块 %q", label, t.Module)})
-				}
+			// 模块解析唯一规则（module.Resolve）：内置优先，chart 本地脚本模块视为合法
+			if _, _, ok := module.Resolve(t.Module, []string{ch.Dir, c.Dir}); !ok {
+				issues = append(issues, LintIssue{ERROR, "deploy.yaml",
+					fmt.Sprintf(i18n.T("task %q uses unknown module %q", "任务 %q 使用未知模块 %q"), label, t.Module)})
 			}
 		}
 		for _, play := range ch.Deploy {

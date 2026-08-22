@@ -11,6 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"wdp/internal/chart"
+	"wdp/internal/config"
 	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/render"
@@ -28,7 +29,7 @@ func newTemplateCmd() *cobra.Command {
 			"预览合并 values、模板渲染结果与任务清单（不执行）"),
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ch, values, eng, err := chart.Open(args[0], valuesFiles, setArgs)
+			ch, values, eng, err := chart.OpenWithLimits(args[0], valuesFiles, setArgs, chart.Limits{MaxExtractBytes: config.Current().MaxExtractBytes()})
 			if err != nil {
 				return err
 			}
@@ -75,6 +76,7 @@ func newTemplateCmd() *cobra.Command {
 }
 
 // printTasks 打印任务清单（chart 引用展开一层，free-form 渲染预览）。
+// chart 引用的 vars 同样并入子作用域（与执行侧 expand 一致，预览不漂移）。
 func printTasks(out io.Writer, tasks []*model.Task, domain map[string]any, eng *render.Engine, ch *chart.Chart, indent string) {
 	for _, t := range tasks {
 		fmt.Fprintf(out, "%s- %s (%s)\n", indent, t.Label(), moduleLabel(t))
@@ -86,6 +88,9 @@ func printTasks(out io.Writer, tasks []*model.Task, domain map[string]any, eng *
 				continue
 			}
 			scope := chart.SubScope(sub, domain)
+			for k, v := range t.ChartVars {
+				scope[k] = v
+			}
 			for _, sp := range sub.Deploy {
 				printTasks(out, sp.Tasks, scope, eng, ch, indent+"    ")
 			}
@@ -123,7 +128,7 @@ func newLintCmd() *cobra.Command {
 		Short: i18n.T("statically validate a chart", "静态校验 chart"),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ch, values, _, err := chart.Open(args[0], valuesFiles, setArgs)
+			ch, values, _, err := chart.OpenWithLimits(args[0], valuesFiles, setArgs, chart.Limits{MaxExtractBytes: config.Current().MaxExtractBytes()})
 			if err != nil {
 				return err
 			}

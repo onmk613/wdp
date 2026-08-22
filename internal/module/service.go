@@ -27,17 +27,17 @@ func (m *ServiceModule) Desc() string {
 func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *Result {
 	name, ok := argStr(args, "name")
 	if !ok || name == "" {
-		return Fail("service 需要 name 参数")
+		return Fail("%s", i18n.T("service requires a name parameter", "service 需要 name 参数"))
 	}
 	state, hasState := argStr(args, "state")
 	switch state {
 	case "", "started", "stopped", "restarted", "reloaded":
 	default:
-		return Fail("不支持的 state %q（可选: started/stopped/restarted/reloaded）", state)
+		return Fail(i18n.T("unsupported state %q (options: started/stopped/restarted/reloaded)", "不支持的 state %q（可选: started/stopped/restarted/reloaded）"), state)
 	}
 	enabled, hasEnabled := argBool(args, "enabled")
 	if !hasState && !hasEnabled {
-		return Fail("service 需要 state 与 enabled 至少一项")
+		return Fail("%s", i18n.T("service requires at least one of state or enabled", "service 需要 state 与 enabled 至少一项"))
 	}
 
 	active, bad := isActive(rc, name)
@@ -89,7 +89,7 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *R
 				res.Msg = fmt.Sprintf("[check] %s（%s）", name, joinCN(logs))
 			}
 		} else {
-			res.Msg = fmt.Sprintf("[check] %s 已是目标状态", name)
+			res.Msg = fmt.Sprintf(i18n.T("[check] %s is already in the target state", "[check] %s 已是目标状态"), name)
 		}
 		if rc.DiffMode && len(verbs) > 0 {
 			var lines []string
@@ -109,7 +109,7 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *R
 	}
 
 	if len(verbs) == 0 {
-		return &Result{Msg: fmt.Sprintf("%s 已是目标状态", name)}
+		return &Result{Msg: fmt.Sprintf(i18n.T("%s is already in the target state", "%s 已是目标状态"), name)}
 	}
 	for _, v := range verbs {
 		out, bad := rc.exec(fmt.Sprintf("systemctl %s %s", v, shellquote.Quote(name)))
@@ -117,7 +117,7 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *R
 			return bad
 		}
 		if out.Code != 0 {
-			return Fail("systemctl %s %s 失败: %s", v, name, firstLine(out.Stderr))
+			return Fail(i18n.T("systemctl %s %s failed: %s", "systemctl %s %s 失败: %s"), v, name, firstLine(out.Stderr))
 		}
 	}
 	return &Result{Changed: true, Msg: fmt.Sprintf("%s %s", name, joinCN(logs))}
@@ -186,10 +186,11 @@ func joinLines(items []string) string {
 }
 
 func joinCN(items []string) string {
+	sep := i18n.T(", ", "、")
 	s := ""
 	for i, it := range items {
 		if i > 0 {
-			s += "、"
+			s += sep
 		}
 		s += it
 	}
