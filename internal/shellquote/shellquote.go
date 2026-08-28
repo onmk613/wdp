@@ -1,7 +1,3 @@
-// Package shellquote 提供嵌入 sh 脚本的字符串安全转义与参数切分。
-//
-// 这是全项目唯一的 shell 注入防线：所有拼装远端脚本的位置必须经由
-// Quote/Split，禁止在各自包内复制实现——转义逻辑若有修正只需落在此处即可全局生效。
 package shellquote
 
 import (
@@ -16,7 +12,7 @@ func Quote(s string) string {
 }
 
 // ErrUnterminated 表示 Split 遇到未闭合的引号。
-var ErrUnterminated = errors.New("shellquote: 引号未闭合")
+var ErrUnterminated = errors.New("shellquote: unterminated quote")
 
 // QuoteWords 把 free-form 参数串按 POSIX sh 词法切词后逐词 Quote，
 // 再以空格连接——用于把用户书写的命令行参数安全嵌入 sh 命令：
@@ -90,7 +86,7 @@ func Split(s string) ([]string, error) {
 			inWord = true
 		case '\\': // 引号外：转义下一字符
 			if i+1 >= len(s) {
-				return nil, errors.New("shellquote: 行尾孤立反斜杠")
+				return nil, errors.New("shellquote: trailing backslash at end of line")
 			}
 			cur.WriteByte(s[i+1])
 			inWord = true

@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	"wdp/internal/chart"
-	"wdp/internal/connection"
+	"wdp/internal/conn"
 	"wdp/internal/model"
 	"wdp/internal/render"
 )
@@ -76,8 +76,8 @@ func TestRunOnce(t *testing.T) {
 
 // TestLoopVarName 自定义循环变量名（loop_control.loop_var）。
 func TestLoopVarName(t *testing.T) {
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0}, nil
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -138,11 +138,11 @@ func TestHookLifecycle(t *testing.T) {
 
 // TestHookPostSkippedOnFailure 主任务失败时 post_install 不执行。
 func TestHookPostSkippedOnFailure(t *testing.T) {
-	script := func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	script := func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "boom") {
-			return connection.ExecResult{Code: 1}, nil
+			return conn.ExecResult{Code: 1}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	}
 	ex, _ := setup(t, script)
 	plays := []*model.Play{{
@@ -172,11 +172,11 @@ func TestHookPostSkippedOnFailure(t *testing.T) {
 
 // TestGroupByDynamicGroup 动态分组：play1 建组，play2 通配引用。
 func TestGroupByDynamicGroup(t *testing.T) {
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "os-release") {
-			return connection.ExecResult{Code: 0, Stdout: "os_id=debian\nos_name=Debian\nos_version=12\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: "os_id=debian\nos_name=Debian\nos_version=12\n"}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{
 		{
@@ -205,8 +205,8 @@ func TestGroupByDynamicGroup(t *testing.T) {
 
 // TestCrossBatchRegister serial 分批下 register 跨批次延续。
 func TestCrossBatchRegister(t *testing.T) {
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0, Stdout: "done\n"}, nil
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "done\n"}, nil
 	})
 	plays := []*model.Play{{
 		Hosts:  "webservers",
@@ -234,21 +234,21 @@ func TestCrossBatchRegister(t *testing.T) {
 
 // TestScriptModule chart 自带脚本模块：JSON 结果契约 + changed:false 尊重 + 参数环境变量注入。
 func TestScriptModule(t *testing.T) {
-	setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		// 模拟执行上传的脚本模块：校验参数环境变量并回显脚本自身的 JSON 输出
 		if strings.Contains(req.Script, ".wdp-mod-") {
 			if req.Env["WDP_MODULE_ARGS"] == "" {
-				return connection.ExecResult{Code: 1, Stderr: "missing WDP_MODULE_ARGS"}, nil
+				return conn.ExecResult{Code: 1, Stderr: "missing WDP_MODULE_ARGS"}, nil
 			}
 			if req.Env["WDP_FREE_FORM"] != "extra-args" {
-				return connection.ExecResult{Code: 1, Stderr: "missing WDP_FREE_FORM"}, nil
+				return conn.ExecResult{Code: 1, Stderr: "missing WDP_FREE_FORM"}, nil
 			}
-			return connection.ExecResult{
+			return conn.ExecResult{
 				Code:   0,
 				Stdout: "{\"changed\": false, \"failed\": false, \"msg\": \"script-mod-ok\"}\n",
 			}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	dir := t.TempDir()
 	write := func(rel, content string) {
@@ -273,7 +273,7 @@ func TestScriptModule(t *testing.T) {
 	}
 	inv := parseTestInv(t)
 	rep := &captureReporter{}
-	ex := New(inv, connection.NewManager(), rep, Options{
+	ex := New(inv, conn.NewManager(), rep, Options{
 		Forks: 2, Chart: c, Values: map[string]any{}, Engine: eng, BaseDir: dir,
 	})
 	plays := []*model.Play{{

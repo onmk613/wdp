@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
 )
 
 // TestScriptArgsQuoted 回归：free-form 参数曾原文拼进 sh -c，元字符会被
@@ -21,7 +21,7 @@ func TestScriptArgsQuoted(t *testing.T) {
 
 	var sent string
 	oldExecFn := fake.ExecFn
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, ".wdp-script-") && !strings.HasPrefix(strings.TrimSpace(req.Script), "rm ") {
 			sent = req.Script // 捕获真正执行脚本的命令
 		}

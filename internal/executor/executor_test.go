@@ -7,7 +7,8 @@ import (
 	"sync"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 	"wdp/internal/module"
@@ -70,19 +71,19 @@ webservers:
 
 var (
 	fakeMu sync.Mutex
-	fakes  []*connection.Fake
+	fakes  []*fake.Fake
 )
 
 // setup 注册 fake 连接工厂（并记录实例）并构造执行器。
 // script 可按主机与请求内容返回不同结果。
-func setup(t *testing.T, script func(host string, req connection.ExecRequest) (connection.ExecResult, error)) (*Executor, *captureReporter) {
+func setup(t *testing.T, script func(host string, req conn.ExecRequest) (conn.ExecResult, error)) (*Executor, *captureReporter) {
 	t.Helper()
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
-		f := connection.NewFake(h)
-		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		f := fake.NewFake(h)
+		f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 			return script(h.Name, req)
 		}
 		fakeMu.Lock()
@@ -95,18 +96,18 @@ func setup(t *testing.T, script func(host string, req connection.ExecRequest) (c
 		t.Fatal(err)
 	}
 	rep := &captureReporter{}
-	ex := New(inv, connection.NewManager(), rep, Options{Forks: 2})
+	ex := New(inv, conn.NewManager(), rep, Options{Forks: 2})
 	return ex, rep
 }
 
-func allFakes() []*connection.Fake {
+func allFakes() []*fake.Fake {
 	fakeMu.Lock()
 	defer fakeMu.Unlock()
-	return append([]*connection.Fake{}, fakes...)
+	return append([]*fake.Fake{}, fakes...)
 }
 
-func okExec(string, connection.ExecRequest) (connection.ExecResult, error) {
-	return connection.ExecResult{Code: 0, Stdout: "done\n"}, nil
+func okExec(string, conn.ExecRequest) (conn.ExecResult, error) {
+	return conn.ExecResult{Code: 0, Stdout: "done\n"}, nil
 }
 
 func TestBasicRun(t *testing.T) {
@@ -172,11 +173,11 @@ func TestHandlerNotify(t *testing.T) {
 }
 
 func TestFailureIsolation(t *testing.T) {
-	script := func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	script := func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if host == "h1" {
-			return connection.ExecResult{Code: 1, Stderr: "boom"}, nil
+			return conn.ExecResult{Code: 1, Stderr: "boom"}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	}
 	ex, rep := setup(t, script)
 	plays := []*model.Play{{
@@ -202,11 +203,11 @@ func TestFailureIsolation(t *testing.T) {
 }
 
 func TestIgnoreErrors(t *testing.T) {
-	script := func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	script := func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if req.Script == "x" {
-			return connection.ExecResult{Code: 1}, nil
+			return conn.ExecResult{Code: 1}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	}
 	ex, rep := setup(t, script)
 	plays := []*model.Play{{
@@ -228,8 +229,8 @@ func TestIgnoreErrors(t *testing.T) {
 }
 
 func TestLoopItems(t *testing.T) {
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0, Stdout: "ok " + req.Script}, nil
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "ok " + req.Script}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -258,8 +259,8 @@ func TestLoopItems(t *testing.T) {
 // TestLoopTemplateList 单模板元素渲染结果为 JSON 列表字符串时展开为多项；
 // 非列表语法的渲染结果保持单元素语义。
 func TestLoopTemplateList(t *testing.T) {
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0}, nil
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -294,7 +295,7 @@ func TestUnknownModule(t *testing.T) {
 	if !ex.Run(context.Background(), plays) {
 		t.Fatal("未知模块应失败")
 	}
-	if !strings.Contains(rep.joined(), "未知模块") {
+	if !strings.Contains(rep.joined(), "unknown module") {
 		t.Fatalf("%s", rep.joined())
 	}
 }
@@ -303,11 +304,11 @@ func TestSetupFactsIntoVars(t *testing.T) {
 	factsOut := "hostname=test-host\nkernel=6.1.0\narch=x86_64\nos_id=ubuntu\nos_name=Ubuntu\n" +
 		"os_version=22.04\ndefault_ipv4=10.0.0.5\ncpus=4\nmemory_mb=2048\n" +
 		"disk_total=100\ndisk_used=50\ndisk_avail=50\ndisk_pct=50%\n"
-	script := func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	script := func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "/etc/os-release") || strings.Contains(req.Script, "df -B1") {
-			return connection.ExecResult{Code: 0, Stdout: factsOut}, nil
+			return conn.ExecResult{Code: 0, Stdout: factsOut}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	}
 	ex, rep := setup(t, script)
 	plays := []*model.Play{{

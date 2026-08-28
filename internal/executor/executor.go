@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"wdp/internal/chart"
-	"wdp/internal/connection"
+	"wdp/internal/conn"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 	"wdp/internal/module"
@@ -17,7 +17,6 @@ import (
 	"wdp/internal/report"
 
 	"gopkg.in/yaml.v3"
-	"wdp/internal/i18n"
 )
 
 // Options 是执行选项。
@@ -36,6 +35,10 @@ type Options struct {
 	Phase       string // chart 生命周期相位：deploy（缺省）| uninstall | status
 	WdpVersion  string // 控制端版本（release marker 记录）
 
+	// FactCachePath 非空时启用跨运行 fact cache：启动时加载 JSON 快照并入
+	// fact store，run 结束原子落盘（setup/set_fact 结果跨次运行复用）。
+	FactCachePath string
+
 	// MaxDownloadBytes 是 get_url 下载响应体上限（字节；0 = 内置默认 2GiB）。
 	// 组合根从 --max-download-mb / wdp.cfg [transfer].max_download_mb 注入。
 	MaxDownloadBytes int64
@@ -48,7 +51,7 @@ type Options struct {
 // Executor 执行 playbook / chart。
 type Executor struct {
 	Inv   *inventory.Inventory
-	Conns *connection.Manager
+	Conns *conn.Manager
 	Rep   report.Reporter
 	Opts  Options
 
@@ -175,7 +178,7 @@ func splitHookTasks(tasks []*model.Task, phase string) (pre, post, main []*model
 }
 
 // New 创建执行器。
-func New(inv *inventory.Inventory, conns *connection.Manager, rep report.Reporter, opts Options) *Executor {
+func New(inv *inventory.Inventory, conns *conn.Manager, rep report.Reporter, opts Options) *Executor {
 	if opts.Forks <= 0 {
 		opts.Forks = 5
 	}
@@ -186,6 +189,9 @@ func New(inv *inventory.Inventory, conns *connection.Manager, rep report.Reporte
 	}
 	e.facts = map[string]map[string]any{}
 	e.deadHosts = map[string]bool{}
+	if opts.FactCachePath != "" {
+		e.loadFactCache(opts.FactCachePath)
+	}
 	return e
 }
 
@@ -217,11 +223,15 @@ func (e *Executor) renderLoopItems(loop []any, vars map[string]any) ([]any, erro
 }
 
 // Run 依次执行全部 play，返回是否存在失败。
+// 启用了 fact cache 时无论成败都落盘（部分采集的 facts 对下次运行仍有价值）。
 func (e *Executor) Run(ctx context.Context, plays []*model.Play) bool {
+	if e.Opts.FactCachePath != "" {
+		defer e.saveFactCache(e.Opts.FactCachePath)
+	}
 	anyFail := false
 	for _, p := range plays {
 		if ctx.Err() != nil {
-			e.Rep.PlayMsg(i18n.T("execution cancelled (%v), terminating remaining plays", "执行已取消（%v），终止剩余 play"), ctx.Err())
+			e.Rep.PlayMsg("execution cancelled (%v), terminating remaining plays", ctx.Err())
 			return true
 		}
 		if e.runPlay(ctx, p) {
@@ -241,8 +251,7 @@ func (e *Executor) LastStats() map[string]*model.Stats {
 		if v == nil {
 			continue
 		}
-		c := *v
-		out[k] = &c
+		out[k] = new(*v)
 	}
 	return out
 }

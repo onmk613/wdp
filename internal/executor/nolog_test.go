@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
 	"wdp/internal/model"
 	"wdp/internal/report"
 )
@@ -16,11 +16,11 @@ import (
 // no_log 任务在 --output json（CI 场景）下 stdout 必须遮蔽，
 // 普通任务输出不受影响。
 func TestNoLogRedactedInJSONReport(t *testing.T) {
-	ex, _ := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, _ := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "rotate.sh") {
-			return connection.ExecResult{Code: 0, Stdout: "SECRET-" + host + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: "SECRET-" + host + "\n"}, nil
 		}
-		return connection.ExecResult{Code: 0, Stdout: "done\n"}, nil
+		return conn.ExecResult{Code: 0, Stdout: "done\n"}, nil
 	})
 	var buf bytes.Buffer
 	jsonRep := report.NewJSONReporter(&buf)
@@ -69,8 +69,8 @@ func (c *collectReporter) HostResult(host string, r *model.TaskResult) {
 
 // TestNoLogResultFlag no_log 结果携带 NoLog 标记与 output=none（reporter 据此遮蔽）。
 func TestNoLogResultFlag(t *testing.T) {
-	ex, _ := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0, Stdout: "x"}, nil
+	ex, _ := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "x"}, nil
 	})
 	rep := &collectReporter{}
 	ex.Rep = rep

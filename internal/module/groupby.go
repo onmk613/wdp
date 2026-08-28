@@ -2,10 +2,8 @@ package module
 
 import (
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
-
-	"wdp/internal/i18n"
 )
 
 func init() {
@@ -29,23 +27,23 @@ func (m *GroupByModule) Name() string { return "group_by" }
 
 // Desc 模块说明。
 func (m *GroupByModule) Desc() string {
-	return i18n.T("build dynamic groups from vars/facts (used by later plays host selection)", "按变量/facts 值动态建组（配合后续 play 的 hosts 选择）")
+	return "build dynamic groups from vars/facts (used by later plays host selection)"
 }
 
 // Run 产出组名（name/free-form 均已由 executor 渲染，此处仅组合 prefix）。
-func (m *GroupByModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *GroupByModule) Run(_ *RunContext, args map[string]any, free string) *Result {
 	name := strings.TrimSpace(free)
 	if n, ok := argStr(args, "name"); ok && n != "" {
 		name = strings.TrimSpace(n)
 	}
 	if name == "" {
-		return Fail("%s", i18n.T("group_by requires a group name (name parameter or free-form)", "group_by 需要组名（name 参数或 free-form）"))
+		return Fail("%s", "group_by requires a group name (name parameter or free-form)")
 	}
 	group := name
 	if prefix, ok := argStr(args, "prefix"); ok && prefix != "" {
 		group = prefix + "-" + name
 	}
-	return &Result{Groups: []string{group}, Msg: fmt.Sprintf(i18n.T("joined dynamic group %s", "加入动态组 %s"), group)}
+	return &Result{Groups: []string{group}, Msg: fmt.Sprintf("joined dynamic group %s", group)}
 }
 
 // SortGroups 排序去重组名列表（executor 聚合辅助）。
@@ -58,25 +56,25 @@ func SortGroups(groups []string) []string {
 			out = append(out, g)
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
 // Params 参数文档。
 func (m *GroupByModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "组名表达式（模板渲染后为组名；亦可用 free-form）"},
-		{Name: "(free-form)", Type: "string", Desc: "组名表达式（name 的简写形式）"},
-		{Name: "prefix", Type: "string", Desc: "可选前缀（组名 = prefix-name）"},
+		{Name: "name", Type: "string", Desc: "group name expression (the rendered template becomes the group name; free-form works too)"},
+		{Name: "(free-form)", Type: "string", Desc: "group name expression (shorthand for name)"},
+		{Name: "prefix", Type: "string", Desc: "optional prefix (group name = prefix-name)"},
 	}
 }
 
 // Example 示例任务。
 func (m *GroupByModule) Example() string {
-	return `- name: 按系统家族动态分组
+	return `- name: group hosts dynamically by OS family
   group_by: 'os_{{ .os.family }}'
 
-- name: 下一 play 通配引用
+- name: reference via wildcard in the next play
   hosts: "os_*"
 `
 }

@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-
-	"wdp/internal/i18n"
 )
 
 func init() {
@@ -23,22 +21,22 @@ func (m *CopyModule) RollbackCapability() RollbackCapability { return RollbackFu
 
 // Desc 模块说明。
 func (m *CopyModule) Desc() string {
-	return i18n.T("distribute local files or content to remote hosts", "分发本地文件或 content 内容到远端")
+	return "distribute local files or content to remote hosts"
 }
 
 // Run 执行分发（校验和幂等管线见 putFile）。
-func (m *CopyModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *CopyModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("%s", i18n.T("copy requires a dest parameter", "copy 需要 dest 参数"))
+		return Fail("%s", "copy requires a dest parameter")
 	}
 	content, _ := argStr(args, "content")
 	src, _ := argStr(args, "src")
 	if content != "" && src != "" {
-		return Fail("%s", i18n.T("copy accepts either content or src, not both", "copy 的 content 与 src 只能二选一"))
+		return Fail("%s", "copy accepts either content or src, not both")
 	}
 	if content == "" && src == "" {
-		return Fail("%s", i18n.T("copy requires a content or src parameter", "copy 需要 content 或 src 参数"))
+		return Fail("%s", "copy requires a content or src parameter")
 	}
 	owner, _ := argStr(args, "owner")
 	group, _ := argStr(args, "group")
@@ -50,7 +48,7 @@ func (m *CopyModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 		local := resolveLocal(rc, src)
 		b, err := os.ReadFile(local)
 		if err != nil {
-			return Fail(i18n.T("failed to read local file: %v", "读取本地文件失败: %v"), err)
+			return Fail("failed to read local file: %v", err)
 		}
 		data = b
 		if mv, ok := argMode(args, "mode"); ok {
@@ -69,9 +67,9 @@ func (m *CopyModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 	if res != nil {
 		return res // 失败或 check 预估（含 --diff 内容差异）直接透传
 	}
-	msg := fmt.Sprintf(i18n.T("%s content is unchanged", "%s 内容一致"), dest)
+	msg := fmt.Sprintf("%s content is unchanged", dest)
 	if changed {
-		msg = fmt.Sprintf(i18n.T("distributed %d bytes to %s", "已分发 %d 字节到 %s"), len(data), dest)
+		msg = fmt.Sprintf("distributed %d bytes to %s", len(data), dest)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }
@@ -87,19 +85,19 @@ func resolveLocal(rc *RunContext, p string) string {
 // Params 参数文档。
 func (m *CopyModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "dest", Type: "string", Desc: "远端目标路径（必需）"},
-		{Name: "content", Type: "string", Desc: "字面量内容（与 src 二选一）"},
-		{Name: "src", Type: "string", Desc: "本地源文件路径（与 content 二选一）"},
-		{Name: "mode", Type: "mode", Default: "0644", Desc: "权限（src 未指定时沿用本地文件权限）"},
-		{Name: "owner", Type: "string", Desc: "属主（需 become）"},
-		{Name: "group", Type: "string", Desc: "属组（需 become）"},
-		{Name: "backup", Type: "bool", Default: "false", Desc: "覆盖前备份为 dest.bak.<时间戳>"},
+		{Name: "dest", Type: "string", Desc: "remote destination path (required)"},
+		{Name: "content", Type: "string", Desc: "literal content (mutually exclusive with src)"},
+		{Name: "src", Type: "string", Desc: "local source file path (mutually exclusive with content)"},
+		{Name: "mode", Type: "mode", Default: "0644", Desc: "mode (inherits the local file mode when src is set)"},
+		{Name: "owner", Type: "string", Desc: "owner (requires become)"},
+		{Name: "group", Type: "string", Desc: "group (requires become)"},
+		{Name: "backup", Type: "bool", Default: "false", Desc: "back up as dest.bak.<timestamp> before overwriting"},
 	}
 }
 
 // Example 示例任务。
 func (m *CopyModule) Example() string {
-	return `- name: 下发静态配置
+	return `- name: push a static config
   copy:
     src: files/app.conf
     dest: /etc/app/app.conf

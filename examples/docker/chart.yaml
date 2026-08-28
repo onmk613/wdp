@@ -1,0 +1,8 @@
+name: docker
+version: 1.0.0
+description: >-
+  docker（官方静态包，dockerd 内嵌 containerd 单服务化，含 compose/buildx cli 插件）。
+  独立应用包：在线/离线双模式，完整生命周期（deploy / status / uninstall），
+  可 wdp package 打成 tgz 离线分发。
+
+required: []

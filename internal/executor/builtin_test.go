@@ -7,14 +7,14 @@ import (
 	"testing"
 
 	"wdp/internal/chart"
-	"wdp/internal/connection"
+	"wdp/internal/conn"
 	"wdp/internal/model"
 )
 
 // TestBuiltinVars 验证 play_hosts/play_batch/groups/hosts 注入与模板可用性。
 func TestBuiltinVars(t *testing.T) {
-	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "webservers",
@@ -40,8 +40,8 @@ func TestBuiltinVars(t *testing.T) {
 
 // TestBuiltinVarsImmutable 验证内置变量不可被 play vars 覆盖。
 func TestBuiltinVarsImmutable(t *testing.T) {
-	ex, _ := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
+	ex, _ := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -62,8 +62,8 @@ func TestBuiltinVarsImmutable(t *testing.T) {
 // 曾只注入在变量叠加的最低层（inventory 层），play vars 可覆盖，
 // 与 README「不可被覆盖」承诺矛盾。现在必须在全部叠加之后强制注入。
 func TestBuiltinVarsIdentityNotOverridable(t *testing.T) {
-	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "webservers",
@@ -97,14 +97,14 @@ func TestMarkerWriteAndRemove(t *testing.T) {
 	ch.Meta.MarkerDir = "/tmp/wdp-marker-test"
 
 	run := func(phase string) {
-		_, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-			return connection.ExecResult{Code: 0}, nil
+		_, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+			return conn.ExecResult{Code: 0}, nil
 		})
 		_ = rep
 		// 直接构造执行器（复用 setupFeature 注册的 fake 工厂与 fakes 记录）
 		inv := parseTestInv(t)
 		rep2 := &captureReporter{}
-		ex := New(inv, connection.NewManager(), rep2, Options{
+		ex := New(inv, conn.NewManager(), rep2, Options{
 			Forks: 2, Chart: ch, Phase: phase, WdpVersion: "test",
 			Values: map[string]any{},
 		})

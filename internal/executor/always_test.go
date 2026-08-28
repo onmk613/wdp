@@ -9,7 +9,8 @@ import (
 
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 )
@@ -21,8 +22,8 @@ func TestAlwaysRunsOnUnreachable(t *testing.T) {
 	fakes = nil
 	fakeMu.Unlock()
 	// 连接建立即失败 → 所有任务 unreachable
-	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
-		f := connection.NewFake(h)
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		f := fake.NewFake(h)
 		f.ConnectErr = errors.New("connection failed")
 		return f, nil
 	})
@@ -31,7 +32,7 @@ func TestAlwaysRunsOnUnreachable(t *testing.T) {
 		t.Fatal(err)
 	}
 	rep := &captureReporter{}
-	ex := New(inv, connection.NewManager(), rep, Options{Forks: 2})
+	ex := New(inv, conn.NewManager(), rep, Options{Forks: 2})
 	plays := []*model.Play{{
 		Hosts: "webservers",
 		Tasks: []*model.Task{{
@@ -50,7 +51,7 @@ func TestAlwaysRunsOnUnreachable(t *testing.T) {
 	// block 任务与 always 任务各记一次 unreachable：每条主机消息里应出现两次连接失败
 	// （第二次即 always 清理任务的尝试记录，此前会被整体跳过）
 	for _, h := range []string{"h1", "h2"} {
-		if n := strings.Count(out, "主机 "+h+" 连接失败"); n < 2 {
+		if n := strings.Count(out, "host "+h+" connection failed"); n < 2 {
 			t.Fatalf("%s 的 always 应被尝试并记录 unreachable（期望 ≥2 次连接失败记录）:\n%s", h, out)
 		}
 	}

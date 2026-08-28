@@ -1,6 +1,12 @@
 package playbook
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+
+	"wdp/internal/model"
+)
 
 const sample = `
 - name: web 部署
@@ -124,5 +130,63 @@ func TestParseExplicitArgs(t *testing.T) {
 	task := plays[0].Tasks[0]
 	if task.Module != "copy" || task.Args["content"] != "hello" || task.Args["dest"] != "/tmp/x" {
 		t.Fatalf("task: %+v", task)
+	}
+}
+
+// TestPlayKeysCoverModelTags playKeys（任务级模块键排除用）必须覆盖
+// model.Play 全部 yaml tag 键与手工解析特殊键——新增字段打 tag 后漏更
+// playKeys 会把新键误判为任务模块名，此测试提前拦截。
+func TestPlayKeysCoverModelTags(t *testing.T) {
+	tt := reflect.TypeFor[model.Play]()
+	for field := range tt.Fields() {
+		tag := field.Tag.Get("yaml")
+		if tag == "" || tag == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		if !playKeys[name] {
+			t.Fatalf("model.Play 字段 %s 的 yaml 键 %q 未登记进 playKeys", field.Name, name)
+		}
+	}
+	for _, k := range []string{"become", "serial", "strategy", "tasks", "handlers"} {
+		if !playKeys[k] {
+			t.Fatalf("手工解析键 %s 未登记进 playKeys", k)
+		}
+	}
+}
+
+// TestParsePlayScalarCoercion tag 映射路径的标量宽容性：数值/布尔风格
+// 标量解进 string 字段、数值解进 map[string]string 值（旧 fmt.Sprint 语义）。
+func TestParsePlayScalarCoercion(t *testing.T) {
+	plays, err := Parse([]byte(`
+- name: 2024
+  hosts: all
+  environment: {PORT: 8080}
+  tasks:
+    - shell: echo hi
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := plays[0]
+	if p.Name != "2024" || p.Environment["PORT"] != "8080" {
+		t.Fatalf("标量宽容性回归: %+v", p)
+	}
+}
+
+// TestParsePlayEmptyAndBadDocs 边界：空文档零 play；顶层非列表报错；
+// hosts 缺失报错（hosts: null 现在也归入缺失，不再产生垃圾串）。
+func TestParsePlayEmptyAndBadDocs(t *testing.T) {
+	if plays, err := Parse([]byte("# only comments\n")); err != nil || len(plays) != 0 {
+		t.Fatalf("空文档: %v %v", plays, err)
+	}
+	if _, err := Parse([]byte("hosts: all\n")); err == nil {
+		t.Fatal("顶层非列表应报错")
+	}
+	if _, err := Parse([]byte("- hosts:\n")); err == nil {
+		t.Fatal("hosts 缺失应报错")
+	}
+	if _, err := Parse([]byte("- hosts: [a, b]\n")); err == nil {
+		t.Fatal("hosts 列表形态应报错（不支持，旧版会静默产生垃圾串）")
 	}
 }

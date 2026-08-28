@@ -1,6 +1,11 @@
 package inventory
 
-import "wdp/internal/model"
+import (
+	"maps"
+	"slices"
+
+	"wdp/internal/model"
+)
 
 // precomputeTopology 预计算组拓扑与主机元信息（内置变量 groups/hosts 的数据源）。
 func (inv *Inventory) precomputeTopology() {
@@ -55,6 +60,58 @@ func (inv *Inventory) AddDynamicGroup(name string, members []string) {
 		}
 	}
 	inv.precomputeTopology()
+}
+
+// AddRuntimeHost 运行时（add_host 模块）新增或更新主机，可同时入组。
+// 已存在同名主机时仅更新地址/端口/连接字段与变量（不重复入列）；
+// 新主机写入 group_names，保证 group_names 内置变量口径与静态 inventory 一致。
+// 后续 play 的 hosts 选择与 groups/hosts/hostvars 内置变量即刻可见。
+func (inv *Inventory) AddRuntimeHost(h *model.Host, groups []string) {
+	if h == nil || h.Name == "" {
+		return
+	}
+	if h.Vars == nil {
+		h.Vars = map[string]any{}
+	}
+	if existing := inv.HostByName(h.Name); existing != nil {
+		if h.Address != "" {
+			existing.Address = h.Address
+		}
+		if h.Port != 0 {
+			existing.Port = h.Port
+		}
+		if h.Conn != "" {
+			existing.Conn = h.Conn
+		}
+		if h.AgentURL != "" {
+			existing.AgentURL = h.AgentURL
+		}
+		if h.User != "" {
+			existing.User = h.User
+		}
+		maps.Copy(existing.Vars, h.Vars)
+		h = existing
+	} else {
+		if h.Address == "" {
+			h.Address = h.Name
+		}
+		inv.Hosts = append(inv.Hosts, h)
+	}
+	for _, g := range groups {
+		inv.AddDynamicGroup(g, []string{h.Name})
+	}
+	if len(groups) == 0 {
+		inv.precomputeTopology()
+		return
+	}
+	// group_names 与静态 inventory 构建口径一致：主机变量里保留所属组清单
+	names, _ := h.Vars["group_names"].([]string)
+	for _, g := range groups {
+		if !slices.Contains(names, g) {
+			names = append(names, g)
+		}
+	}
+	h.Vars["group_names"] = names
 }
 
 func hostNames(hosts []*model.Host) []string {

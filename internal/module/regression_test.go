@@ -78,7 +78,7 @@ func TestFetchRejectsTraversal(t *testing.T) {
 		"src":  "/etc/passwd",
 		"dest": "./out",
 	}, "")
-	if res == nil || !res.Failed || !strings.Contains(res.Msg, "逃逸") {
+	if res == nil || !res.Failed || !strings.Contains(res.Msg, "escapes") {
 		t.Fatalf("应拒绝逃逸路径, got %+v", res)
 	}
 	// src 含 .. 同样拒绝
@@ -87,7 +87,7 @@ func TestFetchRejectsTraversal(t *testing.T) {
 		"src":  "/var/../../../../etc/passwd",
 		"dest": "./out",
 	}, "")
-	if res == nil || !res.Failed || !strings.Contains(res.Msg, "逃逸") {
+	if res == nil || !res.Failed || !strings.Contains(res.Msg, "escapes") {
 		t.Fatalf("src 含 .. 应被拒绝, got %+v", res)
 	}
 }

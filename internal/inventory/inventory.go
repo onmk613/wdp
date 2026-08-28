@@ -13,33 +13,31 @@ package inventory
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
 
 	"wdp/internal/config"
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
-// Inventory 是解析后的主机清单。
 type Inventory struct {
-	Hosts   []*model.Host
-	Groups  map[string]*model.Group
-	AllVars map[string]any
-
-	groupMap  map[string][]string       // 组名 → 成员主机名（含 children 展开；all=全部）
-	hostsMeta map[string]map[string]any // 主机名 → {name,address,port,conn}
+	Hosts     []*model.Host
+	Groups    map[string]*model.Group
+	AllVars   map[string]any
+	groupMap  map[string][]string
+	hostsMeta map[string]map[string]any
 }
+
+type rawInventory map[string]rawGroup
 
 type rawGroup struct {
 	Hosts    map[string]map[string]any `yaml:"hosts"`
 	Vars     map[string]any            `yaml:"vars"`
 	Children []string                  `yaml:"children"`
 }
-
-type rawInventory map[string]rawGroup
 
 // Load 从文件解析（自动加载同目录 group_vars/ 与 host_vars/ 约定变量）。
 // 使用内置默认连接参数（不读 wdp.cfg；组合根用 LoadWithConfig 显式注入）。
@@ -51,7 +49,7 @@ func Load(path string) (*Inventory, error) {
 func LoadWithConfig(path string, cfg *config.Config) (*Inventory, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf(i18n.T("failed to read inventory: %w", "读取 inventory 失败: %w"), err)
+		return nil, fmt.Errorf("failed to read inventory: %w", err)
 	}
 	return parseOne(data, []string{filepath.Dir(path)}, cfg)
 }
@@ -67,7 +65,7 @@ func LoadMerge(paths []string) (*Inventory, error) {
 // LoadMergeWithConfig 同 LoadMerge，但以显式配置提供主机条目的默认连接参数。
 func LoadMergeWithConfig(paths []string, cfg *config.Config) (*Inventory, error) {
 	if len(paths) == 0 {
-		return nil, errors.New(i18n.T("no inventory file specified", "未指定 inventory 文件"))
+		return nil, errors.New("no inventory file specified")
 	}
 	if len(paths) == 1 {
 		return LoadWithConfig(paths[0], cfg)
@@ -77,11 +75,11 @@ func LoadMergeWithConfig(paths []string, cfg *config.Config) (*Inventory, error)
 	for _, p := range paths {
 		data, err := os.ReadFile(p)
 		if err != nil {
-			return nil, fmt.Errorf(i18n.T("failed to read inventory %s: %w", "读取 inventory %s 失败: %w"), p, err)
+			return nil, fmt.Errorf("failed to read inventory %s: %w", p, err)
 		}
 		var raw rawInventory
 		if err := yaml.Unmarshal(data, &raw); err != nil {
-			return nil, fmt.Errorf(i18n.T("failed to parse inventory %s: %w", "解析 inventory %s 失败: %w"), p, err)
+			return nil, fmt.Errorf("failed to parse inventory %s: %w", p, err)
 		}
 		merged = mergeRaw(merged, raw)
 		dirs = append(dirs, filepath.Dir(p))
@@ -92,9 +90,7 @@ func LoadMergeWithConfig(paths []string, cfg *config.Config) (*Inventory, error)
 // mergeRaw 合并两份原始 inventory（b 覆盖 a）。
 func mergeRaw(a, b rawInventory) rawInventory {
 	out := rawInventory{}
-	for k, g := range a {
-		out[k] = g
-	}
+	maps.Copy(out, a)
 	for name, g := range b {
 		cur, ok := out[name]
 		if !ok {
@@ -107,12 +103,8 @@ func mergeRaw(a, b rawInventory) rawInventory {
 			for hn, hv := range g.Hosts {
 				if old := cur.Hosts[hn]; old != nil {
 					mergedHost := map[string]any{}
-					for k, v := range old {
-						mergedHost[k] = v
-					}
-					for k, v := range hv {
-						mergedHost[k] = v
-					}
+					maps.Copy(mergedHost, old)
+					maps.Copy(mergedHost, hv)
 					cur.Hosts[hn] = mergedHost
 				} else {
 					cur.Hosts[hn] = hv
@@ -139,9 +131,7 @@ func mergeRaw(a, b rawInventory) rawInventory {
 // mergeVars 深合并变量 map（b 覆盖 a；嵌套 map 递归，标量与列表整体替换）。
 func mergeVars(a, b map[string]any) map[string]any {
 	out := make(map[string]any, len(a)+len(b))
-	for k, v := range a {
-		out[k] = v
-	}
+	maps.Copy(out, a)
 	for k, v := range b {
 		if am, ok := out[k].(map[string]any); ok {
 			if bm, ok := v.(map[string]any); ok {
@@ -168,7 +158,7 @@ func ParseWithConfig(data []byte, cfg *config.Config) (*Inventory, error) {
 func parseOne(data []byte, varDirs []string, cfg *config.Config) (*Inventory, error) {
 	var raw rawInventory
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf(i18n.T("failed to parse inventory: %w", "解析 inventory 失败: %w"), err)
+		return nil, fmt.Errorf("failed to parse inventory: %w", err)
 	}
 	return build(raw, varDirs, cfg)
 }

@@ -1,0 +1,30 @@
+# docker 卸载相位：停服 → 删单元与配置；二进制与数据目录默认保留
+#（uninstall_remove_binaries: true 时彻底清理，不可逆）。
+
+- name: 卸载 docker
+  hosts: docker
+  become: true
+  tasks:
+    - name: 停止并禁用 docker
+      systemd_unit:
+        name: docker.service
+        state: stopped
+        enabled: false
+
+    - name: 移除单元文件
+      file:
+        path: /etc/systemd/system/docker.service
+        state: absent
+
+    - name: 移除 daemon.json
+      file:
+        path: "{{ .conf_dir }}/daemon.json"
+        state: absent
+
+    - name: daemon-reload（unit 移除后刷新）
+      shell: systemctl daemon-reload
+      changed_when: '{{ false }}'
+
+    - name: 移除二进制、cli 插件与数据目录（可选，不可逆）
+      shell: 'rm -rf -- {{ .bin_dir }}/{containerd,containerd-shim-runc-v2,ctr,docker,docker-init,docker-proxy,dockerd,runc} {{ .cli_plugins_dir }} {{ .data_dir }}/docker'
+      when: '{{ if .uninstall_remove_binaries }}yes{{ end }}'

@@ -2,15 +2,15 @@ package inventory
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
 	"wdp/internal/config"
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -24,9 +24,7 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 
 	// all 组
 	if all, ok := raw["all"]; ok {
-		for k, v := range all.Vars {
-			inv.AllVars[k] = v
-		}
+		maps.Copy(inv.AllVars, all.Vars)
 	}
 
 	// 按组名排序遍历（all 最先），保证同一主机在多个组定义时
@@ -35,7 +33,7 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 	for gname := range raw {
 		groupNames = append(groupNames, gname)
 	}
-	sort.Strings(groupNames)
+	slices.Sort(groupNames)
 
 	hostRaw := map[string]map[string]any{} // 主机名 → 合并后的原始参数
 	hostIndex := map[string]*model.Host{}
@@ -52,19 +50,27 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 		for hname := range g.Hosts {
 			hnames = append(hnames, hname)
 		}
-		sort.Strings(hnames)
+		slices.Sort(hnames)
 		for _, hname := range hnames {
 			mergeHostRaw(hostRaw, hname, g.Hosts[hname])
 			grp.HostNames = append(grp.HostNames, hname)
 		}
 		inv.Groups[gname] = grp
 	}
+	// 组级连接参数键：按变量域同序合并（all < 父组 < 子组），供 buildHost
+	// 在主机条目之下、wdp.cfg 默认值之上取值（组级 conn/user 等由此生效）
+	membership := inv.groupMembership()
 	// 构建主机对象并回填组成员
 	inv.Hosts = make([]*model.Host, 0, len(hostRaw))
 	for hname, hvars := range hostRaw {
-		h, err := buildHost(hname, hvars, cfg)
+		groupVars := map[string]any{}
+		maps.Copy(groupVars, inv.AllVars)
+		for _, g := range membership[hname] {
+			maps.Copy(groupVars, inv.Groups[g].Vars)
+		}
+		h, err := buildHost(hname, hvars, groupVars, cfg)
 		if err != nil {
-			return nil, fmt.Errorf(i18n.T("host %s: %w", "主机 %s: %w"), hname, err)
+			return nil, fmt.Errorf("host %s: %w", hname, err)
 		}
 		hostIndex[hname] = h
 		inv.Hosts = append(inv.Hosts, h)
@@ -79,7 +85,7 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 	for _, grp := range inv.Groups {
 		for _, c := range grp.Children {
 			if _, ok := inv.Groups[c]; !ok {
-				return nil, fmt.Errorf(i18n.T("group %s references nonexistent child group %s", "组 %s 引用了不存在的子组 %s"), grp.Name, c)
+				return nil, fmt.Errorf("group %s references nonexistent child group %s", grp.Name, c)
 			}
 		}
 	}
@@ -91,8 +97,8 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 		}
 	}
 
-	sort.Slice(inv.Hosts, func(i, j int) bool { return inv.Hosts[i].Name < inv.Hosts[j].Name })
-	inv.applyVars(hostIndex)
+	slices.SortFunc(inv.Hosts, func(a, b *model.Host) int { return strings.Compare(a.Name, b.Name) })
+	inv.applyVars()
 	inv.precomputeTopology()
 	return inv, nil
 }
@@ -113,7 +119,7 @@ func (inv *Inventory) loadGroupVars(dir string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf(i18n.T("failed to read %s: %w", "读取 %s 失败: %w"), dir, err)
+		return fmt.Errorf("failed to read %s: %w", dir, err)
 	}
 	for _, e := range entries {
 		if e.IsDir() || !isYAMLName(e.Name()) {
@@ -142,7 +148,7 @@ func (inv *Inventory) loadHostVars(dir string) error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return fmt.Errorf(i18n.T("failed to read %s: %w", "读取 %s 失败: %w"), dir, err)
+		return fmt.Errorf("failed to read %s: %w", dir, err)
 	}
 	byName := map[string]*model.Host{}
 	for _, h := range inv.Hosts {
@@ -178,7 +184,7 @@ func readVarsYAML(path string) (map[string]any, error) {
 	}
 	var vars map[string]any
 	if err := yaml.Unmarshal(data, &vars); err != nil {
-		return nil, fmt.Errorf(i18n.T("parse failed: %w", "解析失败: %w"), err)
+		return nil, fmt.Errorf("parse failed: %w", err)
 	}
 	return vars, nil
 }
@@ -188,7 +194,5 @@ func mergeHostRaw(hostRaw map[string]map[string]any, name string, vars map[strin
 	if _, ok := hostRaw[name]; !ok {
 		hostRaw[name] = map[string]any{}
 	}
-	for k, v := range vars {
-		hostRaw[name][k] = v
-	}
+	maps.Copy(hostRaw[name], vars)
 }

@@ -87,7 +87,7 @@ Go text/template，`missingkey=error`（**未定义变量直接报错**，尽早
 
 > **安全说明**：模板函数走白名单而非"全集减黑名单"，以下函数不可用：
 > - `env` / `expandenv`——chart 模板不得读取控制端环境变量（其中可能含
->   `WDP_CA_PASSPHRASE` 与各类 `*_env` 密钥）；`getHostByName` 同理
+>   各类 `*_env` 密钥与 SSH 口令）；`getHostByName` 同理
 >   （DNS 查询可被用作隐蔽外传信道）。
 > - 证书/密钥生成与凭据散列原语——`genPrivateKey` / `genCA` / `genSignedCert` /
 >   `genSelfSignedCert` / `buildCustomCertificate` / `encryptAES` / `decryptAES` /

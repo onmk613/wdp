@@ -3,11 +3,11 @@ package executor
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
-	"wdp/internal/connection"
-	"wdp/internal/i18n"
+	"wdp/internal/conn"
 	"wdp/internal/model"
 	"wdp/internal/shellquote"
 )
@@ -19,15 +19,14 @@ func parseBatchSize(batch string, total int) int {
 	if s == "" {
 		return defaultBatchSize(total)
 	}
-	if strings.HasSuffix(s, "%") {
-		p, err := strconv.Atoi(strings.TrimSpace(strings.TrimSuffix(s, "%")))
+	if before, ok := strings.CutSuffix(s, "%"); ok {
+		p, err := strconv.Atoi(strings.TrimSpace(before))
 		if err != nil || p < 0 {
 			return defaultBatchSize(total)
 		}
-		size := (total*p + 99) / 100 // 向上取整
-		if size < 1 {
-			size = 1
-		}
+		size := max(
+			// 向上取整
+			(total*p+99)/100, 1)
 		return size
 	}
 	n, err := strconv.Atoi(s)
@@ -54,12 +53,8 @@ func chunkHosts(hosts []*model.Host, size int) [][]*model.Host {
 		size = 1
 	}
 	var out [][]*model.Host
-	for i := 0; i < len(hosts); i += size {
-		end := i + size
-		if end > len(hosts) {
-			end = len(hosts)
-		}
-		out = append(out, hosts[i:end])
+	for chunk := range slices.Chunk(hosts, size) {
+		out = append(out, chunk)
 	}
 	return out
 }
@@ -95,7 +90,7 @@ func (e *Executor) runGate(ctx context.Context, p *model.Play, gate *model.Task,
 // rollbackBatch 按变更日志逆序回滚一批主机（快照恢复/新建删除）。
 // 覆盖文件类变更（copy/template/file）；shell 等过程性变更无法自动回滚。
 // 每条动作打到其实际执行主机上（delegate_to 时快照在被委托主机）。
-func (e *Executor) rollbackBatch(ctx context.Context, p *model.Play, runs []*hostRun, stats map[string]*model.Stats) {
+func (e *Executor) rollbackBatch(ctx context.Context, runs []*hostRun, stats map[string]*model.Stats) {
 	rolled, rollFailed := 0, 0
 	for _, hr := range runs {
 		hr.mu.Lock()
@@ -106,8 +101,8 @@ func (e *Executor) rollbackBatch(ctx context.Context, p *model.Play, runs []*hos
 		}
 		hostOK := true
 		// 逆序恢复：后发生的变更先回滚
-		for i := len(acts) - 1; i >= 0; i-- {
-			je := acts[i]
+		for _, je := range slices.Backward(acts) {
+
 			a := je.action
 			target := je.execOn
 			if target == nil {
@@ -131,21 +126,21 @@ func (e *Executor) rollbackBatch(ctx context.Context, p *model.Play, runs []*hos
 				Host: hr.host.Name, Task: "auto-rollback", Module: "rollback",
 				Msg: msg,
 			}
-			conn, err := e.Conns.Get(ctx, target)
+			cn, err := e.Conns.Get(ctx, target)
 			if err != nil {
 				res.Failed = true
-				res.Msg += i18n.T(" failed (connection unavailable): ", " 失败（连接不可用）: ") + err.Error()
+				res.Msg += " failed (connection unavailable): " + err.Error()
 				hostOK = false
 			} else {
-				out, err := conn.Exec(ctx, connection.ExecRequest{Script: script, TimeoutMs: 30_000})
+				out, err := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30_000})
 				switch {
 				case err != nil:
 					res.Failed = true
-					res.Msg += i18n.T(" failed: ", " 失败: ") + err.Error()
+					res.Msg += " failed: " + err.Error()
 					hostOK = false
 				case out.Code != 0:
 					res.Failed = true
-					res.Msg += fmt.Sprintf(i18n.T(" failed rc=%d: %s", " 失败 rc=%d: %s"), out.Code, strings.TrimSpace(out.Stderr))
+					res.Msg += fmt.Sprintf(" failed rc=%d: %s", out.Code, strings.TrimSpace(out.Stderr))
 					hostOK = false
 				default:
 					res.Changed = true
@@ -161,11 +156,9 @@ func (e *Executor) rollbackBatch(ctx context.Context, p *model.Play, runs []*hos
 		}
 	}
 	if rollFailed > 0 {
-		e.Rep.PlayMsg(i18n.T("auto rollback finished: %d hosts restored, %d hosts FAILED (manual check required); procedural changes like shell cannot be auto-rolled-back",
-			"自动回滚结束：%d 台主机已恢复，%d 台失败（需人工检查）；过程性变更如 shell 无法自动回滚"), rolled, rollFailed)
+		e.Rep.PlayMsg("auto rollback finished: %d hosts restored, %d hosts FAILED (manual check required); procedural changes like shell cannot be auto-rolled-back", rolled, rollFailed)
 	} else {
-		e.Rep.PlayMsg(i18n.T("auto rollback complete: %d hosts restored from snapshots (procedural changes like shell cannot be auto-rolled-back)",
-			"自动回滚完成：%d 台主机按快照恢复（过程性变更如 shell 无法自动回滚）"), rolled)
+		e.Rep.PlayMsg("auto rollback complete: %d hosts restored from snapshots (procedural changes like shell cannot be auto-rolled-back)", rolled)
 	}
 }
 

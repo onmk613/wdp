@@ -9,19 +9,20 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 )
 
 // unitShell 模拟 systemctl + putFile 用到的 sha256sum/stat 探测。
 // 文件内容落在 Fake 内存表（上传走真实 UploadFile）。
 type unitShell struct {
-	fake    *connection.Fake
+	fake    *fake.Fake
 	active  map[string]bool
 	enabled map[string]bool
 	runs    []string // systemctl 变更命令记录
 }
 
-func newUnitRC(t *testing.T) (*RunContext, *connection.Fake, *unitShell) {
+func newUnitRC(t *testing.T) (*RunContext, *fake.Fake, *unitShell) {
 	t.Helper()
 	rc, fake := newTestRC(t)
 	sh := &unitShell{
@@ -29,36 +30,36 @@ func newUnitRC(t *testing.T) (*RunContext, *connection.Fake, *unitShell) {
 		active:  map[string]bool{},
 		enabled: map[string]bool{},
 	}
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
 		case strings.Contains(s, "command -v systemctl"):
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "sha256sum"):
 			path := extractQuoted(s, "p=")
 			data, ok := fake.Files[path]
 			if !ok {
-				return connection.ExecResult{Code: 3}, nil
+				return conn.ExecResult{Code: 3}, nil
 			}
 			h := sha256.Sum256(data)
-			return connection.ExecResult{Code: 0, Stdout: hex.EncodeToString(h[:]) + "  " + path + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: hex.EncodeToString(h[:]) + "  " + path + "\n"}, nil
 		case strings.Contains(s, "stat -c"):
 			path := extractQuoted(s, "p=")
 			mode, ok := fake.Modes[path]
 			if !ok {
-				return connection.ExecResult{Code: 3}, nil
+				return conn.ExecResult{Code: 3}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: fmt.Sprintf("%o", mode.Perm())}, nil
+			return conn.ExecResult{Code: 0, Stdout: fmt.Sprintf("%o", mode.Perm())}, nil
 		case strings.Contains(s, "systemctl is-active"):
 			if sh.active[firstQuoted(s)] {
-				return connection.ExecResult{Code: 0}, nil
+				return conn.ExecResult{Code: 0}, nil
 			}
-			return connection.ExecResult{Code: 3}, nil
+			return conn.ExecResult{Code: 3}, nil
 		case strings.Contains(s, "systemctl is-enabled"):
 			if sh.enabled[firstQuoted(s)] {
-				return connection.ExecResult{Code: 0, Stdout: "enabled\n"}, nil
+				return conn.ExecResult{Code: 0, Stdout: "enabled\n"}, nil
 			}
-			return connection.ExecResult{Code: 1, Stderr: "disabled"}, nil
+			return conn.ExecResult{Code: 1, Stderr: "disabled"}, nil
 		case strings.HasPrefix(s, "systemctl"):
 			// 变更命令：daemon-reload / start / stop / restart / reload / enable / disable
 			verb := strings.Fields(s)[1]
@@ -77,9 +78,9 @@ func newUnitRC(t *testing.T) (*RunContext, *connection.Fake, *unitShell) {
 				}
 			}
 			sh.runs = append(sh.runs, s)
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		default:
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		}
 	}
 	return rc, fake, sh
@@ -239,7 +240,7 @@ func TestSystemdUnitCheckMode(t *testing.T) {
 	if !r.Changed || !strings.HasPrefix(r.Msg, "[check]") {
 		t.Fatalf("check 预估: %+v", r)
 	}
-	if !strings.Contains(r.Msg, "daemon-reload") || !strings.Contains(r.Msg, "启动") {
+	if !strings.Contains(r.Msg, "daemon-reload") || !strings.Contains(r.Msg, "would start") {
 		t.Fatalf("check 消息: %q", r.Msg)
 	}
 	if !strings.Contains(r.Diff, "+ myapp.service: active") || !strings.Contains(r.Diff, "+ myapp.service: enabled") {
@@ -257,7 +258,7 @@ func TestSystemdUnitCheckMode(t *testing.T) {
 	rc2.CheckMode = true
 	mod2 := &SystemdUnitModule{}
 	r2 := mod2.Run(rc2, map[string]any{"name": "myapp.service", "content": "x\n"}, "")
-	if r2.Failed || !r2.Changed || !strings.Contains(r2.Msg, "unit 文件将写入") {
+	if r2.Failed || !r2.Changed || !strings.Contains(r2.Msg, "unit file would be written") {
 		t.Fatalf("check 首次应预估写入: %+v", r2)
 	}
 	if len(sh2.runs) != 0 || len(fake2.Files) != 0 {
@@ -299,13 +300,71 @@ func TestSystemdUnitValidation(t *testing.T) {
 	if r := mod.Run(rc, map[string]any{"name": "a/b.service", "content": "x"}, ""); !r.Failed || !strings.Contains(r.Msg, "basename") {
 		t.Fatalf("name 含 /: %+v", r)
 	}
-	if r := mod.Run(rc, map[string]any{"name": "a.service"}, ""); !r.Failed {
-		t.Fatal("content/src 缺失应失败")
+	if r := mod.Run(rc, map[string]any{"name": "a.service"}, ""); !r.Failed || !strings.Contains(r.Msg, "nothing to manage") {
+		t.Fatalf("空任务（无文件无状态）应失败: %+v", r)
 	}
 	if r := mod.Run(rc, map[string]any{"name": "a.service", "content": "x", "src": "f"}, ""); !r.Failed {
 		t.Fatal("content 与 src 同时给应失败")
 	}
 	if r := mod.Run(rc, map[string]any{"name": "a.service", "content": "x", "state": "weird"}, ""); !r.Failed || !strings.Contains(r.Msg, "state") {
 		t.Fatalf("非法 state: %+v", r)
+	}
+}
+
+// TestSystemdUnitStateOnly 纯状态管理（无 content/src）：handler 重启与
+// 卸载停服场景。回归：互斥检查曾把"两者都缺"误判为互斥，导致
+// name+state 形态全部失败（test/lab demoapp handler 首次暴露）。
+func TestSystemdUnitStateOnly(t *testing.T) {
+	rc, fk, sh := newUnitRC(t)
+	sh.active["demoapp.service"] = true
+	sh.enabled["demoapp.service"] = true
+	mod := &SystemdUnitModule{}
+
+	// handler 形态：name + restarted（不部署文件）
+	r := mod.Run(rc, map[string]any{"name": "demoapp.service", "state": "restarted"}, "")
+	if r.Failed {
+		t.Fatalf("纯状态管理不应失败: %+v", r)
+	}
+	if !r.Changed || !strings.Contains(r.Msg, "restart") {
+		t.Fatalf("应执行 restart: %+v", r)
+	}
+	// 不写 unit 文件
+	if _, ok := fk.File("/etc/systemd/system/demoapp.service"); ok {
+		t.Fatal("纯状态管理不应写 unit 文件")
+	}
+	for _, s := range sh.runs {
+		if strings.Contains(s, "daemon-reload") {
+			t.Fatalf("无文件变更不应 daemon-reload: %v", sh.runs)
+		}
+	}
+
+	// 卸载形态：name + stopped + enabled=false
+	r = mod.Run(rc, map[string]any{"name": "demoapp.service", "state": "stopped", "enabled": false}, "")
+	if r.Failed || !r.Changed {
+		t.Fatalf("停服+禁用应成功且变更: %+v", r)
+	}
+	if sh.active["demoapp.service"] || sh.enabled["demoapp.service"] {
+		t.Fatal("服务应已停止并禁用")
+	}
+}
+
+// TestSystemdUnitStateOnlyCheckMode 纯状态管理的 check 预估（只探测不执行）。
+func TestSystemdUnitStateOnlyCheckMode(t *testing.T) {
+	rc, fk, sh := newUnitRC(t)
+	rc.CheckMode = true
+	sh.active["demoapp.service"] = true
+	mod := &SystemdUnitModule{}
+	r := mod.Run(rc, map[string]any{"name": "demoapp.service", "state": "restarted"}, "")
+	if r.Failed {
+		t.Fatalf("check 预估不应失败: %+v", r)
+	}
+	if !r.Changed || !strings.Contains(r.Msg, "[check]") || !strings.Contains(r.Msg, "would restart") {
+		t.Fatalf("应预估 would restart: %+v", r)
+	}
+	if len(sh.runs) != 0 {
+		t.Fatalf("check 模式不应执行变更命令: %v", sh.runs)
+	}
+	if _, ok := fk.File("/etc/systemd/system/demoapp.service"); ok {
+		t.Fatal("check 模式不应写 unit 文件")
 	}
 }

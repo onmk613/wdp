@@ -4,7 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 )
 
 // groupShell 模拟 getent/groupadd/groupmod/groupdel。
@@ -17,20 +18,20 @@ func newGroupRC(t *testing.T) (*RunContext, *groupShell) {
 	t.Helper()
 	rc, _ := newTestRC(t)
 	sh := &groupShell{gids: map[string]string{}}
-	fake := rc.Conn.(*connection.Fake)
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	fake := rc.Conn.(*fake.Fake)
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
 		case strings.Contains(s, "groupdel"):
 			delete(sh.gids, firstQuoted(s))
 			sh.runs = append(sh.runs, s)
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "groupmod"):
 			fields := strings.Fields(s)
 			gid, name := fields[2], strings.Trim(fields[3], "'")
 			sh.gids[name] = gid
 			sh.runs = append(sh.runs, s)
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "groupadd"):
 			fields := strings.Fields(s)
 			gid, name := "1000", strings.Trim(fields[len(fields)-1], "'")
@@ -41,20 +42,20 @@ func newGroupRC(t *testing.T) (*RunContext, *groupShell) {
 			}
 			sh.gids[name] = gid
 			sh.runs = append(sh.runs, s)
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "getent group") && strings.Contains(s, "cut -d: -f3"):
 			gid, ok := sh.gids[firstQuoted(s)]
 			if !ok {
-				return connection.ExecResult{Code: 2}, nil
+				return conn.ExecResult{Code: 2}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: gid + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: gid + "\n"}, nil
 		case strings.Contains(s, "getent group") && strings.Contains(s, ">/dev/null"):
 			if _, ok := sh.gids[firstQuoted(s)]; !ok {
-				return connection.ExecResult{Code: 2}, nil
+				return conn.ExecResult{Code: 2}, nil
 			}
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		default:
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		}
 	}
 	return rc, sh
@@ -146,7 +147,7 @@ func TestGroupCheckMode(t *testing.T) {
 
 	// 创建预估
 	r := mod.Run(rc, map[string]any{"name": "deploy", "gid": 2000}, "")
-	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "[check] 组 deploy 将创建") {
+	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "[check] group deploy would be created") {
 		t.Fatalf("创建预估: %+v", r)
 	}
 	if !strings.Contains(r.Diff, "+ gid 2000") {
@@ -155,7 +156,7 @@ func TestGroupCheckMode(t *testing.T) {
 	// GID 漂移预估
 	sh.gids["app"] = "1005"
 	r = mod.Run(rc, map[string]any{"name": "app", "gid": 2010}, "")
-	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "将调整 gid") {
+	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "would adjust gid") {
 		t.Fatalf("漂移预估: %+v", r)
 	}
 	if !strings.Contains(r.Diff, "- gid 1005") || !strings.Contains(r.Diff, "+ gid 2010") {
@@ -163,7 +164,7 @@ func TestGroupCheckMode(t *testing.T) {
 	}
 	// 删除预估
 	r = mod.Run(rc, map[string]any{"name": "app", "state": "absent"}, "")
-	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "将删除") {
+	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "would be removed") {
 		t.Fatalf("删除预估: %+v", r)
 	}
 	if len(sh.runs) != 0 {

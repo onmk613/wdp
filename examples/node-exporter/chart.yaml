@@ -1,0 +1,9 @@
+name: node-exporter
+version: 1.0.0
+description: >-
+  node_exporter 主机指标采集器（Prometheus 官方 release，可选 SMART 磁盘指标：
+  smartmon.sh + textfile collector，systemd timer 周期采集）。独立应用包：
+  在线/离线双模式，完整生命周期（deploy / status / uninstall），
+  可 wdp package 打成 tgz 离线分发。
+
+required: []

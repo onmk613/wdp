@@ -1,0 +1,32 @@
+# SMART 磁盘指标片段（deploy.yaml 经 include 展开，共享当前变量域）：
+# smartmon.sh 采集 → textfile collector → node_exporter 暴露。
+# 开关条件由 include 任务自身携带（dig 支持按主机覆盖 node_exporter_smart）。
+
+- name: 安装 smartmontools（SMART 采集依赖）
+  package:
+    name: smartmontools
+    state: present
+
+- name: 部署 smartmon.sh 采集脚本
+  copy:
+    src: files/smartmon.sh
+    dest: "{{ .bin_dir }}/smartmon.sh"
+    mode: "0755"
+
+- name: 创建 textfile collector 目录
+  file:
+    path: "{{ .collector_textfile_directory }}"
+    state: directory
+    mode: "0755"
+
+- name: 部署 SMART 采集 service 单元（oneshot，由 timer 拉起）
+  systemd_unit:
+    name: node-exporter-smartmon.service
+    src: templates/node-exporter-smartmon.service.tpl
+
+- name: 启动 SMART 采集 timer
+  systemd_unit:
+    name: node-exporter-smartmon.timer
+    src: templates/node-exporter-smartmon.timer.tpl
+    state: started
+    enabled: true

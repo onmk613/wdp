@@ -7,11 +7,10 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net"
+	"net/url"
 	"strings"
 	"time"
 )
-
-// 证书信息解析（ca show 的域逻辑）：解析为结构化信息，展示由命令层渲染。
 
 // CertInfo 是证书的可读信息。
 type CertInfo struct {
@@ -29,6 +28,9 @@ type CertInfo struct {
 	ExtKeyUsage []string
 	DNSNames    []string // 服务端证书的 DNS SAN
 	IPs         []string // 服务端证书的 IP SAN
+	URIs        []string // URI SAN（spiffe 风格标识等）
+	Emails      []string // Email SAN
+	Signature   string   // 签名算法（如 ECDSA-SHA256、SHA256-RSA）
 	PublicKey   string   // 公钥算法与参数（如 ECDSA P-256、RSA 2048 bit）
 	Fingerprint string   // SHA256 指纹（sha256:hex，供 --pin-client-fp）
 }
@@ -54,6 +56,9 @@ func Inspect(path string) (*CertInfo, error) {
 		ExtKeyUsage: extKeyUsageNames(cert.ExtKeyUsage),
 		DNSNames:    cert.DNSNames,
 		IPs:         ipStrings(cert.IPAddresses),
+		URIs:        uriStrings(cert.URIs),
+		Emails:      cert.EmailAddresses,
+		Signature:   cert.SignatureAlgorithm.String(),
 		PublicKey:   pubKeyName(cert.PublicKey),
 		Fingerprint: FingerprintDER(cert.Raw),
 	}, nil
@@ -102,6 +107,14 @@ func extKeyUsageNames(ekus []x509.ExtKeyUsage) []string {
 		} else {
 			out = append(out, fmt.Sprintf("ExtKeyUsage(%d)", e))
 		}
+	}
+	return out
+}
+
+func uriStrings(uris []*url.URL) []string {
+	out := make([]string, 0, len(uris))
+	for _, u := range uris {
+		out = append(out, u.String())
 	}
 	return out
 }

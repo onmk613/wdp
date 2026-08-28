@@ -9,19 +9,14 @@ import (
 	"testing"
 
 	"wdp/internal/config"
-	"wdp/internal/i18n"
 )
 
-// resetGlobals 恢复全局 flag 变量到内置默认（config.Current 由各自测试显式加载）。
+// resetGlobals 恢复全局 flag 变量与配置到内置默认。
 func resetGlobals() {
-	gConfig = config.DefaultPath
+	config.Reset()
 	gInventories = nil
-	gForks = 5
-	gTimeout = 0
-	gTaskTimeout = 0
 	gVerbosity = 0
 	gQuiet = false
-	gNoColor = false
 }
 
 // execRoot 以给定参数执行根命令（输出丢弃），返回执行错误。
@@ -53,14 +48,15 @@ func TestConfigAppliesToFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	resetGlobals()
-	if err := execRoot(t, "--config", cfg, "modules"); err != nil {
+	if err := execRoot(t, "--config", cfg, "template", "module"); err != nil {
 		t.Fatal(err)
 	}
-	if gInventories == nil || gInventories[0] != "hosts/prod.yaml" || gForks != 20 || gTaskTimeout != 300 {
-		t.Fatalf("配置未生效: inv=%v forks=%d task_timeout=%d", gInventories, gForks, gTaskTimeout)
+	c := config.Current()
+	if gInventories == nil || gInventories[0] != "hosts/prod.yaml" || c.Run.Forks != 20 || c.Run.TaskTimeout != 300 {
+		t.Fatalf("配置未生效: inv=%v forks=%d task_timeout=%d", gInventories, c.Run.Forks, c.Run.TaskTimeout)
 	}
-	if gVerbosity != 1 || !gNoColor {
-		t.Fatalf("bool 配置未生效: verbose=%d no_color=%v", gVerbosity, gNoColor)
+	if gVerbosity != 1 || c.Color() {
+		t.Fatalf("bool 配置未生效: verbose=%d color=%v", gVerbosity, c.Color())
 	}
 }
 
@@ -70,11 +66,11 @@ func TestExplicitFlagBeatsConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	resetGlobals()
-	if err := execRoot(t, "--config", cfg, "--forks", "8", "-i", "other.yaml", "modules"); err != nil {
+	if err := execRoot(t, "--config", cfg, "--forks", "8", "-i", "other.yaml", "template", "module"); err != nil {
 		t.Fatal(err)
 	}
-	if gForks != 8 || gInventories[0] != "other.yaml" {
-		t.Fatalf("显式 flag 应覆盖配置: forks=%d inv=%v", gForks, gInventories)
+	if config.Current().Run.Forks != 8 || gInventories[0] != "other.yaml" {
+		t.Fatalf("显式 flag 应覆盖配置: forks=%d inv=%v", config.Current().Run.Forks, gInventories)
 	}
 	// 未显式指定的 flag 仍取配置值
 	if gVerbosity != 1 {
@@ -85,25 +81,24 @@ func TestExplicitFlagBeatsConfig(t *testing.T) {
 func TestConfigMissingFile(t *testing.T) {
 	// 显式 --config 指向不存在的文件：报错
 	resetGlobals()
-	if err := execRoot(t, "--config", "/nonexistent/wdp.cfg", "modules"); err == nil {
+	if err := execRoot(t, "--config", "/nonexistent/wdp.cfg", "template", "module"); err == nil {
 		t.Fatal("显式指定的配置文件不存在应报错")
 	}
 
 	// 默认路径不存在：静默跳过，保持内置默认
 	resetGlobals()
 	t.Chdir(t.TempDir()) // cwd 无 wdp.cfg
-	if err := execRoot(t, "modules"); err != nil {
+	if err := execRoot(t, "template", "module"); err != nil {
 		t.Fatal(err)
 	}
-	if gForks != 5 || len(gInventories) != 1 || gInventories[0] != "inventory.yaml" || gVerbosity != 0 || gNoColor {
-		t.Fatalf("缺省应保持内置默认: forks=%d inv=%v", gForks, gInventories)
+	if config.Current().Forks() != 5 || len(gInventories) != 1 || gInventories[0] != "inventory.yaml" || gVerbosity != 0 || !config.Current().Color() {
+		t.Fatalf("缺省应保持内置默认: forks=%d inv=%v", config.Current().Forks(), gInventories)
 	}
 }
 
 // TestRootHelpGrouped 根帮助按命令组分类展示（部署/应用包/安全/代理/运维/其它），
 // 且每个命令都归属某个组。
 func TestRootHelpGrouped(t *testing.T) {
-	i18n.Resolve("en") // 断言英文组标题，与语言无关的稳定性
 	root := NewRootCmd()
 	var buf bytes.Buffer
 	root.SetOut(&buf)
@@ -126,14 +121,14 @@ func TestRootHelpGrouped(t *testing.T) {
 		t.Fatalf("存在未分组命令:\n%s", out)
 	}
 
-	// 组 ↔ 命令归属断言
+	// 组 ↔ 命令归属断言（直接断言组 ID 字面量，与 root.go 的分组定义对账）
 	want := map[string]string{
-		"run": groupDeploy, "adhoc": groupDeploy,
-		"new": groupChart, "template": groupChart, "lint": groupChart, "package": groupChart,
-		"ca":       groupSecurity,
-		"scan-ssh": groupSecurity,
-		"agent":    groupAgent,
-		"release":  groupOps, "modules": groupOps,
+		"run": "deploy", "adhoc": "deploy",
+		"template": "chart", "lint": "chart", "package": "chart",
+		"ca":       "security",
+		"scan-ssh": "security",
+		"agent":    "agent",
+		"drift":    "ops", "release": "ops", "inventory": "ops",
 	}
 	for _, c := range root.Commands() {
 		gid, ok := want[c.Name()]

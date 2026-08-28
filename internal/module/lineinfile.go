@@ -4,10 +4,10 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
-	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -24,35 +24,35 @@ func (m *LineinfileModule) Name() string { return "lineinfile" }
 
 // Desc 模块说明。
 func (m *LineinfileModule) Desc() string {
-	return i18n.T("manage single lines in remote files (present/absent/replace)", "管理远端文件中的单行（存在/缺席/替换）")
+	return "manage single lines in remote files (present/absent/replace)"
 }
 
 // Params 参数文档。
 func (m *LineinfileModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "path", Type: "string", Desc: "远端文件路径"},
-		{Name: "line", Type: "string", Desc: "目标行内容（state=absent 时可与 regexp 二选一）"},
-		{Name: "regexp", Type: "string", Desc: "匹配目标行的正则：present 替换首个匹配行；absent 删除全部匹配行"},
-		{Name: "state", Type: "string", Default: "present", Desc: "present 确保存在 / absent 确保缺席"},
-		{Name: "insertafter", Type: "string", Default: "EOF", Desc: "未命中时的插入位置：最后一个匹配行之后（EOF 表示文件末尾）"},
-		{Name: "create", Type: "bool", Default: "false", Desc: "文件不存在时创建（缺省报错）"},
-		{Name: "backup", Type: "bool", Default: "false", Desc: "修改前备份原文件（path.bak.时间戳）"},
-		{Name: "mode", Type: "mode", Default: "0644", Desc: "新建文件时的权限（已有文件保持原权限）"},
-		{Name: "owner", Type: "string", Desc: "属主（需 become: true）"},
-		{Name: "group", Type: "string", Desc: "属组（需 become: true）"},
+		{Name: "path", Type: "string", Desc: "remote file path"},
+		{Name: "line", Type: "string", Desc: "desired line content (for state=absent, either line or regexp)"},
+		{Name: "regexp", Type: "string", Desc: "regex matching target lines: present replaces the first match; absent removes all matches"},
+		{Name: "state", Type: "string", Default: "present", Desc: "present ensures the line exists / absent ensures it is gone"},
+		{Name: "insertafter", Type: "string", Default: "EOF", Desc: "insertion point when no match: after the last matched line (EOF means end of file)"},
+		{Name: "create", Type: "bool", Default: "false", Desc: "create the file when missing (default is to fail)"},
+		{Name: "backup", Type: "bool", Default: "false", Desc: "back up before modifying (path.bak.<timestamp>)"},
+		{Name: "mode", Type: "mode", Default: "0644", Desc: "mode for newly created files (existing files keep their mode)"},
+		{Name: "owner", Type: "string", Desc: "owner (requires become: true)"},
+		{Name: "group", Type: "string", Desc: "group (requires become: true)"},
 	}
 }
 
 // Example 示例任务。
 func (m *LineinfileModule) Example() string {
-	return `- name: 确保授权行存在（文件缺失则创建）
+	return `- name: ensure the grant line exists (create the file if missing)
   lineinfile:
     path: /etc/sudoers.d/deploy
     line: "deploy ALL=(ALL) NOPASSWD: ALL"
     create: true
     mode: "0440"
 
-- name: 替换首个匹配行（改前备份）
+- name: replace the first matching line (back up first)
   lineinfile:
     path: /etc/selinux/config
     regexp: "^SELINUX="
@@ -62,18 +62,18 @@ func (m *LineinfileModule) Example() string {
 }
 
 // Run 执行行级变更。
-func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	path, ok := argStr(args, "path")
 	if !ok || path == "" {
-		return Fail("%s", i18n.T("lineinfile requires a path parameter", "lineinfile 需要 path 参数"))
+		return Fail("%s", "lineinfile requires a path parameter")
 	}
 	line, hasLine := argStr(args, "line")
 	state, ok := parseState(args, "present", "present", "absent")
 	if !ok {
-		return Fail(i18n.T("unsupported state %q (options: present/absent)", "不支持的 state %q（可选: present/absent）"), state)
+		return Fail("unsupported state %q (options: present/absent)", state)
 	}
 	if state != "absent" && !hasLine {
-		return Fail("%s", i18n.T("lineinfile requires a line parameter (state=present)", "lineinfile 需要 line 参数（state=present）"))
+		return Fail("%s", "lineinfile requires a line parameter (state=present)")
 	}
 	if state == "absent" {
 		p, _ := argStr(args, "regexp")
@@ -81,7 +81,7 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 		// 所有空行，语义上几乎必然是误用，与无 regexp 的 absent 一并拒绝
 		if !hasLine || line == "" {
 			if p == "" {
-				return Fail("%s", i18n.T("state=absent requires a non-empty line or regexp (an empty line would match every blank line)", "state=absent 需要非空 line 或 regexp（空行会匹配全部空行）"))
+				return Fail("%s", "state=absent requires a non-empty line or regexp (an empty line would match every blank line)")
 			}
 		}
 	}
@@ -96,21 +96,21 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 		mode = int64(mv.Perm())
 	}
 	if (owner != "" || group != "") && !rc.Become {
-		return Fail(i18n.T("setting owner/group requires become: true (%s)", "设置 owner/group 需要 become: true（%s）"), path)
+		return Fail("setting owner/group requires become: true (%s)", path)
 	}
 
 	var re, after *regexp.Regexp
 	if pattern != "" {
 		r, err := regexp.Compile(pattern)
 		if err != nil {
-			return Fail(i18n.T("unable to parse regexp: %v", "regexp 无法解析: %v"), err)
+			return Fail("unable to parse regexp: %v", err)
 		}
 		re = r
 	}
 	if afterPattern != "" && afterPattern != "EOF" {
 		r, err := regexp.Compile(afterPattern)
 		if err != nil {
-			return Fail(i18n.T("unable to parse insertafter: %v", "insertafter 无法解析: %v"), err)
+			return Fail("unable to parse insertafter: %v", err)
 		}
 		after = r
 	}
@@ -122,10 +122,10 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 	if err := rc.Conn.DownloadFile(rc.Ctx, path, &buf); err != nil {
 		exists = false
 		if state == "absent" {
-			return &Result{Msg: fmt.Sprintf(i18n.T("%s does not exist, no change needed for state=absent", "%s 不存在，state=absent 无需变更"), path)}
+			return &Result{Msg: fmt.Sprintf("%s does not exist, no change needed for state=absent", path)}
 		}
 		if !create {
-			return Fail(i18n.T("file does not exist: %s (use create: true to create it)", "文件不存在: %s（可用 create: true 创建）"), path)
+			return Fail("file does not exist: %s (use create: true to create it)", path)
 		}
 	} else {
 		oldContent = buf.String()
@@ -136,9 +136,9 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 
 	// check 模式：只读对比返回变更预估（--diff 产出内容级差异），不回写
 	if rc.CheckMode {
-		res := &Result{Changed: changed, Msg: fmt.Sprintf(i18n.T("[check] %s will %s", "[check] %s 将%s"), path, changeLabel(changed))}
+		res := &Result{Changed: changed, Msg: fmt.Sprintf("[check] %s will %s", path, changeLabel(changed))}
 		if changed && rc.DiffMode {
-			res.Diff = diffText(oldContent, newContent, i18n.T("remote ", "远端 ")+path, i18n.T("target ", "目标 ")+path)
+			res.Diff = diffText(oldContent, newContent, "remote "+path, "target "+path)
 		}
 		return res
 	}
@@ -149,7 +149,7 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 			if out, bad := rc.exec(fmt.Sprintf("cp -a -- %s %s", shellquote.Quote(path), shellquote.Quote(bak))); bad != nil {
 				return bad
 			} else if out.Code != 0 {
-				return Fail(i18n.T("backup failed: %s", "备份失败: %s"), firstLine(out.Stderr))
+				return Fail("backup failed: %s", firstLine(out.Stderr))
 			}
 		}
 		// 变更前登记回滚动作（auto_rollback）：已存在 → 快照恢复；新建 → 回滚时删除
@@ -170,7 +170,7 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 			}
 		}
 		if err := uploadBytes(rc, path, []byte(newContent), uploadMode, true); err != nil {
-			return Fail(i18n.T("upload failed: %v", "上传失败: %v"), err)
+			return Fail("upload failed: %v", err)
 		}
 	}
 	// 属主漂移才校正（与 copy 的幂等收尾一致：探测驱动，变更计入 changed）
@@ -185,9 +185,9 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, free string)
 		}
 	}
 
-	msg := fmt.Sprintf(i18n.T("%s is already in the desired state", "%s 已是期望状态"), path)
+	msg := fmt.Sprintf("%s is already in the desired state", path)
 	if changed {
-		msg = fmt.Sprintf(i18n.T("%s updated", "%s 已更新"), path)
+		msg = fmt.Sprintf("%s updated", path)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }
@@ -226,11 +226,8 @@ func lineTransform(old, line string, re, after *regexp.Regexp, absent bool) stri
 			}
 		}
 	} else {
-		for _, l := range lines {
-			if l == line {
-				idx = -2
-				break
-			}
+		if slices.Contains(lines, line) {
+			idx = -2
 		}
 	}
 	switch {
@@ -241,8 +238,8 @@ func lineTransform(old, line string, re, after *regexp.Regexp, absent bool) stri
 	default: // 未命中：插入（insertafter 最后一个匹配行之后，缺省 EOF）
 		pos := len(out)
 		if after != nil {
-			for i := len(out) - 1; i >= 0; i-- {
-				if after.MatchString(out[i]) {
+			for i, o := range slices.Backward(out) {
+				if after.MatchString(o) {
 					pos = i + 1
 					break
 				}

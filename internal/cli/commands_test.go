@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"wdp/internal/i18n"
+	"wdp/internal/config"
 	"wdp/internal/model"
 )
 
@@ -34,8 +34,8 @@ func TestCommandTreeStructure(t *testing.T) {
 		top[c.Name()] = true
 	}
 	for _, name := range []string{
-		"run", "adhoc", "new", "template", "lint", "package",
-		"ca", "scan-ssh", "agent", "release", "modules",
+		"run", "adhoc", "template", "lint", "package",
+		"ca", "scan-ssh", "agent", "release",
 	} {
 		if !top[name] {
 			t.Fatalf("缺少顶层命令 %q", name)
@@ -51,6 +51,18 @@ func TestCommandTreeStructure(t *testing.T) {
 	for _, name := range []string{"init", "issue", "renew", "show"} {
 		if !caSub[name] {
 			t.Fatalf("ca 缺少子命令 %q", name)
+		}
+	}
+
+	// template 子命令
+	tplCmd := findCmd(t, root, "template")
+	tplSub := map[string]bool{}
+	for _, c := range tplCmd.Commands() {
+		tplSub[c.Name()] = true
+	}
+	for _, name := range []string{"new", "module", "render"} {
+		if !tplSub[name] {
+			t.Fatalf("template 缺少子命令 %q", name)
 		}
 	}
 
@@ -92,10 +104,6 @@ func TestRootPersistentFlags(t *testing.T) {
 	if out == nil || out.DefValue != "console" {
 		t.Fatalf("--output 默认应为 console, flag=%v", out)
 	}
-	lang := pf.Lookup("lang")
-	if lang == nil || lang.DefValue != "auto" {
-		t.Fatalf("--lang 默认应为 auto, flag=%v", lang)
-	}
 }
 
 // TestForksDefaultFromConfig 验证 --forks 未显式指定时取 wdp.cfg 的 run.forks。
@@ -106,11 +114,11 @@ func TestForksDefaultFromConfig(t *testing.T) {
 	}
 	resetGlobals()
 	// modules 仅列内置模块，不触达 inventory/SSH，安全。
-	if err := execRoot(t, "--config", cfg, "modules"); err != nil {
+	if err := execRoot(t, "--config", cfg, "template", "module"); err != nil {
 		t.Fatal(err)
 	}
-	if gForks != 12 {
-		t.Fatalf("--forks 未取配置默认: got=%d, 期望 12", gForks)
+	if got := config.Current().Run.Forks; got != 12 {
+		t.Fatalf("--forks 未取配置默认: got=%d, want 12", got)
 	}
 }
 
@@ -176,20 +184,20 @@ func TestAgentPinClientFpRepeatable(t *testing.T) {
 
 // TestHelpPathsDoNotExecute 所有子命令的 --help 路径均安全返回 nil（不触达业务执行）。
 func TestHelpPathsDoNotExecute(t *testing.T) {
-	i18n.Resolve("en") // 固定语言，避免 auto 依赖环境
 	for _, args := range [][]string{
 		{"--help"},
 		{"run", "--help"},
 		{"adhoc", "--help"},
-		{"new", "--help"},
 		{"template", "--help"},
+		{"template", "new", "--help"},
+		{"template", "module", "--help"},
+		{"template", "render", "--help"},
 		{"lint", "--help"},
 		{"package", "--help"},
 		{"ca", "--help"},
 		{"scan-ssh", "--help"},
 		{"agent", "--help"},
 		{"release", "--help"},
-		{"modules", "--help"},
 	} {
 		if err := execRoot(t, args...); err != nil {
 			t.Fatalf("%v 帮助路径应返回 nil，实际: %v", args, err)
@@ -208,28 +216,6 @@ func strSlicesEqual(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-// TestSplitCSV 覆盖逗号分隔解析：空串、去空白、空项忽略。
-func TestSplitCSV(t *testing.T) {
-	cases := []struct {
-		name string
-		in   string
-		want []string
-	}{
-		{"空串", "", nil},
-		{"单值", "a", []string{"a"}},
-		{"多值", "a,b,c", []string{"a", "b", "c"}},
-		{"去空白", " a, ,b ", []string{"a", "b"}},
-		{"空项忽略", "a,,b", []string{"a", "b"}},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := splitCSV(c.in); !strSlicesEqual(got, c.want) {
-				t.Fatalf("splitCSV(%q) = %v, 期望 %v", c.in, got, c.want)
-			}
-		})
-	}
 }
 
 // TestParseAdhocArgs 覆盖 adhoc 参数解析：k=v 进入 args、其余拼接 free-form。
@@ -272,19 +258,6 @@ func TestReadLine(t *testing.T) {
 	}
 }
 
-// TestEoptsHosts 覆盖部署记录取首个 play 的 hosts 模式。
-func TestEoptsHosts(t *testing.T) {
-	if got := eoptsHosts(nil); got != "" {
-		t.Fatalf("nil plays = %q, 期望空", got)
-	}
-	if got := eoptsHosts([]*model.Play{}); got != "" {
-		t.Fatalf("空 plays = %q, 期望空", got)
-	}
-	if got := eoptsHosts([]*model.Play{{Hosts: "web"}, {Hosts: "db"}}); got != "web" {
-		t.Fatalf("取首个 play hosts = %q, 期望 %q", got, "web")
-	}
-}
-
 // TestModuleLabel 覆盖任务展示标签：chart 引用加前缀、普通模块直出。
 func TestModuleLabel(t *testing.T) {
 	if got := moduleLabel(&model.Task{ChartRef: "common@1.x"}); got != "chart:common@1.x" {
@@ -297,7 +270,7 @@ func TestModuleLabel(t *testing.T) {
 
 // TestBoolLabel 覆盖部署结果布尔标签。
 func TestBoolLabel(t *testing.T) {
-	if boolLabel(true) != "失败" || boolLabel(false) != "成功" {
+	if boolLabel(true) != "failed" || boolLabel(false) != "ok" {
 		t.Fatalf("boolLabel(true)=%q boolLabel(false)=%q", boolLabel(true), boolLabel(false))
 	}
 }
@@ -314,5 +287,46 @@ func TestSampleDomain(t *testing.T) {
 	}
 	if _, ok := values["inventory_hostname"]; ok {
 		t.Fatal("sampleDomain 污染了原 values map")
+	}
+}
+
+// TestTemplateModuleCompletion `template module` 补全：候选带模块描述、
+// 按前缀过滤、首个参数给出后不再补全（cobra __complete 协议）。
+func TestTemplateModuleCompletion(t *testing.T) {
+	root := NewRootCmd()
+	tpl := findCmd(t, root, "template")
+	mod := findCmd(t, tpl, "module")
+	if mod.ValidArgsFunction == nil {
+		t.Fatal("template module 未配置 ValidArgsFunction")
+	}
+
+	got, dir := mod.ValidArgsFunction(mod, nil, "")
+	if dir != cobra.ShellCompDirectiveNoFileComp {
+		t.Fatalf("directive = %v, 期望 NoFileComp", dir)
+	}
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "copy\t") || !strings.Contains(joined, "shell\t") {
+		t.Fatalf("候选缺少 copy/shell: %v", got)
+	}
+	for _, c := range got {
+		if !strings.Contains(c, "\t") {
+			t.Fatalf("候选 %q 缺少描述", c)
+		}
+	}
+
+	// 前缀过滤
+	got, _ = mod.ValidArgsFunction(mod, nil, "co")
+	for _, c := range got {
+		if !strings.HasPrefix(c, "co") {
+			t.Fatalf("候选 %q 未按前缀 co 过滤", c)
+		}
+	}
+	if len(got) == 0 {
+		t.Fatal("前缀 co 应有候选（copy/command）")
+	}
+
+	// 参数已齐：不再补全
+	if got, dir = mod.ValidArgsFunction(mod, []string{"copy"}, ""); got != nil || dir != cobra.ShellCompDirectiveNoFileComp {
+		t.Fatalf("参数已齐应返回空: %v %v", got, dir)
 	}
 }

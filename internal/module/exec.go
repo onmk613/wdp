@@ -3,7 +3,6 @@ package module
 import (
 	"fmt"
 
-	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -20,7 +19,7 @@ func (m *ShellModule) Name() string { return "shell" }
 
 // Desc 模块说明。
 func (m *ShellModule) Desc() string {
-	return i18n.T("run commands on remote hosts via sh", "在远端以 sh 执行命令")
+	return "run commands on remote hosts via sh"
 }
 
 // Run 执行 free-form 命令。
@@ -36,8 +35,8 @@ func (m *CommandModule) Name() string { return "command" }
 
 // Desc 模块说明。
 func (m *CommandModule) Desc() string {
-	return i18n.T("run commands on remote hosts (same as shell; both go through /bin/sh)",
-		"在远端执行命令（与 shell 一致，都经 /bin/sh）")
+	return "run commands on remote hosts (same as shell; both go through /bin/sh)"
+
 }
 
 // Run 执行命令（同一实现）。
@@ -53,7 +52,7 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 		}
 	}
 	if script == "" {
-		return Fail("%s", i18n.T("shell/command requires command content, e.g. `shell: uptime`", "shell/command 需要命令内容，如 `shell: uptime`"))
+		return Fail("%s", "shell/command requires command content, e.g. `shell: uptime`")
 	}
 	// creates: 文件已存在则跳过（幂等保护）
 	if creates, ok := argStr(args, "creates"); ok && creates != "" {
@@ -62,7 +61,7 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 			return bad
 		}
 		if out.Code == 0 {
-			return &Result{Msg: fmt.Sprintf(i18n.T("%s already exists, skipping", "%s 已存在，跳过"), creates)}
+			return &Result{Msg: fmt.Sprintf("%s already exists, skipping", creates)}
 		}
 	}
 	// removes: 文件不存在则跳过
@@ -72,14 +71,14 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 			return bad
 		}
 		if out.Code != 0 {
-			return &Result{Msg: fmt.Sprintf(i18n.T("%s does not exist, skipping", "%s 不存在，跳过"), removes)}
+			return &Result{Msg: fmt.Sprintf("%s does not exist, skipping", removes)}
 		}
 	}
 	if cwd, ok := argStr(args, "chdir"); ok && cwd != "" {
 		script = fmt.Sprintf("cd %s && %s", shellquote.Quote(cwd), script)
 	}
 	if rc.CheckMode {
-		return &Result{Changed: true, Msg: i18n.T("[check] will execute: ", "[check] 将执行: ") + firstLine(script)}
+		return &Result{Changed: true, Msg: "[check] will execute: " + firstLine(script)}
 	}
 	out, bad := rc.exec(script)
 	res := &Result{
@@ -93,7 +92,7 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 	}
 	if out.Code != 0 {
 		res.Failed = true
-		res.Msg = fmt.Sprintf(i18n.T("non-zero exit code rc=%d", "非零退出码 rc=%d"), out.Code)
+		res.Msg = fmt.Sprintf("non-zero exit code rc=%d", out.Code)
 	}
 	return res
 }
@@ -101,17 +100,17 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 // Params 参数文档。
 func (m *ShellModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "(free-form)", Type: "string", Desc: "要执行的命令（shell/command 一致：均经 /bin/sh 执行）"},
-		{Name: "cmd", Type: "string", Desc: "命令（free-form 为空时的替代写法）"},
-		{Name: "creates", Type: "string", Desc: "路径存在则跳过（幂等守卫）"},
-		{Name: "removes", Type: "string", Desc: "路径不存在则跳过（幂等守卫）"},
-		{Name: "chdir", Type: "string", Desc: "执行前 cd 到该目录"},
+		{Name: "(free-form)", Type: "string", Desc: "command to run (shell and command are identical: both run via /bin/sh)"},
+		{Name: "cmd", Type: "string", Desc: "command (alternative when free-form is empty)"},
+		{Name: "creates", Type: "string", Desc: "skip when this path exists (idempotency guard)"},
+		{Name: "removes", Type: "string", Desc: "skip when this path is missing (idempotency guard)"},
+		{Name: "chdir", Type: "string", Desc: "chdir here before execution"},
 	}
 }
 
 // Example 示例任务。
 func (m *ShellModule) Example() string {
-	return `- name: 等待服务就绪
+	return `- name: wait for the service to be ready
   shell: 'curl -sf http://localhost:{{ .app.port }}/health'
   until: '{{ if eq .result.rc 0 }}ok{{ end }}'
   retries: 10
@@ -124,7 +123,7 @@ func (m *CommandModule) Params() []ParamDoc { return (&ShellModule{}).Params() }
 
 // Example 示例任务。
 func (m *CommandModule) Example() string {
-	return `- name: 幂等执行（产物存在则跳过）
+	return `- name: idempotent run (skipped once the artifact exists)
   command: ./migrate.sh
   args:
     creates: /opt/app/.migrated

@@ -10,7 +10,8 @@ import (
 	"testing"
 
 	"wdp/internal/chart"
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 )
@@ -20,13 +21,13 @@ import (
 func TestHandlerOnlyOnNotifyingHost(t *testing.T) {
 	var mu sync.Mutex
 	handlerHosts := map[string]bool{}
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "handler-ran") {
 			mu.Lock()
 			handlerHosts[host] = true
 			mu.Unlock()
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "webservers",
@@ -55,13 +56,13 @@ func TestHandlerOnlyOnNotifyingHost(t *testing.T) {
 func TestWhenSkipRegisters(t *testing.T) {
 	var mu sync.Mutex
 	rendered := map[string]bool{}
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "downstream-ok") {
 			mu.Lock()
 			rendered[host] = true
 			mu.Unlock()
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "webservers",
@@ -83,13 +84,13 @@ func TestWhenSkipRegisters(t *testing.T) {
 func TestEmptyLoopRegistersResults(t *testing.T) {
 	var mu sync.Mutex
 	rendered := map[string]bool{}
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "zero-ok") {
 			mu.Lock()
 			rendered[host] = true
 			mu.Unlock()
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "webservers",
@@ -111,16 +112,16 @@ func TestEmptyLoopRegistersResults(t *testing.T) {
 func TestFailedHostSkippedInLaterPlays(t *testing.T) {
 	var mu sync.Mutex
 	second := map[string]bool{}
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "fail-h1") && host == "h1" {
-			return connection.ExecResult{Code: 1, Stderr: "boom"}, nil
+			return conn.ExecResult{Code: 1, Stderr: "boom"}, nil
 		}
 		if strings.Contains(req.Script, "second-play") {
 			mu.Lock()
 			second[host] = true
 			mu.Unlock()
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{
 		{Hosts: "webservers", Tasks: []*model.Task{{Name: "install", Module: "shell", FreeForm: "fail-h1"}}},
@@ -135,7 +136,7 @@ func TestFailedHostSkippedInLaterPlays(t *testing.T) {
 	if !second["h2"] {
 		t.Fatalf("h2 正常，应执行 play2:\n%s", rep.joined())
 	}
-	if !strings.Contains(rep.joined(), "此前失败") {
+	if !strings.Contains(rep.joined(), "failed previously") {
 		t.Fatalf("应提示主机被跳过:\n%s", rep.joined())
 	}
 }
@@ -144,9 +145,9 @@ func TestFailedHostSkippedInLaterPlays(t *testing.T) {
 // （回归：此前 until 把 retries 当总次数，与无 until 的语义不一致）。
 func TestUntilRetriesPlusOne(t *testing.T) {
 	calls := 0
-	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		calls++
-		return connection.ExecResult{Code: 1}, nil // 永不满足
+		return conn.ExecResult{Code: 1}, nil // 永不满足
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -162,7 +163,7 @@ func TestUntilRetriesPlusOne(t *testing.T) {
 	if calls != 3 {
 		t.Fatalf("retries=2 应为 3 次尝试（1+2），实际 %d", calls)
 	}
-	if !strings.Contains(rep.joined(), "3 次尝试后仍未满足") {
+	if !strings.Contains(rep.joined(), "unmet after 3 attempts") {
 		t.Fatalf("%s", rep.joined())
 	}
 }
@@ -172,8 +173,8 @@ func TestChartSelfReferenceNoCrash(t *testing.T) {
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
-		return connection.NewFake(h), nil
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		return fake.NewFake(h), nil
 	})
 	inv, err := inventory.Parse([]byte(testInv))
 	if err != nil {
@@ -198,19 +199,19 @@ func TestChartSelfReferenceNoCrash(t *testing.T) {
 			{Name: "入口", ChartRef: "b"},
 		}}},
 	}
-	ex := New(inv, connection.NewManager(), rep, Options{Forks: 2, Chart: root, Values: map[string]any{}, BaseDir: t.TempDir()})
+	ex := New(inv, conn.NewManager(), rep, Options{Forks: 2, Chart: root, Values: map[string]any{}, BaseDir: t.TempDir()})
 	if !ex.Run(context.Background(), root.Deploy) {
 		t.Fatalf("环引用应报告失败（而非崩溃）:\n%s", rep.joined())
 	}
-	if !strings.Contains(rep.joined(), "深度上限") {
+	if !strings.Contains(rep.joined(), "depth limit") {
 		t.Fatalf("应报告环引用深度错误:\n%s", rep.joined())
 	}
 }
 
 // TestLastStatsIsSnapshot LastStats 返回快照：修改返回 map 不影响内部统计。
 func TestLastStatsIsSnapshot(t *testing.T) {
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0}, nil
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "webservers",

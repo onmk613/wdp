@@ -212,8 +212,62 @@ register 变量**跨批次、跨 play 延续**（serial 分批时第一批注册
 | `play_batch` | 当前批次主机名 | `{{ .play_batch }}` |
 | `groups` | 组名 → 成员列表（含动态组） | `{{ index .groups "webservers" }}` |
 | `hosts` | 主机名 → {name,address,port,conn} | `{{ (index .hosts "web2").address }}` |
+| `hostvars` | 主机名 → 该主机变量域（inventory 变量 + fact store） | `{{ (index .hostvars "web2").node_id }}` |
 
 facts 类变量（setup/stat 采集）直接进入变量域顶层（如 `.os.family`、`.cpus`、`.stat.exists`），且跨批次、跨 play、跨子 chart 作用域延续。
+
+### 跨主机事实：set_fact + hostvars
+
+`register` 结果只进本机变量域；`set_fact` 写入控制端 fact store，后续 play 里
+其他主机经 `.hostvars` 可读——两段式编排（收集 → 配置）解决集群耦合配置：
+
+```yaml
+- name: 收集
+  hosts: etcd
+  tasks:
+    - set_fact:
+        node_id: '{{ .inventory_hostname | trunc 2 }}'
+
+- name: 配置（模板内引用全集群事实）
+  hosts: etcd
+  tasks:
+    - template:
+        src: etcd.conf.tpl    # {{ range .play_hosts }}{{ (index $.hostvars .).node_id }},{{ end }}
+        dest: /etc/etcd/etcd.conf
+```
+
+- 快照按批次生成：同批次内先执行主机写入的 facts 对后执行主机不可见，下一批次/play 可见
+- `--fact-cache <path>` 把 fact store 持久化为 JSON 跨运行复用（启动加载、结束原子落盘，损坏自动忽略）
+- 可选键访问用 `dig`（缺失键直接 `.key` 会报错）：`{{ dig "node_id" "" (index .hostvars "web2") }}`
+
+### add_host：运行期扩主机
+
+```yaml
+- name: 注册扩容节点（后续 play 的 hosts: etcd 即刻可选中新成员）
+  add_host:
+    name: node5
+    address: 10.0.0.5
+    groups: [etcd]
+    vars: {zone: az2}
+```
+
+已存在同名主机时仅更新地址/端口/连接字段与变量；`groups`/`hosts`/`hostvars`
+与 `group_by` 动态组同一生效时机（下一批次/play）。
+
+### include：任务片段（文件级拆分）
+
+```yaml
+tasks:
+  - include: tasks/smart.yaml     # Load 阶段静态展开（import 语义）
+    when: '{{ .smart }}'          # when/tags/become/delegate_to/run_once 下沉到
+    tags: [smart]                 # 每个片段任务；when 与片段自身条件 AND 合并
+```
+
+- 片段相对路径以片段自身目录解析（嵌套 include 逐级相对），深度上限 32 防环引用
+- 静态展开使 `lint`/`render`/`--check` 看到完整任务树；片段缺失/为空在加载期报错
+- 与子 chart 的分工：include 是**文件拆分**（共享当前变量域），子 chart 是**组件复用**
+  （Helm 作用域隔离 + 版本约束）
+- `include` 不支持 `loop`（静态展开无运行期项；循环写在片段内任务上）
 
 ## 变量优先级（低 → 高）
 

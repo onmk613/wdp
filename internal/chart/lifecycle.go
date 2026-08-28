@@ -5,11 +5,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/module"
 )
@@ -47,7 +46,7 @@ func (c *Chart) Analyze() *Reversibility {
 		}
 	}
 	walk(c, "")
-	sort.Strings(r.Examples)
+	slices.Sort(r.Examples)
 	if len(r.Examples) > 5 {
 		r.Examples = r.Examples[:5]
 	}
@@ -82,29 +81,41 @@ func (r *Reversibility) classify(prefix string, t *model.Task) {
 	}
 }
 
-// Summary 渲染人读评估摘要（部署前提示用）。
-func (r *Reversibility) Summary() string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "可逆 %d（copy/template/file）", r.Reversible)
+// SummaryRow 是评估摘要的一行分类计数（呈现层排版与着色用）。
+type SummaryRow struct {
+	Label string // 分类标签
+	Count int    // 任务数
+	Note  string // 可选补充说明
+}
+
+// Rows 返回分类计数行（partial 为 0 时省略该行）。
+func (r *Reversibility) Rows() []SummaryRow {
+	rows := []SummaryRow{
+		{Label: "reversible", Count: r.Reversible, Note: "copy/template/file"},
+	}
 	if r.Partial > 0 {
-		fmt.Fprintf(&sb, " · 部分可逆 %d（unarchive 仅删除新建目录，覆盖已有文件不恢复）", r.Partial)
+		rows = append(rows, SummaryRow{Label: "partially reversible", Count: r.Partial,
+			Note: "unarchive only removes directories it created, overwritten files are not restored"})
 	}
-	fmt.Fprintf(&sb, " · 只读 %d · 不可逆 %d", r.ReadOnly, r.Irreversible)
-	if len(r.Examples) > 0 {
-		fmt.Fprintf(&sb, "，如: %s", strings.Join(r.Examples, "、"))
-	}
-	sb.WriteString("；")
+	rows = append(rows,
+		SummaryRow{Label: "read-only", Count: r.ReadOnly},
+		SummaryRow{Label: "irreversible", Count: r.Irreversible},
+	)
+	return rows
+}
+
+// LifecycleNote 返回生命周期能力说明（卸载 / 运行中自动回滚）。
+func (r *Reversibility) LifecycleNote() string {
 	switch {
 	case r.HasUninstall && r.AutoRollback:
-		sb.WriteString("支持卸载（uninstall.yaml）与运行内自动回滚")
+		return "uninstallable (uninstall.yaml) with in-run auto rollback"
 	case r.HasUninstall:
-		sb.WriteString("支持卸载（uninstall.yaml）；未配置 auto_rollback（运行内失败不自动恢复）")
+		return "uninstallable (uninstall.yaml); auto_rollback not configured (in-run failures are not recovered automatically)"
 	case r.AutoRollback:
-		sb.WriteString("支持运行内自动回滚；未提供 uninstall.yaml（不可卸载）")
+		return "in-run auto rollback supported; no uninstall.yaml (not uninstallable)"
 	default:
-		sb.WriteString("不可卸载、失败不自动回滚")
+		return "not uninstallable, no auto rollback on failure"
 	}
-	return sb.String()
 }
 
 // Uninstallable 报告该应用包整体是否可卸载。
@@ -120,16 +131,16 @@ func (c *Chart) PhasePlays(phase string) ([]*model.Play, error) {
 		return c.Deploy, nil
 	case "uninstall":
 		if c.Uninstall == nil {
-			return nil, fmt.Errorf(i18n.T("chart %s does not provide uninstall.yaml and cannot be uninstalled", "chart %s 未提供 uninstall.yaml，不可卸载"), c.Meta.Name)
+			return nil, fmt.Errorf("chart %s does not provide uninstall.yaml and cannot be uninstalled", c.Meta.Name)
 		}
 		return c.Uninstall, nil
 	case "status":
 		if c.Status == nil {
-			return nil, fmt.Errorf(i18n.T("chart %s does not provide status.yaml", "chart %s 未提供 status.yaml"), c.Meta.Name)
+			return nil, fmt.Errorf("chart %s does not provide status.yaml", c.Meta.Name)
 		}
 		return c.Status, nil
 	default:
-		return nil, fmt.Errorf(i18n.T("unknown --phase %q (options: deploy/uninstall/status)", "未知 --phase %q（可选: deploy/uninstall/status）"), phase)
+		return nil, fmt.Errorf("unknown --phase %q (options: deploy/uninstall/status)", phase)
 	}
 }
 
@@ -147,7 +158,7 @@ func (c *Chart) ValidateRequired(values map[string]any) error {
 		}
 	}
 	if len(missing) > 0 {
-		return fmt.Errorf(i18n.T("missing required config items (chart.yaml required): %s (provide via -f envs/*.yaml or --set)", "缺少必需配置项（chart.yaml required）: %s（用 -f envs/*.yaml 或 --set 提供）"),
+		return fmt.Errorf("missing required config items (chart.yaml required): %s (provide via -f envs/*.yaml or --set)",
 			strings.Join(missing, ", "))
 	}
 	return nil

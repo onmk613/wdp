@@ -13,6 +13,8 @@ myapp/
 ├── status.yaml         # 只读状态探测（可选）
 ├── _helpers.tpl        # 命名模板（可选）
 ├── templates/          # 配置文件模板（template 模块 src 引用）
+├── tasks/              # include 任务片段（可选：deploy.yaml 按需静态展开）
+├── files/              # 静态文件（可选：copy src 直接分发，不经模板渲染）
 ├── envs/               # 第 2 层：环境覆盖文件
 │   ├── prod.yaml
 │   └── staging.yaml
@@ -24,6 +26,15 @@ myapp/
 └── modules/            # 自带脚本模块（可选）
     └── my-check
 ```
+
+### 拆分与复用的三级工具
+
+| 需求 | 用法 | 变量域 |
+|---|---|---|
+| 把大 deploy.yaml 拆文件 | `include: tasks/smart.yaml`（Load 阶段静态展开；when/tags/become 下沉到片段任务） | 共享当前域 |
+| chart 内可选功能块 | include + `when: '{{ .smart }}'`（同一文件，条件开关） | 共享当前域 |
+| 跨 chart 组件复用 | `chart: jdk@^1.2`（版本约束 + 引用 vars） | Helm 作用域隔离 |
+| 集群耦合配置 | 收集 play `set_fact` → 配置 play `.hostvars`（见 [05](05-playbook任务编排.md#跨主机事实set_fact--hostvars)） | 控制端 fact store |
 
 ## chart.yaml 字段
 
@@ -40,6 +51,13 @@ marker_dir: /var/lib/wdp        # 目标机 release marker 目录（缺省此值
 no_marker: false                # true 不写 marker
 check_mode: supported           # 声明脚本模块（modules/）支持 check 模式预演；
                                 # 未声明时脚本模块在 --check 下被跳过
+
+inventory_override:             # values 键白名单：允许 inventory 组/主机同名变量
+  - tier                        # 反超 values（ansible 式语义的显式 opt-in）。
+                                # 未列入的键同名时 values 恒赢（run/drift 预检告警）；
+                                # 仅顶层 values 域生效（子 chart 作用域不适用）；
+                                # lint 校验键必须是 values 顶层键；marker/drift
+                                # 的 values 摘要不含覆盖结果
 ```
 
 ## 三层 values 叠加
@@ -186,13 +204,13 @@ deploy 成功后每台主机写入：
 - 父与全部子 chart 的 helpers 合并注册（子重名覆盖父）
 - 全部渲染场景可用：任务参数、配置模板、`include` 可参与管道
 
-## 生成器：wdp new
+## 生成器：wdp template new
 
 ```sh
-wdp new myapp                 # 最小骨架：values/deploy/uninstall/status/helpers/templates/envs
-wdp new myapp --full          # 全能力参考（下表全部能力均有可运行示例）
-wdp new myapp --dir /opt      # 指定生成目录（默认 .）
-wdp new --module user         # 查看模块参数文档与示例片段（等价 wdp modules user）
+wdp template new myapp                 # 最小骨架：values/deploy/uninstall/status/helpers/templates/envs
+wdp template new myapp --full          # 全能力参考（下表全部能力均有可运行示例）
+wdp template new myapp --dir /opt      # 指定生成目录（默认 .）
+wdp template module user         # 查看模块参数文档与示例片段（等价 wdp template module user）
 ```
 
 生成物保证 `wdp lint` 通过且 `--check` 本机演练可跑通（质量门随 CI 回归）——直接填写即可使用。`--full` 覆盖：三层 values、required、helpers、子 chart 版本约束、strategy（金丝雀+门+回滚）、hook、delegate_to、run_once、loop_var、block/rescue、group_by 动态分组、8 个新模块、output 控制。

@@ -2,8 +2,8 @@ package module
 
 import (
 	"fmt"
+	"strings"
 
-	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -19,25 +19,25 @@ func (m *ServiceModule) Name() string { return "service" }
 
 // Desc 模块说明。
 func (m *ServiceModule) Desc() string {
-	return i18n.T("manage systemd service state and boot enablement", "管理 systemd 服务状态与开机自启")
+	return "manage systemd service state and boot enablement"
 }
 
 // Run 管理服务状态与自启（is-active/is-enabled 漂移探测，幂等：
 // 仅状态漂移才动作；restarted/reloaded 恒动作；reloaded 对未运行服务等价 start）。
-func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *ServiceModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	name, ok := argStr(args, "name")
 	if !ok || name == "" {
-		return Fail("%s", i18n.T("service requires a name parameter", "service 需要 name 参数"))
+		return Fail("%s", "service requires a name parameter")
 	}
 	state, hasState := argStr(args, "state")
 	switch state {
 	case "", "started", "stopped", "restarted", "reloaded":
 	default:
-		return Fail(i18n.T("unsupported state %q (options: started/stopped/restarted/reloaded)", "不支持的 state %q（可选: started/stopped/restarted/reloaded）"), state)
+		return Fail("unsupported state %q (options: started/stopped/restarted/reloaded)", state)
 	}
 	enabled, hasEnabled := argBool(args, "enabled")
 	if !hasState && !hasEnabled {
-		return Fail("%s", i18n.T("service requires at least one of state or enabled", "service 需要 state 与 enabled 至少一项"))
+		return Fail("%s", "service requires at least one of state or enabled")
 	}
 
 	active, bad := isActive(rc, name)
@@ -54,29 +54,29 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *R
 	wouldActive, wouldEnabled := active, enabledNow
 	switch {
 	case state == "started" && !active:
-		verbs, logs = append(verbs, "start"), append(logs, "启动")
+		verbs, logs = append(verbs, "start"), append(logs, "start")
 		wouldActive = true
 	case state == "stopped" && active:
-		verbs, logs = append(verbs, "stop"), append(logs, "停止")
+		verbs, logs = append(verbs, "stop"), append(logs, "stop")
 		wouldActive = false
 	case state == "restarted":
-		verbs, logs = append(verbs, "restart"), append(logs, "重启")
+		verbs, logs = append(verbs, "restart"), append(logs, "restart")
 		wouldActive = true
 	case state == "reloaded":
 		if active {
-			verbs, logs = append(verbs, "reload"), append(logs, "重载")
+			verbs, logs = append(verbs, "reload"), append(logs, "reload")
 		} else {
 			// 未运行服务 reload 等价 start（收敛到运行态）
-			verbs, logs = append(verbs, "start"), append(logs, "启动")
+			verbs, logs = append(verbs, "start"), append(logs, "start")
 		}
 		wouldActive = true
 	}
 	switch {
 	case hasEnabled && enabled && !enabledNow:
-		verbs, logs = append(verbs, "enable"), append(logs, "启用自启")
+		verbs, logs = append(verbs, "enable"), append(logs, "enable autostart")
 		wouldEnabled = true
 	case hasEnabled && !enabled && enabledNow:
-		verbs, logs = append(verbs, "disable"), append(logs, "禁用自启")
+		verbs, logs = append(verbs, "disable"), append(logs, "disable autostart")
 		wouldEnabled = false
 	}
 
@@ -84,12 +84,12 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *R
 		res := &Result{Changed: len(verbs) > 0}
 		if res.Changed {
 			if hasState {
-				res.Msg = fmt.Sprintf("[check] 将%s %s（%s）", verbFor(state), name, joinCN(logs))
+				res.Msg = fmt.Sprintf("[check] would %s %s (%s)", verbFor(state), name, joinWords(logs))
 			} else {
-				res.Msg = fmt.Sprintf("[check] %s（%s）", name, joinCN(logs))
+				res.Msg = fmt.Sprintf("[check] %s (%s)", name, joinWords(logs))
 			}
 		} else {
-			res.Msg = fmt.Sprintf(i18n.T("[check] %s is already in the target state", "[check] %s 已是目标状态"), name)
+			res.Msg = fmt.Sprintf("[check] %s is already in the target state", name)
 		}
 		if rc.DiffMode && len(verbs) > 0 {
 			var lines []string
@@ -109,7 +109,7 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *R
 	}
 
 	if len(verbs) == 0 {
-		return &Result{Msg: fmt.Sprintf(i18n.T("%s is already in the target state", "%s 已是目标状态"), name)}
+		return &Result{Msg: fmt.Sprintf("%s is already in the target state", name)}
 	}
 	for _, v := range verbs {
 		out, bad := rc.exec(fmt.Sprintf("systemctl %s %s", v, shellquote.Quote(name)))
@@ -117,10 +117,10 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, free string) *R
 			return bad
 		}
 		if out.Code != 0 {
-			return Fail(i18n.T("systemctl %s %s failed: %s", "systemctl %s %s 失败: %s"), v, name, firstLine(out.Stderr))
+			return Fail("systemctl %s %s failed: %s", v, name, firstLine(out.Stderr))
 		}
 	}
-	return &Result{Changed: true, Msg: fmt.Sprintf("%s %s", name, joinCN(logs))}
+	return &Result{Changed: true, Msg: fmt.Sprintf("%s %s", name, joinWords(logs))}
 }
 
 func isActive(rc *RunContext, name string) (bool, *Result) {
@@ -143,13 +143,13 @@ func isEnabled(rc *RunContext, name string) (bool, *Result) {
 func verbFor(state string) string {
 	switch state {
 	case "started":
-		return "启动"
+		return "start"
 	case "stopped":
-		return "停止"
+		return "stop"
 	case "restarted":
-		return "重启"
+		return "restart"
 	case "reloaded":
-		return "重载"
+		return "reload"
 	}
 	return state
 }
@@ -175,40 +175,40 @@ func wantState(state string) string {
 }
 
 func joinLines(items []string) string {
-	s := ""
+	var s strings.Builder
 	for i, it := range items {
 		if i > 0 {
-			s += "\n"
+			s.WriteString("\n")
 		}
-		s += it
+		s.WriteString(it)
 	}
-	return s
+	return s.String()
 }
 
-func joinCN(items []string) string {
-	sep := i18n.T(", ", "、")
-	s := ""
+func joinWords(items []string) string {
+	sep := ", "
+	var s strings.Builder
 	for i, it := range items {
 		if i > 0 {
-			s += sep
+			s.WriteString(sep)
 		}
-		s += it
+		s.WriteString(it)
 	}
-	return s
+	return s.String()
 }
 
 // Params 参数文档。
 func (m *ServiceModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "systemd 单元名（必需）"},
+		{Name: "name", Type: "string", Desc: "systemd unit name (required)"},
 		{Name: "state", Type: "string", Desc: "started/stopped/restarted/reloaded"},
-		{Name: "enabled", Type: "bool", Desc: "开机自启"},
+		{Name: "enabled", Type: "bool", Desc: "enable on boot"},
 	}
 }
 
 // Example 示例任务。
 func (m *ServiceModule) Example() string {
-	return `- name: 启动并自启
+	return `- name: start and enable on boot
   service:
     name: nginx
     state: started

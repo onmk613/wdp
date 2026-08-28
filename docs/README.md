@@ -11,15 +11,15 @@ wdp 是 Go 编写的自动化部署工具：单二进制、零运行时依赖，
 | [05-Playbook 任务编排](05-playbook任务编排.md) | play/task 全部控制属性、条件、循环、block 容错、委托、hook、内置变量 |
 | [06-部署策略与自动回滚](06-部署策略与自动回滚.md) | 金丝雀/滚动分批、健康门、自动回滚的覆盖范围与限制 |
 | [07-内置模块手册](07-内置模块手册.md) | 19 个内置模块的参数、幂等机制、check/diff 行为与示例 |
-| [08-Chart 应用包](08-chart应用包.md) | 目录结构、三层 values、子 chart、生命周期、脚本模块、wdp new 生成器 |
+| [08-Chart 应用包](08-chart应用包.md) | 目录结构、三层 values、子 chart、生命周期、脚本模块、wdp template new 生成器 |
 | [09-Values 与模板函数](09-values与模板函数.md) | values 合并规则、--set 语法、sprig/自有模板函数全集 |
 | [10-输出控制](10-输出控制.md) | -v 级别、-q、任务级 output/no_log、JSON 输出、adhoc --format |
 | [11-Check 与 Diff 预演](11-check与diff预演.md) | --check/--diff 全相位预演、release diff |
 | [12-CLI 命令参考](12-cli命令参考.md) | 全部命令与 flag 速查 |
 | [13-最佳实践与 FAQ](13-最佳实践与FAQ.md) | 推荐工作流、幂等模式、大规模主机、已知限制、排错 |
 
-> 文档中的示例均可在 `examples/` 与 `wdp new --full` 生成的骨架中找到对应可运行版本。
-> 模块参数文档也可直接用 `wdp modules <模块名>` 查看（与实现同源，永不漂移）。
+> 文档中的示例均可在 `examples/` 与 `wdp template new --full` 生成的骨架中找到对应可运行版本。
+> 模块参数文档也可直接用 `wdp template module <模块名>` 查看（与实现同源，永不漂移）。
 
 ## 阅读路线
 

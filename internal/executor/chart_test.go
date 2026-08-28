@@ -3,13 +3,15 @@ package executor
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"wdp/internal/chart"
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 	"wdp/internal/render"
@@ -103,18 +105,16 @@ func setupChartWith(t *testing.T, mutate func(dir string), extraValues map[strin
 	if err != nil {
 		t.Fatal(err)
 	}
-	for k, v := range extraValues {
-		values[k] = v
-	}
+	maps.Copy(values, extraValues)
 	eng, err := render.NewEngine(ch.CollectHelpers())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
-		f := connection.NewFake(h)
-		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
-			return connection.ExecResult{Code: 0, Stdout: "ran: " + req.Script}, nil
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		f := fake.NewFake(h)
+		f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
+			return conn.ExecResult{Code: 0, Stdout: "ran: " + req.Script}, nil
 		}
 		fakeMu.Lock()
 		fakes = append(fakes, f)
@@ -126,7 +126,7 @@ func setupChartWith(t *testing.T, mutate func(dir string), extraValues map[strin
 		t.Fatal(err)
 	}
 	rep := &captureReporter{}
-	ex := New(inv, connection.NewManager(), rep, Options{
+	ex := New(inv, conn.NewManager(), rep, Options{
 		Forks: 2, Chart: ch, Values: values, Engine: eng, BaseDir: ch.Dir,
 	})
 	getScripts := func() []string {
@@ -187,12 +187,12 @@ func TestChartScopeIsolation(t *testing.T) {
 	values, _ := ch.BuildValues(nil, nil)
 	eng, _ := render.NewEngine(ch.CollectHelpers())
 
-	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
-		return connection.NewFake(h), nil
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		return fake.NewFake(h), nil
 	})
 	inv, _ := inventory.Parse([]byte(testInv))
 	rep := &captureReporter{}
-	ex := New(inv, connection.NewManager(), rep, Options{
+	ex := New(inv, conn.NewManager(), rep, Options{
 		Forks: 2, Chart: ch, Values: values, Engine: eng, BaseDir: ch.Dir,
 	})
 	if !ex.Run(context.Background(), ch.Deploy) {
@@ -244,7 +244,7 @@ func TestChartUnknownRef(t *testing.T) {
 	if !ex.Run(context.Background(), ex.Opts.Chart.Deploy) {
 		t.Fatal("未知子 chart 引用应失败")
 	}
-	if !strings.Contains(rep.joined(), "子 chart") {
+	if !strings.Contains(rep.joined(), "subchart") {
 		t.Fatalf("%s", rep.joined())
 	}
 }

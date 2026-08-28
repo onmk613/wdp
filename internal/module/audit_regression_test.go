@@ -7,29 +7,30 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 )
 
 // ownerFake 构造带属主探测的 Fake：内容校验和与 /etc/app.conf 固定内容一致。
-func ownerFake(t *testing.T, current string) (*RunContext, *connection.Fake) {
+func ownerFake(t *testing.T, current string) (*RunContext, *fake.Fake) {
 	t.Helper()
 	rc, f := newTestRC(t)
 	data := []byte("k=v\n")
 	sum := sha256hex(data)
-	f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
 		case strings.Contains(s, "sha256sum"):
-			return connection.ExecResult{Code: 0, Stdout: sum + "  /etc/app.conf\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: sum + "  /etc/app.conf\n"}, nil
 		case strings.Contains(s, "stat -c '%U %G'"), strings.Contains(s, "stat -f '%Su %Sg'"):
-			return connection.ExecResult{Code: 0, Stdout: current + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: current + "\n"}, nil
 		case strings.Contains(s, "stat -c %a"), strings.Contains(s, "stat -f %Lp"):
-			return connection.ExecResult{Code: 0, Stdout: "644"}, nil
+			return conn.ExecResult{Code: 0, Stdout: "644"}, nil
 		case strings.Contains(s, "chown"):
 			current = "app app"
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	}
 	return rc, f
 }
@@ -65,7 +66,7 @@ func TestPutFileOwnerDrift(t *testing.T) {
 	rc3.Become = true
 	chowned := false
 	orig := f3.ExecFn
-	f3.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	f3.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "chown") {
 			chowned = true
 		}
@@ -90,14 +91,14 @@ func TestZypperUpgradableProbe(t *testing.T) {
 		"v | repo-main  | nginx     | 1.24.0          | 1.26.0            | x86_64\n" +
 		"v | repo-main  | postgres  | 15.2            | 15.4              | x86_64\n"
 	fail := false
-	f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "zypper") {
 			if fail {
-				return connection.ExecResult{Code: 6, Stderr: "Repository 'repo-main' is invalid"}, nil
+				return conn.ExecResult{Code: 6, Stderr: "Repository 'repo-main' is invalid"}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: table}, nil
+			return conn.ExecResult{Code: 0, Stdout: table}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	}
 	p := &pkgManager{kind: "zypper", family: "suse"}
 

@@ -5,7 +5,6 @@ import (
 	"path"
 	"strings"
 
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -17,7 +16,7 @@ import (
 func (inv *Inventory) Select(pattern string) ([]*model.Host, error) {
 	include := map[string]bool{}
 	exclude := map[string]bool{}
-	for _, token := range strings.Split(pattern, ",") {
+	for token := range strings.SplitSeq(pattern, ",") {
 		token = strings.TrimSpace(token)
 		if token == "" {
 			continue
@@ -31,7 +30,7 @@ func (inv *Inventory) Select(pattern string) ([]*model.Host, error) {
 		for i, seg := range strings.Split(token, ":&") {
 			seg = strings.TrimSpace(seg)
 			if seg == "" {
-				return nil, fmt.Errorf(i18n.T("host pattern %q contains an empty segment", "主机模式 %q 存在空片段"), token)
+				return nil, fmt.Errorf("host pattern %q contains an empty segment", token)
 			}
 			matched, err := inv.matchSegment(seg)
 			if err != nil {
@@ -65,6 +64,60 @@ func (inv *Inventory) Select(pattern string) ([]*model.Host, error) {
 	return out, nil
 }
 
+// SelectLimited 按模式选择主机并应用 --limit 收窄（limit 是对已选范围的
+// 进一步过滤，与 executor 的选择口径一致；limit 模式非法时报错）。
+func (inv *Inventory) SelectLimited(pattern, limit string) ([]*model.Host, error) {
+	hosts, err := inv.Select(pattern)
+	if err != nil {
+		return nil, err
+	}
+	return applyLimit(inv, hosts, limit)
+}
+
+// SelectPlays 取 plays 全部 hosts 模式的并集（同名主机去重），再应用
+// --limit 收窄——与 executor 实际执行的主机范围同口径。模式解析失败的
+// play 跳过（调用方此前已让 executor 校验过全部模式）。
+func (inv *Inventory) SelectPlays(plays []*model.Play, limit string) []*model.Host {
+	set := map[string]*model.Host{}
+	for _, p := range plays {
+		hosts, err := inv.Select(p.Hosts)
+		if err != nil {
+			continue
+		}
+		for _, h := range hosts {
+			set[h.Name] = h
+		}
+	}
+	out := make([]*model.Host, 0, len(set))
+	for _, h := range set {
+		out = append(out, h)
+	}
+	filtered, _ := applyLimit(inv, out, limit)
+	return filtered
+}
+
+// applyLimit 用 --limit 模式收窄主机列表。
+func applyLimit(inv *Inventory, hosts []*model.Host, limit string) ([]*model.Host, error) {
+	if limit == "" {
+		return hosts, nil
+	}
+	limited, err := inv.Select(limit)
+	if err != nil {
+		return nil, err
+	}
+	keep := map[string]bool{}
+	for _, h := range limited {
+		keep[h.Name] = true
+	}
+	filtered := hosts[:0]
+	for _, h := range hosts {
+		if keep[h.Name] {
+			filtered = append(filtered, h)
+		}
+	}
+	return filtered, nil
+}
+
 // matchSegment 解析单个选择片段：all / * / 组名 / 主机名 / 通配模式。
 func (inv *Inventory) matchSegment(seg string) (map[string]bool, error) {
 	out := map[string]bool{}
@@ -91,7 +144,7 @@ func (inv *Inventory) matchSegment(seg string) (map[string]bool, error) {
 			}
 		}
 		if !matched {
-			return nil, fmt.Errorf(i18n.T("no host or group matches %q", "未找到匹配 %q 的主机或组"), seg)
+			return nil, fmt.Errorf("no host or group matches %q", seg)
 		}
 		return out, nil
 	default:
@@ -105,7 +158,7 @@ func (inv *Inventory) matchSegment(seg string) (map[string]bool, error) {
 			out[seg] = true
 			return out, nil
 		}
-		return nil, fmt.Errorf(i18n.T("host or group not found: %s", "未找到主机或组: %s"), seg)
+		return nil, fmt.Errorf("host or group not found: %s", seg)
 	}
 }
 

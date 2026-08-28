@@ -2,10 +2,10 @@ package module
 
 import (
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
-	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -22,29 +22,29 @@ func (m *UserModule) Name() string { return "user" }
 
 // Desc 模块说明。
 func (m *UserModule) Desc() string {
-	return i18n.T("manage system users (create/delete/attribute correction)", "管理系统用户（创建/删除/属性校正）")
+	return "manage system users (create/delete/attribute correction)"
 }
 
 // Params 参数文档。
 func (m *UserModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "用户名"},
-		{Name: "state", Type: "string", Default: "present", Desc: "present 创建/校正；absent 删除（含 home）"},
-		{Name: "uid", Type: "int", Desc: "UID（已存在用户漂移时经 usermod -u 校正）"},
-		{Name: "group", Type: "string", Desc: "主组名（漂移时经 usermod -g 校正）"},
-		{Name: "groups", Type: "list", Desc: "附加组列表（漂移时经 usermod -G 整体覆盖；append: true 时改为 -aG 只增不删）"},
-		{Name: "append", Type: "bool", Default: "false", Desc: "groups 只追加成员、不删除既有附加组（usermod -aG）"},
-		{Name: "shell", Type: "string", Desc: "登录 shell（漂移时经 usermod -s 校正）"},
-		{Name: "home", Type: "string", Desc: "home 目录（漂移时经 usermod -d -m 迁移内容）"},
-		{Name: "system", Type: "bool", Default: "false", Desc: "创建系统账号（useradd -r，仅创建时生效）"},
-		{Name: "password", Type: "string", Desc: "crypt 哈希（useradd -p，仅创建时生效；已有用户改密请用 shell 模块）"},
+		{Name: "name", Type: "string", Desc: "user name"},
+		{Name: "state", Type: "string", Default: "present", Desc: "present creates/fixes drift; absent removes (including home)"},
+		{Name: "uid", Type: "int", Desc: "UID (drift on existing users is fixed via usermod -u)"},
+		{Name: "group", Type: "string", Desc: "primary group (drift fixed via usermod -g)"},
+		{Name: "groups", Type: "list", Desc: "supplementary groups (drift replaced via usermod -G; append: true uses -aG to add only)"},
+		{Name: "append", Type: "bool", Default: "false", Desc: "append to groups only, never remove existing membership (usermod -aG)"},
+		{Name: "shell", Type: "string", Desc: "login shell (drift fixed via usermod -s)"},
+		{Name: "home", Type: "string", Desc: "home directory (drift migrated via usermod -d -m)"},
+		{Name: "system", Type: "bool", Default: "false", Desc: "create as a system account (useradd -r, only at creation)"},
+		{Name: "password", Type: "string", Desc: "crypt hash (useradd -p, only at creation; change an existing user's password via the shell module)"},
 	}
 }
 
 // Example 示例任务。
 func (m *UserModule) Example() string {
-	return `# 创建部署用户并加入 docker 组
-- name: 创建 deploy 用户
+	return `# create a deploy user and add it to the docker group
+- name: create the deploy user
   become: true
   user:
     name: deploy
@@ -52,15 +52,15 @@ func (m *UserModule) Example() string {
     home: /home/deploy
     groups: [docker]
 
-# 修正漂移（uid/shell/组变化时才执行 usermod）
-- name: 校正 app 用户 shell
+# fix drift (usermod only runs when uid/shell/groups changed)
+- name: fix the app user shell
   become: true
   user:
     name: app
     shell: /bin/bash
 
-# 删除用户（含 home 目录，不可回滚）
-- name: 移除离职账号
+# remove a user (including home; not rollback-able)
+- name: remove a departed account
   become: true
   user:
     name: leaver
@@ -87,11 +87,11 @@ type userReq struct {
 func parseUserArgs(args map[string]any) (*userReq, *Result) {
 	name, ok := argStr(args, "name")
 	if !ok || name == "" {
-		return nil, Fail("%s", i18n.T("user requires a name parameter", "user 需要 name 参数"))
+		return nil, Fail("%s", "user requires a name parameter")
 	}
 	state, ok := parseState(args, "present", "present", "absent")
 	if !ok {
-		return nil, Fail(i18n.T("unsupported state %q (options: present/absent)", "不支持的 state %q（可选: present/absent）"), state)
+		return nil, Fail("unsupported state %q (options: present/absent)", state)
 	}
 	u := &userReq{name: name, state: state}
 	u.uid, u.hasUID = argInt(args, "uid")
@@ -106,7 +106,7 @@ func parseUserArgs(args map[string]any) (*userReq, *Result) {
 }
 
 // Run 执行用户管理：absent 删除 / present 创建缺失 / 已存在则按漂移项校正。
-func (m *UserModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *UserModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	u, bad := parseUserArgs(args)
 	if bad != nil {
 		return bad
@@ -128,30 +128,30 @@ func (m *UserModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 // userAbsent 删除存在的用户（含 home）。
 func userAbsent(rc *RunContext, name string, exists bool) *Result {
 	if !exists {
-		return &Result{Msg: fmt.Sprintf(i18n.T("user %s does not exist", "用户 %s 不存在"), name)}
+		return &Result{Msg: fmt.Sprintf("user %s does not exist", name)}
 	}
 	if !rc.Become {
-		return Fail("%s", i18n.T("deleting a user requires become: true", "删除用户需要 become: true"))
+		return Fail("%s", "deleting a user requires become: true")
 	}
 	if rc.CheckMode {
-		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] 用户 %s 将删除（含 home）", name)}
+		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] user %s would be removed (including home)", name)}
 		if rc.DiffMode {
-			res.Diff = fmt.Sprintf(i18n.T("- %s (user will be deleted)", "- %s（用户将删除）"), name)
+			res.Diff = fmt.Sprintf("- %s (user will be deleted)", name)
 		}
 		return res
 	}
 	if out, bad := rc.exec(fmt.Sprintf("userdel -r %s", shellquote.Quote(name))); bad != nil {
 		return bad
 	} else if out.Code != 0 {
-		return Fail(i18n.T("userdel failed: %s", "userdel 失败: %s"), firstLine(out.Stderr))
+		return Fail("userdel failed: %s", firstLine(out.Stderr))
 	}
-	return &Result{Changed: true, Msg: fmt.Sprintf(i18n.T("user %s deleted", "用户 %s 已删除"), name)}
+	return &Result{Changed: true, Msg: fmt.Sprintf("user %s deleted", name)}
 }
 
 // userCreate 创建缺失用户（useradd flags 组装；check 模式输出创建内容 diff）。
 func userCreate(rc *RunContext, u *userReq) *Result {
 	if !rc.Become {
-		return Fail("%s", i18n.T("creating a user requires become: true", "创建用户需要 become: true"))
+		return Fail("%s", "creating a user requires become: true")
 	}
 	var flags []string
 	if u.system {
@@ -177,10 +177,10 @@ func userCreate(rc *RunContext, u *userReq) *Result {
 	}
 	script := fmt.Sprintf("useradd %s %s", strings.Join(flags, " "), shellquote.Quote(u.name))
 	if rc.CheckMode {
-		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] 用户 %s 将创建", u.name)}
+		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] user %s would be created", u.name)}
 		if rc.DiffMode {
 			var d []string
-			d = append(d, fmt.Sprintf(i18n.T("+ %s (new user%s)", "+ %s（新建用户%s）"), u.name, boolTo(u.system, i18n.T(", system account", "，系统账号"), "")))
+			d = append(d, fmt.Sprintf("+ %s (new user%s)", u.name, boolTo(u.system, ", system account", "")))
 			if u.hasUID {
 				d = append(d, "+ uid "+strconv.Itoa(u.uid))
 			}
@@ -203,9 +203,9 @@ func userCreate(rc *RunContext, u *userReq) *Result {
 	if out, bad := rc.exec(script); bad != nil {
 		return bad
 	} else if out.Code != 0 {
-		return Fail(i18n.T("useradd failed: %s", "useradd 失败: %s"), firstLine(out.Stderr))
+		return Fail("useradd failed: %s", firstLine(out.Stderr))
 	}
-	return &Result{Changed: true, Msg: fmt.Sprintf(i18n.T("user %s created", "用户 %s 已创建"), u.name)}
+	return &Result{Changed: true, Msg: fmt.Sprintf("user %s created", u.name)}
 }
 
 // userModify 校正已存在用户的属性漂移（探测漂移项，usermod 仅调整漂移项）。
@@ -215,45 +215,45 @@ func userModify(rc *RunContext, u *userReq) *Result {
 		return bad
 	}
 	if len(drift) == 0 {
-		return &Result{Msg: fmt.Sprintf(i18n.T("user %s is already in the target state", "用户 %s 已是目标状态"), u.name)}
+		return &Result{Msg: fmt.Sprintf("user %s is already in the target state", u.name)}
 	}
 	if !rc.Become {
-		return Fail(i18n.T("user %s attribute drift (%s), correcting requires become: true", "用户 %s 属性漂移（%s），校正需要 become: true"), u.name, strings.Join(drift, i18n.T(", ", "、")))
+		return Fail("user %s attribute drift (%s), correcting requires become: true", u.name, strings.Join(drift, ", "))
 	}
 	if rc.CheckMode {
 		return &Result{
 			Changed: true,
-			Msg:     fmt.Sprintf("[check] 用户 %s: 将调整 %s", u.name, strings.Join(drift, "、")),
+			Msg:     fmt.Sprintf("[check] user %s: would adjust %s", u.name, strings.Join(drift, "、")),
 			Diff:    joinLines(diffLines),
 		}
 	}
 	var flags []string
-	if u.hasUID && containsStr(drift, "uid") {
+	if u.hasUID && slices.Contains(drift, "uid") {
 		flags = append(flags, "-u", strconv.Itoa(u.uid))
 	}
-	if u.primaryGroup != "" && containsStr(drift, "group") {
+	if u.primaryGroup != "" && slices.Contains(drift, "group") {
 		flags = append(flags, "-g", shellquote.Quote(u.primaryGroup))
 	}
-	if u.hasGroups && containsStr(drift, "groups") {
+	if u.hasGroups && slices.Contains(drift, "groups") {
 		if u.appendGroups {
 			flags = append(flags, "-aG", shellquote.Quote(strings.Join(u.groups, ",")))
 		} else {
 			flags = append(flags, "-G", shellquote.Quote(strings.Join(u.groups, ",")))
 		}
 	}
-	if u.shell != "" && containsStr(drift, "shell") {
+	if u.shell != "" && slices.Contains(drift, "shell") {
 		flags = append(flags, "-s", shellquote.Quote(u.shell))
 	}
-	if u.home != "" && containsStr(drift, "home") {
+	if u.home != "" && slices.Contains(drift, "home") {
 		flags = append(flags, "-d", shellquote.Quote(u.home), "-m")
 	}
 	script := fmt.Sprintf("usermod %s %s", strings.Join(flags, " "), shellquote.Quote(u.name))
 	if out, bad := rc.exec(script); bad != nil {
 		return bad
 	} else if out.Code != 0 {
-		return Fail(i18n.T("usermod failed: %s", "usermod 失败: %s"), firstLine(out.Stderr))
+		return Fail("usermod failed: %s", firstLine(out.Stderr))
 	}
-	return &Result{Changed: true, Msg: fmt.Sprintf(i18n.T("user %s: adjusted %s", "用户 %s: 已调整 %s"), u.name, strings.Join(drift, i18n.T(", ", "、")))}
+	return &Result{Changed: true, Msg: fmt.Sprintf("user %s: adjusted %s", u.name, strings.Join(drift, ", "))}
 }
 
 // userDrift 探测已存在用户的属性漂移，返回（漂移字段名列表、diff 行、失败）。
@@ -340,7 +340,7 @@ func userUID(rc *RunContext, name string) (string, *Result) {
 		return "", bad
 	}
 	if out.Code != 0 {
-		return "", Fail(i18n.T("failed to read %s UID: %s", "读取 %s UID 失败: %s"), name, firstLine(out.Stderr))
+		return "", Fail("failed to read %s UID: %s", name, firstLine(out.Stderr))
 	}
 	return strings.TrimSpace(out.Stdout), nil
 }
@@ -352,7 +352,7 @@ func userPrimaryGroup(rc *RunContext, name string) (string, *Result) {
 		return "", bad
 	}
 	if out.Code != 0 {
-		return "", Fail(i18n.T("failed to read %s primary group: %s", "读取 %s 主组失败: %s"), name, firstLine(out.Stderr))
+		return "", Fail("failed to read %s primary group: %s", name, firstLine(out.Stderr))
 	}
 	return strings.TrimSpace(out.Stdout), nil
 }
@@ -364,7 +364,7 @@ func userGroups(rc *RunContext, name string) ([]string, *Result) {
 		return nil, bad
 	}
 	if out.Code != 0 {
-		return nil, Fail(i18n.T("failed to read %s group list: %s", "读取 %s 组列表失败: %s"), name, firstLine(out.Stderr))
+		return nil, Fail("failed to read %s group list: %s", name, firstLine(out.Stderr))
 	}
 	return sortUnique(strings.Fields(out.Stdout)), nil
 }
@@ -377,22 +377,13 @@ func userPasswd(rc *RunContext, name string) (string, string, *Result) {
 		return "", "", bad
 	}
 	if out.Code != 0 {
-		return "", "", Fail(i18n.T("getent passwd %s failed (is getent missing?)", "getent passwd %s 失败（getent 不存在？）"), name)
+		return "", "", Fail("getent passwd %s failed (is getent missing?)", name)
 	}
 	home, shell, _ := strings.Cut(strings.TrimSpace(out.Stdout), ":")
 	return home, shell, nil
 }
 
 // containsStr 简易包含判断（小列表线性扫即可）。
-func containsStr(items []string, s string) bool {
-	for _, it := range items {
-		if it == s {
-			return true
-		}
-	}
-	return false
-}
-
 // joinSorted 逗号连接（已排序列表展示用）。
 func joinSorted(items []string) string {
 	return strings.Join(items, ",")

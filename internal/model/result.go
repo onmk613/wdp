@@ -15,8 +15,8 @@ func ApplyOutputSpec(spec, s string) string {
 	case "none":
 		return ""
 	case "oneline":
-		if i := strings.IndexByte(s, '\n'); i >= 0 {
-			return strings.TrimRight(s[:i], "\r")
+		if before, _, ok := strings.Cut(s, "\n"); ok {
+			return strings.TrimRight(before, "\r")
 		}
 		return s
 	}

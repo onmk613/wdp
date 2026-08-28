@@ -3,7 +3,8 @@
 // internal/fmtutil 提供（--no-color / 非终端自动降级为纯文本）：
 //   - quiet(-q)：仅异常主机行 + RECAP，行式输出（脚本/管道友好，不做表格）
 //   - 缺省：聚合模式（面向大规模主机）：每任务仅以表格呈现异常主机（含
-//     loop 异常项与 diff 预演），任务结束一行汇总
+//     loop 异常项与 diff 预演），任务结束一行汇总，汇总行下列出每主机
+//     状态清单（≤20 台；异常主机附错误信息首行，超阈值退化为纯计数）
 //   - -v：逐主机全量表格（ok/skipped 也显示）
 //   - -vv：表格 + 逐主机详情块（完整 stdout/stderr 不截断、loop 逐项）
 //   - -vvv：调试（stderr 恒显示、委托细节）
@@ -19,12 +20,11 @@ package report
 import (
 	"fmt"
 	"io"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
 	"wdp/internal/fmtutil"
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -53,6 +53,14 @@ type Console struct {
 	curStats *model.Stats
 	curHosts int
 	curRows  []taskRow
+	curEach  []hostEach // 每主机状态（计数行下的清单用，不随展示门槛裁剪）
+}
+
+// hostEach 是任务级每主机状态记录（缺省级别计数行下的主机清单）。
+type hostEach struct {
+	host string
+	cell fmtutil.Cell // 状态（含语义色）
+	msg  string       // 异常时的错误信息首行
 }
 
 // taskRow 是任务表格的一行：host/status/摘要进表格，
@@ -94,7 +102,7 @@ func (c *Console) PlayStart(name string, hosts []string) {
 		c.p.Sprint(fmtutil.Bold, "["+name+"]"),
 		c.p.Sprint(fmtutil.Cyan, strings.Repeat("*", 20)))
 	if len(hosts) > 20 && c.Level < 1 {
-		c.printf(i18n.T("%s %d hosts (first 10: %v …)\n\n", "%s %d 台（前 10: %v …）\n\n"), c.p.Sprint(fmtutil.Dim, "hosts:"), len(hosts), hosts[:10])
+		c.printf("%s %d hosts (first 10: %v …)\n\n", c.p.Sprint(fmtutil.Dim, "hosts:"), len(hosts), hosts[:10])
 	} else {
 		c.printf("%s %v\n\n", c.p.Sprint(fmtutil.Dim, "hosts:"), hosts)
 	}
@@ -112,6 +120,7 @@ func (c *Console) TaskStart(task, module string) {
 	c.curStats = &model.Stats{}
 	c.curHosts = 0
 	c.curRows = nil
+	c.curEach = nil
 }
 
 // HostResult 缓冲单主机结果（按级别与任务级 output 裁剪展示），TaskDone 统一渲染。
@@ -134,9 +143,30 @@ func (c *Console) HostResult(host string, r *model.TaskResult) {
 		c.curHosts++
 	}
 
-	// 展示门槛：quiet 仅异常；聚合(0)仅异常与带 diff 的预估；>=1 全量
+	// 每主机状态不随展示门槛裁剪：缺省级别计数行下需要完整主机清单
+	e := hostEach{host: host, cell: statusCell(r)}
+	if r.DelegateTo != "" {
+		e.host = host + " -> " + r.DelegateTo
+	}
+	if r.Failed || r.Unreachable {
+		e.msg = firstLine(r.Msg)
+		if e.msg == "" {
+			e.msg = firstLine(r.Stderr)
+		}
+		if e.msg == "" {
+			e.msg = firstLine(r.Stdout)
+		}
+	}
+	c.curEach = append(c.curEach, e)
+
+	// 展示门槛：quiet 仅异常；聚合(0)仅异常与带 diff 的预估；>=1 全量。
+	// debug 模块例外：其 Msg 就是产出物（巡检/汇报场景），聚合模式也放行
 	abnormal := r.Failed || r.Unreachable
-	if c.Level < 1 && !abnormal && r.Diff == "" {
+	hide := c.Level < 1 && !abnormal && r.Diff == ""
+	if hide && c.Level >= 0 && r.Module == "debug" {
+		hide = false
+	}
+	if hide {
 		// 聚合模式下 loop 中的异常项仍需可见（以独立行入表）
 		for _, it := range r.Items {
 			if it.Failed || it.Unreachable {
@@ -218,28 +248,33 @@ func (c *Console) buildRow(host string, r *model.TaskResult) taskRow {
 	return row
 }
 
-// splitDetail 把展示文本拆为「单元格首行 + 详情块」：首行按显示宽度截断；
-// 存在后续行或首行被截断时，全量内容以 4 空格缩进进块，保证信息不丢。
+// splitDetail 把展示文本拆为「单元格首行 + 详情块」。展示内容只出现一次：
+//   - 单行且放得下 → 只进单元格
+//   - 单行但超列宽 → 单元格不重复展示截断文本，全量进详情块
+//   - 多行 → 首行进单元格，全量（含首行）进详情块
 func splitDetail(detail string) (cell, block string) {
 	if detail == "" {
 		return "", ""
 	}
 	lines := strings.Split(strings.TrimRight(detail, "\n"), "\n")
-	cell = fmtutil.TruncateDisplay(lines[0], detailCellWidth)
-	if len(lines) == 1 && cell == lines[0] {
-		return cell, ""
+	truncated := fmtutil.TruncateDisplay(lines[0], detailCellWidth)
+	if len(lines) == 1 {
+		if truncated == lines[0] {
+			return truncated, ""
+		}
+		return "", "    " + lines[0] + "\n"
 	}
 	var sb strings.Builder
 	for _, l := range lines {
 		sb.WriteString("    " + l + "\n")
 	}
-	return cell, sb.String()
+	return truncated, sb.String()
 }
 
 // prefixLines 给每行加前缀（stderr 块用）。
 func prefixLines(s, prefix string) string {
 	var sb strings.Builder
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		sb.WriteString(prefix + line + "\n")
 	}
 	return sb.String()
@@ -268,7 +303,7 @@ func (c *Console) itemsBlock(r *model.TaskResult) string {
 // renderDiff 渲染内容级差异（+绿 -红 @@青）。
 func (c *Console) renderDiff(d string) string {
 	var sb strings.Builder
-	for _, line := range strings.Split(strings.TrimRight(d, "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.TrimRight(d, "\n"), "\n") {
 		clr := fmtutil.None
 		switch {
 		case strings.HasPrefix(line, "+"):
@@ -291,8 +326,8 @@ func (c *Console) TaskDone() {
 	if c.curStats == nil && len(c.curRows) == 0 {
 		return
 	}
-	rows, s, hosts := c.curRows, c.curStats, c.curHosts
-	c.curTask, c.curStats, c.curRows, c.curHosts = "", nil, nil, 0
+	rows, s, hosts, each := c.curRows, c.curStats, c.curHosts, c.curEach
+	c.curTask, c.curStats, c.curRows, c.curHosts, c.curEach = "", nil, nil, 0, nil
 
 	if c.Level < 0 {
 		// quiet：行式输出（脚本/管道友好），保持旧格式
@@ -327,8 +362,8 @@ func (c *Console) TaskDone() {
 	if s == nil {
 		return
 	}
-	c.printf("%s %s\n\n", c.p.Sprint(fmtutil.Dim, "»"),
-		fmt.Sprintf(i18n.T("%d hosts: %s %s %s %s %s", "%d 台: %s %s %s %s %s"),
+	c.printf("%s %s\n", c.p.Sprint(fmtutil.Dim, "»"),
+		fmt.Sprintf("%d hosts: %s %s %s %s %s",
 			hosts,
 			c.p.Sprint(fmtutil.Green, fmt.Sprintf("ok=%d", s.Ok)),
 			c.p.Sprint(fmtutil.Yellow, fmt.Sprintf("changed=%d", s.Changed)),
@@ -336,6 +371,28 @@ func (c *Console) TaskDone() {
 			c.p.Sprint(fmtutil.Red, fmt.Sprintf("unreachable=%d", s.Unreachable)),
 			c.p.Sprint(fmtutil.Yellow, fmt.Sprintf("skipped=%d", s.Skipped)),
 		))
+	// 缺省聚合模式：计数行下列出每主机状态（异常主机附错误信息首行）。
+	// -v 起上方表格已逐主机呈现；主机数超过 PlayStart 的折叠阈值（20）时
+	// 保持纯计数聚合，避免大规模主机的任务输出退化为逐主机清单。
+	if c.Level == 0 && len(each) <= 20 {
+		for _, e := range each {
+			if e.msg != "" {
+				c.printf("    %-20s %s: %s\n", e.host, c.p.Sprint(e.cell.Color, e.cell.Text), e.msg)
+			} else {
+				c.printf("    %-20s %s\n", e.host, c.p.Sprint(e.cell.Color, e.cell.Text))
+			}
+		}
+	}
+	c.printf("\n")
+}
+
+// firstLine 取首行（去首尾空白），主机清单的错误摘要用。
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	return s
 }
 
 // PlayMsg 输出 play 级消息（quiet 模式仅输出警告/错误类）。
@@ -343,8 +400,17 @@ func (c *Console) PlayMsg(format string, a ...any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.Level < 0 {
-		msg := fmt.Sprintf(format, a...)
-		if !strings.Contains(msg, "失败") && !strings.Contains(msg, "警告") && !strings.Contains(msg, "终止") {
+		// quiet 模式只放行警告/错误类消息：按小写关键字粗筛，
+		// 与各调用方的英文文案（fail/warn/terminat/abort/cancel）对齐
+		msg := strings.ToLower(fmt.Sprintf(format, a...))
+		keep := false
+		for _, kw := range [...]string{"fail", "warn", "terminat", "abort", "cancel"} {
+			if strings.Contains(msg, kw) {
+				keep = true
+				break
+			}
+		}
+		if !keep {
 			return
 		}
 	}
@@ -387,7 +453,7 @@ func (c *Console) Recap(playName string, stats map[string]*model.Stats) {
 	for n := range stats {
 		names = append(names, n)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 
 	if c.Level < 0 {
 		for _, n := range names {
@@ -407,7 +473,7 @@ func (c *Console) Recap(playName string, stats map[string]*model.Stats) {
 			total.Skipped += s.Skipped
 			total.Ignored += s.Ignored
 		}
-		tb.AddRow(append([]fmtutil.Cell{fmtutil.CC(fmt.Sprintf(i18n.T("TOTAL(%d hosts):", "TOTAL(%d 台):"), len(names)), fmtutil.Bold)}, statCells(total)...)...)
+		tb.AddRow(append([]fmtutil.Cell{fmtutil.CC(fmt.Sprintf("TOTAL(%d hosts):", len(names)), fmtutil.Bold)}, statCells(total)...)...)
 		tb.Render()
 		return
 	}

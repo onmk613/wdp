@@ -89,16 +89,51 @@ func TestLoadBadTOML(t *testing.T) {
 	}
 }
 
-// TestTransferLimits [transfer] 段归一化：0 = 内置默认 2GiB，显式 MiB 值换算字节。
+// TestTransferLimits [transfer] 段透传：0 表示未配置（内置默认属于执行方
+// 叶子包：get_url/chart 各自的 const），显式 MiB 值换算字节。
 func TestTransferLimits(t *testing.T) {
 	current = Config{}
 	c := Current()
-	if c.MaxDownloadBytes() != 2<<30 || c.MaxExtractBytes() != 2<<30 {
-		t.Fatalf("默认上限应为 2GiB: %d/%d", c.MaxDownloadBytes(), c.MaxExtractBytes())
+	if c.MaxExtractBytes() != 0 {
+		t.Fatalf("未配置应透传 0（叶子包用内置默认）: %d", c.MaxExtractBytes())
 	}
+	current = Config{}
 	current = Config{Transfer: TransferConfig{MaxDownloadMB: 100, MaxExtractMB: 512}}
 	c = Current()
-	if c.MaxDownloadBytes() != 100<<20 || c.MaxExtractBytes() != 512<<20 {
-		t.Fatalf("自定义上限换算错误: %d/%d", c.MaxDownloadBytes(), c.MaxExtractBytes())
+	if c.Transfer.MaxDownloadMB != 100 || c.MaxExtractBytes() != 512<<20 {
+		t.Fatalf("自定义上限换算错误: %d/%d", c.Transfer.MaxDownloadMB, c.MaxExtractBytes())
+	}
+	current = Config{}
+}
+
+// TestDefaultConn [run].conn 默认连接类型：空 = ssh，配置值原样透传
+// （未知值由连接工厂报错，不在此静默吞掉）。
+func TestSSHConnDefault(t *testing.T) {
+	var c Config
+	if c.DefaultConn() != "ssh" {
+		t.Fatalf("空配置应为 ssh: %q", c.DefaultConn())
+	}
+	c.Run.Conn = "push"
+	if c.DefaultConn() != "push" {
+		t.Fatalf("配置值应透传: %q", c.DefaultConn())
+	}
+}
+
+// TestPushBinaryTable [agent].push_binary 平台→二进制表解析。
+func TestPushBinaryTable(t *testing.T) {
+	current = Config{} // 重置
+	p := writeCfg(t, `
+[agent]
+[agent.push_binary]
+linux_amd64 = "/opt/wdp/wdp-linux-amd64"
+linux_arm64 = "/opt/wdp/wdp-linux-arm64"
+`)
+	if err := Load(p, true); err != nil {
+		t.Fatal(err)
+	}
+	c := Current()
+	if c.Agent.PushBinary["linux_amd64"] != "/opt/wdp/wdp-linux-amd64" ||
+		c.Agent.PushBinary["linux_arm64"] != "/opt/wdp/wdp-linux-arm64" {
+		t.Fatalf("push_binary 表解析错误: %+v", c.Agent.PushBinary)
 	}
 }

@@ -1,0 +1,17 @@
+# node-exporter chart 默认值。覆盖途径：-f envs/*.yaml → --set。
+online_install: true
+version: "1.10.2"           # node_exporter release 版本（URL 带 v 前缀）
+
+download_base: "https://github.com/prometheus/node_exporter/releases/download"
+
+bin_dir: /usr/local/bin
+user: node_exporter
+port: 9100                  # inventory 主机变量 node_exporter_port 优先生效（模板内 dig）
+
+# SMART 磁盘指标（textfile collector）：安装 smartmontools、部署 smartmon.sh、
+# systemd timer 周期采集。inventory 主机变量 node_exporter_smart 可按主机覆盖。
+smart: false
+collector_textfile_directory: /var/lib/node_exporter/textfile_collector
+smart_check_interval: 5     # 采集周期（分钟）
+
+uninstall_remove_binary: false   # 卸载时是否删二进制（不可逆）

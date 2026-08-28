@@ -6,10 +6,10 @@ package executor
 import (
 	"context"
 	"fmt"
+	"maps"
 	"time"
 
-	"wdp/internal/connection"
-	"wdp/internal/i18n"
+	"wdp/internal/conn"
 	"wdp/internal/model"
 	"wdp/internal/module"
 	"wdp/internal/render"
@@ -94,7 +94,7 @@ func (e *Executor) execModule(ctx context.Context, tr *taskRun, item any) *model
 func (e *Executor) resolveModule(hr *hostRun, name string, args map[string]any, free string) (module.Module, string, error) {
 	mod, scriptPath, ok := module.Resolve(name, e.scriptModuleDirs(hr))
 	if !ok {
-		return nil, "", fmt.Errorf(i18n.T("unknown module %q", "未知模块 %q"), name)
+		return nil, "", fmt.Errorf("unknown module %q", name)
 	}
 	if mod != nil {
 		if verr := module.ValidateArgs(mod, args, free); verr != nil {
@@ -113,7 +113,7 @@ func (e *Executor) scriptModuleDirs(hr *hostRun) []string {
 }
 
 // buildRunContext 组装模块执行上下文（连接、变量域、提权、check/diff、回滚登记）。
-func (e *Executor) buildRunContext(taskCtx context.Context, tr *taskRun, itemVars map[string]any, conn connection.Connection, timeoutSec int) *module.RunContext {
+func (e *Executor) buildRunContext(taskCtx context.Context, tr *taskRun, itemVars map[string]any, conn conn.Conn, timeoutSec int) *module.RunContext {
 	rc := &module.RunContext{
 		Ctx:        taskCtx,
 		Conn:       conn,
@@ -164,9 +164,7 @@ func (e *Executor) applyModuleResult(r *model.TaskResult, hr *hostRun, mr *modul
 	}
 	if mr.Facts != nil {
 		hr.mu.Lock()
-		for k, v := range mr.Facts {
-			hr.vars[k] = v
-		}
+		maps.Copy(hr.vars, mr.Facts)
 		hr.mu.Unlock()
 		e.recordFacts(hr.host.Name, mr.Facts) // 跨 play / 子 chart 作用域持久
 	}
@@ -176,6 +174,13 @@ func (e *Executor) applyModuleResult(r *model.TaskResult, hr *hostRun, mr *modul
 		for _, g := range mr.Groups {
 			e.Inv.AddDynamicGroup(g, []string{hr.host.Name})
 		}
+		e.invMu.Unlock()
+	}
+	if mr.AddHost != nil {
+		// add_host：运行期主机聚合进 inventory（后续 play 选择期与
+		// groups/hosts/hostvars 内置变量可见；与 group_by 同一生效时机）
+		e.invMu.Lock()
+		e.Inv.AddRuntimeHost(mr.AddHost.Host, mr.AddHost.Groups)
 		e.invMu.Unlock()
 	}
 }
@@ -189,7 +194,7 @@ func (e *Executor) retryUntil(taskCtx context.Context, task *model.Task, itemVar
 	}
 	delay := task.DelaySec
 	var last *module.Result
-	for i := 0; i < attempts; i++ {
+	for i := range attempts {
 		if i > 0 {
 			timer := time.NewTimer(time.Duration(delay) * time.Second)
 			select {
@@ -203,15 +208,13 @@ func (e *Executor) retryUntil(taskCtx context.Context, task *model.Task, itemVar
 		}
 		last = invoke()
 		judge := map[string]any{}
-		for k, v := range itemVars {
-			judge[k] = v
-		}
+		maps.Copy(judge, itemVars)
 		judge["result"] = moduleData(last)
 		s, err := e.engine.Render(task.Until, judge)
 		if err != nil {
 			apply(last)
 			r.Failed = true
-			r.Msg = i18n.T("until render failed: ", "until 渲染失败: ") + err.Error()
+			r.Msg = "until render failed: " + err.Error()
 			return r
 		}
 		if render.Truthy(s) {
@@ -221,7 +224,7 @@ func (e *Executor) retryUntil(taskCtx context.Context, task *model.Task, itemVar
 	}
 	apply(last)
 	r.Failed = true
-	r.Msg = fmt.Sprintf("until 条件在 %d 次尝试后仍未满足", attempts)
+	r.Msg = fmt.Sprintf("until condition unmet after %d attempts", attempts)
 	if last != nil && last.Msg != "" {
 		r.Msg += ": " + last.Msg
 	}
@@ -230,11 +233,8 @@ func (e *Executor) retryUntil(taskCtx context.Context, task *model.Task, itemVar
 
 // retryOnFailure 失败重试（无 until：成功即停）。
 func retryOnFailure(taskCtx context.Context, task *model.Task, invoke func() *module.Result, apply func(*module.Result), r *model.TaskResult) *model.TaskResult {
-	attempts := task.Retries + 1
-	if attempts < 1 {
-		attempts = 1
-	}
-	for i := 0; i < attempts; i++ {
+	attempts := max(task.Retries+1, 1)
+	for i := range attempts {
 		if i > 0 && task.DelaySec > 0 {
 			timer := time.NewTimer(time.Duration(task.DelaySec) * time.Second)
 			select {

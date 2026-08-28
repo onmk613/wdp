@@ -15,20 +15,61 @@ import (
 
 	"wdp/internal/chart"
 	"wdp/internal/config"
-	"wdp/internal/connection"
+	"wdp/internal/conn"
 	"wdp/internal/executor"
 	"wdp/internal/fmtutil"
-	"wdp/internal/i18n"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 	"wdp/internal/module"
 	"wdp/internal/playbook"
 	"wdp/internal/release"
 	"wdp/internal/report"
+
+	_ "wdp/internal/conn/agentc"
+	_ "wdp/internal/conn/local"
+	_ "wdp/internal/conn/push"
+	_ "wdp/internal/conn/sshc"
 )
 
-// loadInventories 加载全部 -i 清单（未指定时用内置默认 inventory.yaml）。
-// 显式传入 wdp.cfg：inventory 层不再隐式读全局配置。
+// newRunCmd 构造 `wdp run`。
+func newRunCmd() *cobra.Command {
+	opts := runOptions{}
+	cmd := &cobra.Command{
+		Use:   "run <playbook.yaml|chart-dir|chart.tgz>",
+		Short: "run a playbook or chart",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runTarget(cmd.Context(), args[0], opts)
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&opts.limit, "limit", "", "further limit hosts (group/host/!exclude)")
+	f.StringSliceVar(&opts.hostsInline, "hosts", nil,
+		"inline host specs instead of an inventory file (IP/host[:port], ranges like 10.8.2.101-104); every play targets these hosts")
+	f.StringSliceVarP(&opts.tags, "tags", "t", nil, "run only tasks with these tags (comma-separated)")
+	f.StringSliceVar(&opts.skipTags, "skip-tags", nil, "skip tasks with these tags")
+	f.BoolVar(&opts.listHosts, "list-hosts", false, "list hosts that would run, then exit")
+	f.StringVar(&opts.startAtTask, "start-at-task", "", "start execution at the given task")
+	f.BoolVar(&opts.check, "check", false, "check mode: dry-run without applying changes")
+	f.BoolVar(&opts.diff, "diff", false, "diff mode: content-level diff with --check (copy/template/file)")
+	f.StringVar(&opts.phase, "phase", "deploy", "chart lifecycle phase: deploy | uninstall | status")
+	f.BoolVarP(&opts.yes, "yes", "y", false, "skip confirmation of irreversible operations (recommended for CI)")
+	f.StringVar(&opts.factCache, "fact-cache", "",
+		"persist setup/set_fact facts to this JSON file across runs (loaded at start, saved atomically at end)")
+	chartValueFlags(cmd, &opts.valuesFiles, &opts.setArgs)
+	return cmd
+}
+
+// chartValueFlags 声明 chart 公共 flag（-f/--values/--set）。
+func chartValueFlags(cmd *cobra.Command, valuesFiles, setArgs *[]string) {
+	cmd.Flags().StringArrayVarP(valuesFiles, "values-file", "f", nil,
+		"chart values override files (repeatable, deep-merged in order, like Helm)")
+	cmd.Flags().StringArrayVar(setArgs, "set", nil,
+		"chart values dot-path overrides (--set a.b[0]=v, repeatable)",
+	)
+}
+
+// loadInventories 加载全部 -i 清单
 func loadInventories() (*inventory.Inventory, error) {
 	paths := gInventories
 	if len(paths) == 0 {
@@ -38,76 +79,29 @@ func loadInventories() (*inventory.Inventory, error) {
 }
 
 // connDefaults 从 wdp.cfg 归一出连接层默认值（组合根显式注入，
-// 连接层自身不依赖 config 包）。
-func connDefaults() *connection.Defaults {
+// 连接层自身不依赖 config 包）。归一化职责划分：SSH 用户/超时在 config
+// 取值器归一（inventory 烘焙 host 字段共用）；agent 类默认值注入原始值、
+// 由 conn.Defaults 的 OrDefault 系列归一（conn 层是唯一消费方）。
+func connDefaults() *conn.Defaults {
 	c := config.Current()
-	return &connection.Defaults{
-		SSHUser:            c.SSHUser(),
-		SSHConnectTimeout:  c.SSHConnectTimeout(),
-		AgentPort:          c.AgentPort(),
-		AgentCertRotateMin: c.AgentCertRotateMin(),
+	return &conn.Defaults{
+		SSHUser:             c.SSHUser(),
+		SSHConnectTimeout:   c.SSHConnectTimeout(),
+		AgentPort:           c.Agent.Port,
+		AgentCertRotateMin:  c.AgentCertRotateMin(),
+		PushCADir:           c.Agent.PushCADir,
+		AgentIdleTimeoutMin: c.AgentIdleTimeoutMin(),
+		PushBinary:          c.Agent.PushBinary,
 	}
 }
 
 // maxDownloadBytes 归一 get_url 下载上限（--max-download-mb > wdp.cfg > 内置默认；
-// PreRunE 已把 cfg 折叠进 gMaxDownMB，0 表示用模块内置默认）。
+// flag 覆盖已在 PersistentPreRunE 写入 config，0 表示用模块内置默认）。
 func maxDownloadBytes() int64 {
-	if gMaxDownMB > 0 {
-		return gMaxDownMB << 20
+	if mb := config.Current().Transfer.MaxDownloadMB; mb > 0 {
+		return int64(mb) << 20
 	}
 	return 0
-}
-
-// chartValueFlags 声明 chart 公共 flag（-f/--values/--set）。
-func chartValueFlags(cmd *cobra.Command, valuesFiles, setArgs *[]string) {
-	cmd.Flags().StringArrayVarP(valuesFiles, "values-file", "f", nil,
-		i18n.T("chart values override files (repeatable, deep-merged in order, like Helm)",
-			"chart values 覆盖文件（可多次，按序深合并，同 Helm）"))
-	cmd.Flags().StringArrayVar(setArgs, "set", nil,
-		i18n.T("chart values dot-path overrides (--set a.b[0]=v, repeatable)",
-			"chart values 点路径覆盖（--set a.b[0]=v，可多次）"))
-}
-
-// newRunCmd 构造 `wdp run`。
-func newRunCmd() *cobra.Command {
-	var (
-		limit, tags, skipTags, startAt string
-		listHosts, check, diff, yes    bool
-		phase                          string
-		valuesFiles, setArgs           []string
-	)
-	cmd := &cobra.Command{
-		Use:   "run <playbook.yaml|chart目录|chart.tgz>",
-		Short: i18n.T("run a playbook or chart", "执行 playbook 或 chart"),
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runTarget(cmd.Context(), args[0], runOptions{
-				limit:       limit,
-				tags:        splitCSV(tags),
-				skipTags:    splitCSV(skipTags),
-				listHosts:   listHosts,
-				startAtTask: startAt,
-				check:       check,
-				diff:        diff,
-				phase:       phase,
-				yes:         yes,
-				valuesFiles: valuesFiles,
-				setArgs:     setArgs,
-			})
-		},
-	}
-	f := cmd.Flags()
-	f.StringVar(&limit, "limit", "", i18n.T("further limit hosts (group/host/!exclude)", "进一步限制主机（组/主机/!排除）"))
-	f.StringVarP(&tags, "tags", "t", "", i18n.T("run only tasks with these tags (comma-separated)", "仅执行带这些 tag 的任务（逗号分隔）"))
-	f.StringVar(&skipTags, "skip-tags", "", i18n.T("skip tasks with these tags", "跳过带这些 tag 的任务"))
-	f.BoolVar(&listHosts, "list-hosts", false, i18n.T("list hosts that would run, then exit", "仅列出将执行的主机"))
-	f.StringVar(&startAt, "start-at-task", "", i18n.T("start execution at the given task", "从指定任务开始执行"))
-	f.BoolVar(&check, "check", false, i18n.T("check mode: dry-run without applying changes", "check 模式：预演变更不实际执行"))
-	f.BoolVar(&diff, "diff", false, i18n.T("diff mode: content-level diff with --check (copy/template/file)", "diff 模式：配合 --check 输出内容级差异（copy/template/file）"))
-	f.StringVar(&phase, "phase", "deploy", i18n.T("chart lifecycle phase: deploy | uninstall | status", "chart 生命周期相位：deploy | uninstall | status"))
-	f.BoolVarP(&yes, "yes", "y", false, i18n.T("skip confirmation of irreversible operations (recommended for CI)", "跳过不可逆操作确认提示（CI 建议）"))
-	chartValueFlags(cmd, &valuesFiles, &setArgs)
-	return cmd
 }
 
 type runOptions struct {
@@ -120,6 +114,8 @@ type runOptions struct {
 	diff        bool
 	phase       string
 	yes         bool
+	factCache   string
+	hostsInline []string
 	valuesFiles []string
 	setArgs     []string
 }
@@ -131,28 +127,48 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	}
 	// 全局墙钟超时从进入本函数起计时：覆盖 chart 解包、inventory 加载与
 	// 交互确认（此前只罩 executor 阶段，长解包/人工确认不消耗超时预算）
-	if gTimeout > 0 {
+	if cfgTimeout := config.Current().Run.Timeout; cfgTimeout > 0 {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(gTimeout)*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, time.Duration(cfgTimeout)*time.Second)
 		defer cancel()
 	}
-	inv, err := loadInventories()
-	if err != nil {
-		return err
+	// 主机来源：--hosts 内联表达式（不写 inventory 文件）或 -i 清单。
+	inline := len(opts.hostsInline) > 0
+	var inv *inventory.Inventory
+	if inline {
+		// 只与"用户显式 -i"互斥；gInventories 可能是 PersistentPreRunE
+		// 回填的 config 默认值，不代表用户指定了清单
+		if gInventoryExplicit {
+			return fmt.Errorf("--hosts and -i are mutually exclusive (inline specs replace the inventory file)")
+		}
+		hs, err := inventory.HostsFromSpecs(opts.hostsInline, connDefaults())
+		if err != nil {
+			return err
+		}
+		if len(hs) == 0 {
+			return fmt.Errorf("--hosts resolved to no hosts")
+		}
+		inv = inventory.FromHosts(hs)
+	} else {
+		var err error
+		inv, err = loadInventories()
+		if err != nil {
+			return err
+		}
 	}
 
 	eopts := executor.Options{
-		Forks:       gForks,
-		Limit:       opts.limit,
-		Tags:        opts.tags,
-		SkipTags:    opts.skipTags,
-		ListHosts:   opts.listHosts,
-		StartAtTask: opts.startAtTask,
-		CheckMode:   opts.check,
-		DiffMode:    opts.diff,
-		TaskTimeout: gTaskTimeout,
-		WdpVersion:  Version,
-
+		Forks:            config.Current().Forks(),
+		Limit:            opts.limit,
+		Tags:             opts.tags,
+		SkipTags:         opts.skipTags,
+		ListHosts:        opts.listHosts,
+		StartAtTask:      opts.startAtTask,
+		CheckMode:        opts.check,
+		DiffMode:         opts.diff,
+		TaskTimeout:      config.Current().Run.TaskTimeout,
+		WdpVersion:       Version,
+		FactCachePath:    opts.factCache,
 		MaxDownloadBytes: maxDownloadBytes(),
 	}
 	var plays []*model.Play
@@ -185,7 +201,16 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		eopts.Engine = eng
 		eopts.BaseDir = ch.Dir
 		eopts.Phase = opts.phase
+
+		// 同名碰撞预检：被 values 遮蔽的 inventory 变量告警（静默失效是真坑），
+		// inventory_override 白名单生效的键打信息。--list-hosts 不执行任务，跳过。
+		if !opts.listHosts {
+			if hosts := inv.SelectPlays(plays, opts.limit); len(hosts) > 0 {
+				reportValueCollisions(os.Stderr, eopts.Values, hosts, eopts.Chart.Meta.InventoryOverride)
+			}
+		}
 	} else {
+		var err error
 		plays, err = playbook.Load(target)
 		if err != nil {
 			return err
@@ -193,9 +218,17 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		eopts.BaseDir = filepath.Dir(target)
 	}
 
+	// 内联主机模式：play 的 hosts 模式指向命名组，而内联清单只有 all——
+	// 全部 play 一律作用于全部内联主机（多组编排请使用 inventory 文件）。
+	if inline {
+		for _, p := range plays {
+			p.Hosts = "all"
+		}
+	}
+
 	rep, finish := buildReporter()
-	conns := connection.NewManagerWithDefaults(connDefaults())
-	conns.SetConnectConcurrency(2 * gForks)
+	conns := conn.NewManagerWithDefaults(connDefaults())
+	conns.SetConnectConcurrency(2 * config.Current().Forks())
 	ex := executor.New(inv, conns, rep, eopts)
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -222,26 +255,10 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	if eopts.Chart != nil {
 		rec.Chart, rec.Version, rec.Values = eopts.Chart.Meta.Name, eopts.Chart.Meta.Version, eopts.Values
 	}
-	if hosts, err := inv.Select(eoptsHosts(plays)); err == nil {
-		// 记录实际作用的主机范围：与 executor 一致应用 --limit，
-		// 避免 --limit web1 时审计记录虚报整个 play 的主机清单
-		if eopts.Limit != "" {
-			if limited, lerr := inv.Select(eopts.Limit); lerr == nil {
-				set := map[string]bool{}
-				for _, h := range limited {
-					set[h.Name] = true
-				}
-				for _, h := range hosts {
-					if set[h.Name] {
-						rec.Hosts = append(rec.Hosts, h.Name)
-					}
-				}
-			}
-		} else {
-			for _, h := range hosts {
-				rec.Hosts = append(rec.Hosts, h.Name)
-			}
-		}
+	// 记录实际作用的主机范围：与 executor 一致取全部 play 的并集并应用
+	// --limit，避免 --limit web1 时审计记录虚报整个 play 的主机清单
+	for _, h := range inv.SelectPlays(plays, eopts.Limit) {
+		rec.Hosts = append(rec.Hosts, h.Name)
 	}
 	if id, err := release.Save(rec); err == nil {
 		fmt.Fprintf(os.Stderr, "[release] %s\n", id)
@@ -253,31 +270,48 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	return nil
 }
 
-// eoptsHosts 提取 play 的 hosts 模式（部署记录用，取第一个 play）。
-func eoptsHosts(plays []*model.Play) string {
-	if len(plays) == 0 {
-		return ""
-	}
-	return plays[0].Hosts
-}
-
 // errPlayFailed 标记存在失败（退出码 1，不打印重复错误）。
-var errPlayFailed = fmt.Errorf("执行完成，存在失败主机")
+var errPlayFailed = fmt.Errorf("execution finished with failed hosts")
 
-// confirmReversibility 打印 chart 可逆性评估；存在不可逆操作时交互确认。
-// 行为：--yes 直接放行；TTY 下逐次询问（回车=继续）；非交互环境打印警告后放行（CI 不应挂起）。
+// confirmReversibility 打印 chart 可逆性评估（着色遵循全局颜色开关，
+// 与 buildReporter 同一决策：config 允许 && stderr 为终端且 NO_COLOR 未设）。
 func confirmReversibility(ch *chart.Chart, yes bool) error {
 	rep := ch.Analyze()
-	fmt.Fprintf(os.Stderr, "==> 应用包评估 [%s %s]: %s\n", ch.Meta.Name, ch.Meta.Version, rep.Summary())
+	p := fmtutil.New()
+	p.SetWriter(os.Stderr)
+	p.SetColor(config.Current().Color() && fmtutil.ColorAuto(os.Stderr))
+
+	p.Print(fmtutil.BoldCyan, "==> chart assessment")
+	p.Printf(fmtutil.Bold, " [%s %s]\n", ch.Meta.Name, ch.Meta.Version)
+	for _, row := range rep.Rows() {
+		p.Printf(fmtutil.None, "    %-20s %s", row.Label, p.Sprint(rowColor(row.Label), fmt.Sprintf("%3d", row.Count)))
+		if row.Note != "" {
+			p.Printf(fmtutil.None, "  %s", p.Sprint(fmtutil.Dim, "("+row.Note+")"))
+		}
+		p.Print(fmtutil.None, "\n")
+	}
+	for _, e := range rep.Examples {
+		p.Printf(fmtutil.Yellow, "      - %s\n", e)
+	}
+	lcClr := fmtutil.None
+	switch {
+	case rep.HasUninstall && rep.AutoRollback:
+		lcClr = fmtutil.Green
+	case !rep.HasUninstall && !rep.AutoRollback:
+		lcClr = fmtutil.Yellow // 既不可卸载也无自动回滚，提示风险
+	}
+	p.Printf(fmtutil.None, "    %s %s\n", p.Sprint(fmtutil.Dim, "lifecycle:"), p.Sprint(lcClr, rep.LifecycleNote()))
+
 	if rep.Irreversible == 0 || yes {
 		return nil
 	}
 	if !fmtutil.IsTerminal(os.Stdout) {
-		fmt.Fprintf(os.Stderr, "==> 警告: 含 %d 个不可逆操作且当前非交互环境，继续执行（--yes 可抑制本警告）\n",
+		p.Printf(fmtutil.Yellow, "==> warning: %d irreversible operation(s) in a non-interactive environment, continuing (suppress with --yes)\n",
 			rep.Irreversible)
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "==> 存在不可逆操作，继续部署? [Y/n] ")
+	p.Printf(fmtutil.None, "==> %s, continue deploying? [Y/n] ",
+		p.Sprint(fmtutil.BoldRed, "irreversible operations detected"))
 	line, err := readLine(os.Stdin)
 	if err != nil {
 		return nil // 读失败按默认继续
@@ -286,7 +320,21 @@ func confirmReversibility(ch *chart.Chart, yes bool) error {
 	case "", "y", "yes":
 		return nil
 	default:
-		return fmt.Errorf("用户取消部署（不可逆操作确认被拒绝）")
+		return fmt.Errorf("deployment cancelled by user (irreversible-operation confirmation declined)")
+	}
+}
+
+// rowColor 评估分类行的语义色：可逆绿 / 部分可逆黄 / 只读弱化 / 不可逆加粗红。
+func rowColor(label string) fmtutil.Color {
+	switch label {
+	case "reversible":
+		return fmtutil.Green
+	case "partially reversible":
+		return fmtutil.Yellow
+	case "read-only":
+		return fmtutil.Dim
+	default:
+		return fmtutil.BoldRed
 	}
 }
 
@@ -322,7 +370,7 @@ func buildReporter() (report.Reporter, func()) {
 	if gQuiet {
 		level = -1
 	}
-	rep := report.NewConsole(os.Stdout, !gNoColor && fmtutil.ColorAuto(os.Stdout), level)
+	rep := report.NewConsole(os.Stdout, config.Current().Color() && fmtutil.ColorAuto(os.Stdout), level)
 	return rep, func() {}
 }
 
@@ -333,13 +381,13 @@ func newAdhocCmd() *cobra.Command {
 		become, check, diff bool
 	)
 	cmd := &cobra.Command{
-		Use:   "adhoc -m shell -a 'uptime' <主机模式>",
-		Short: i18n.T("one-off single-module execution", "单模块临时执行"),
+		Use:   "adhoc -m shell -a 'uptime' <host-pattern>",
+		Short: "one-off single-module execution",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pattern := args[0]
 			if _, ok := module.Get(mod); !ok {
-				return fmt.Errorf("未知模块 %q（wdp modules 查看列表）", mod)
+				return fmt.Errorf("unknown module %q (run `wdp template module` for the list)", mod)
 			}
 			inv, err := loadInventories()
 			if err != nil {
@@ -359,10 +407,10 @@ func newAdhocCmd() *cobra.Command {
 				rep = report.NewFormatter(os.Stdout, format)
 				finish = func() {}
 			}
-			conns := connection.NewManagerWithDefaults(connDefaults())
-			conns.SetConnectConcurrency(2 * gForks)
+			conns := conn.NewManagerWithDefaults(connDefaults())
+			conns.SetConnectConcurrency(2 * config.Current().Forks())
 			ex := executor.New(inv, conns, rep, executor.Options{
-				Forks: gForks, TaskTimeout: gTaskTimeout,
+				Forks: config.Current().Forks(), TaskTimeout: config.Current().Run.TaskTimeout,
 				CheckMode: check, DiffMode: diff,
 				MaxDownloadBytes: maxDownloadBytes(),
 			})
@@ -378,14 +426,14 @@ func newAdhocCmd() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVarP(&mod, "module", "m", "shell", i18n.T("module name", "模块名"))
-	f.StringVarP(&argStr, "args", "a", "", i18n.T("module args (free-form or k=v list)", "模块参数（free-form 或 k=v 列表）"))
-	f.BoolVarP(&become, "become", "b", false, i18n.T("escalate privileges", "提权执行"))
+	f.StringVarP(&mod, "module", "m", "shell", "module name")
+	f.StringVarP(&argStr, "args", "a", "", "module args (free-form or k=v list)")
+	f.BoolVarP(&become, "become", "b", false, "escalate privileges")
 	f.StringVar(&format, "format", "",
-		i18n.T("format per-host output with a Go template, e.g. '{{.host}}: {{.stdout}}' (fields: .stdout/.stderr/.rc/.changed/.failed/.msg)",
-			"按 Go 模板格式化每主机输出（如 '{{.host}}: {{.stdout}}'；可用 .stdout/.stderr/.rc/.changed/.failed/.msg）"))
-	f.BoolVar(&check, "check", false, i18n.T("check mode: dry-run without applying changes", "check 模式：预演变更不实际执行"))
-	f.BoolVar(&diff, "diff", false, i18n.T("diff mode: content-level diff with --check", "diff 模式：配合 --check 输出内容级差异"))
+		"format per-host output with a Go template, e.g. '{{.host}}: {{.stdout}}' (fields: .stdout/.stderr/.rc/.changed/.failed/.msg)",
+	)
+	f.BoolVar(&check, "check", false, "check mode: dry-run without applying changes")
+	f.BoolVar(&diff, "diff", false, "diff mode: content-level diff with --check")
 	return cmd
 }
 
@@ -393,7 +441,7 @@ func newAdhocCmd() *cobra.Command {
 func parseAdhocArgs(s string) (string, map[string]any) {
 	args := map[string]any{}
 	var free []string
-	for _, tok := range strings.Fields(s) {
+	for tok := range strings.FieldsSeq(s) {
 		if k, v, ok := strings.Cut(tok, "="); ok && k != "" {
 			args[k] = v
 			continue
@@ -403,25 +451,12 @@ func parseAdhocArgs(s string) (string, map[string]any) {
 	return strings.Join(free, " "), args
 }
 
-func splitCSV(s string) []string {
-	if s == "" {
-		return nil
-	}
-	var out []string
-	for _, t := range strings.Split(s, ",") {
-		if t = strings.TrimSpace(t); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
-}
-
 // outPrinter 返回绑定命令输出流的着色 printer（颜色遵循 --no-color、
 // 终端检测与 NO_COLOR 约定），供列表类命令渲染 fmtutil 表格。
 func outPrinter(cmd *cobra.Command) *fmtutil.Printer {
 	p := fmtutil.New()
 	p.SetWriter(cmd.OutOrStdout())
-	if gNoColor {
+	if !config.Current().Color() {
 		p.SetColor(false)
 	}
 	// 未显式 --no-color 时保持自动模式（终端检测 + NO_COLOR）

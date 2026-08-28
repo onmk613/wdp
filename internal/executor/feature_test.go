@@ -6,20 +6,21 @@ import (
 	"testing"
 	"time"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 )
 
 // setupFeature 构造指定 CheckMode 的执行器（fake 记入全局列表供断言）。
-func setupFeature(t *testing.T, check bool, script func(string, connection.ExecRequest) (connection.ExecResult, error)) (*Executor, *captureReporter) {
+func setupFeature(t *testing.T, check bool, script func(string, conn.ExecRequest) (conn.ExecResult, error)) (*Executor, *captureReporter) {
 	t.Helper()
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
-		f := connection.NewFake(h)
-		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		f := fake.NewFake(h)
+		f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 			return script(h.Name, req)
 		}
 		fakeMu.Lock()
@@ -32,19 +33,19 @@ func setupFeature(t *testing.T, check bool, script func(string, connection.ExecR
 		t.Fatal(err)
 	}
 	rep := &captureReporter{}
-	ex := New(inv, connection.NewManager(), rep, Options{Forks: 2, CheckMode: check})
+	ex := New(inv, conn.NewManager(), rep, Options{Forks: 2, CheckMode: check})
 	return ex, rep
 }
 
 func TestBlockRescue(t *testing.T) {
 	// 主任务失败 → rescue 执行且组恢复；always 恒执行；后续任务继续
 	var execCount int
-	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		execCount++
 		if strings.Contains(req.Script, "will-fail") {
-			return connection.ExecResult{Code: 1, Stderr: "boom"}, nil
+			return conn.ExecResult{Code: 1, Stderr: "boom"}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -68,7 +69,7 @@ func TestBlockRescue(t *testing.T) {
 		t.Fatalf("rescue 成功应视为组恢复:\n%s", rep.joined())
 	}
 	out := rep.joined()
-	if !strings.Contains(out, "已由 rescue 恢复") {
+	if !strings.Contains(out, "recovered by rescue") {
 		t.Fatalf("缺少恢复信息:\n%s", out)
 	}
 	if !strings.Contains(out, "h1 后续") {
@@ -83,11 +84,11 @@ func TestBlockRescue(t *testing.T) {
 // TestBlockIgnoreErrorsNotRescued block 内 ignore_errors 的失败不视为 block 失败：
 // 后续任务继续、rescue 不触发。
 func TestBlockIgnoreErrorsNotRescued(t *testing.T) {
-	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "will-fail") {
-			return connection.ExecResult{Code: 1}, nil
+			return conn.ExecResult{Code: 1}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -108,7 +109,7 @@ func TestBlockIgnoreErrorsNotRescued(t *testing.T) {
 		t.Fatalf("ignore_errors 的失败不应导致 play 失败:\n%s", rep.joined())
 	}
 	out := rep.joined()
-	if strings.Contains(out, "rescue-step") || strings.Contains(out, "已由 rescue 恢复") {
+	if strings.Contains(out, "rescue-step") || strings.Contains(out, "recovered by rescue") {
 		t.Fatalf("ignore_errors 失败不应触发 rescue:\n%s", out)
 	}
 	joined := ""
@@ -126,11 +127,11 @@ func TestBlockIgnoreErrorsNotRescued(t *testing.T) {
 }
 
 func TestBlockNoRescueFails(t *testing.T) {
-	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "will-fail") {
-			return connection.ExecResult{Code: 1}, nil
+			return conn.ExecResult{Code: 1}, nil
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -154,12 +155,12 @@ func TestBlockNoRescueFails(t *testing.T) {
 func TestUntilPolling(t *testing.T) {
 	// 第 1、2 次返回非零，第 3 次成功；until 引用 .result.rc
 	calls := 0
-	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		calls++
 		if calls < 3 {
-			return connection.ExecResult{Code: 1, Stderr: "not ready"}, nil
+			return conn.ExecResult{Code: 1, Stderr: "not ready"}, nil
 		}
-		return connection.ExecResult{Code: 0, Stdout: "ready"}, nil
+		return conn.ExecResult{Code: 0, Stdout: "ready"}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -184,8 +185,8 @@ func TestUntilPolling(t *testing.T) {
 }
 
 func TestUntilExhausted(t *testing.T) {
-	ex, rep := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 1}, nil // 永不满足
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 1}, nil // 永不满足
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -200,16 +201,16 @@ func TestUntilExhausted(t *testing.T) {
 	if !ex.Run(context.Background(), plays) {
 		t.Fatal("until 耗尽应失败")
 	}
-	if !strings.Contains(rep.joined(), "仍未满足") {
+	if !strings.Contains(rep.joined(), "until condition unmet") {
 		t.Fatalf("%s", rep.joined())
 	}
 }
 
 func TestCheckModeNoExecution(t *testing.T) {
 	executed := 0
-	ex, rep := setupFeature(t, true, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setupFeature(t, true, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		executed++
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",
@@ -230,9 +231,9 @@ func TestCheckModeNoExecution(t *testing.T) {
 
 func TestTaskTimeout(t *testing.T) {
 	// 任务 timeout=1s，脚本 sleep 5 → 超时失败
-	ex, _ := setupFeature(t, false, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, _ := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		time.Sleep(5 * time.Second)
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	})
 	plays := []*model.Play{{
 		Hosts: "h1",

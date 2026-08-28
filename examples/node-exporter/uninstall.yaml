@@ -1,0 +1,40 @@
+# node-exporter 卸载相位：停服 → 删单元；二进制默认保留
+#（uninstall_remove_binary: true 时彻底清理，不可逆；运行账户与 smartmontools 包保留）。
+
+- name: 卸载 node-exporter
+  hosts: node-exporter
+  become: true
+  tasks:
+    - name: 停止并禁用 node-exporter
+      systemd_unit:
+        name: node-exporter.service
+        state: stopped
+        enabled: false
+
+    - name: 停止 SMART 采集 timer（未部署时幂等跳过）
+      systemd_unit:
+        name: node-exporter-smartmon.timer
+        state: stopped
+        enabled: false
+
+    - name: 移除单元文件
+      file:
+        path: /etc/systemd/system/{{ .item }}
+        state: absent
+      loop: [node-exporter.service, node-exporter-smartmon.service, node-exporter-smartmon.timer]
+
+    - name: daemon-reload（unit 移除后刷新）
+      shell: systemctl daemon-reload
+      changed_when: '{{ false }}'
+
+    - name: 移除 SMART 采集组件（脚本与 textfile 目录）
+      file:
+        path: "{{ .item }}"
+        state: absent
+      loop: ['{{ .bin_dir }}/smartmon.sh', '{{ .collector_textfile_directory }}']
+
+    - name: 移除二进制（可选，不可逆）
+      file:
+        path: "{{ .bin_dir }}/node_exporter"
+        state: absent
+      when: '{{ if .uninstall_remove_binary }}yes{{ end }}'

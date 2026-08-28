@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"strings"
 
-	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -22,26 +21,26 @@ func (m *StatModule) Name() string { return "stat" }
 
 // Desc 模块说明。
 func (m *StatModule) Desc() string {
-	return i18n.T("collect remote file/directory facts into a stat variable", "采集远端文件/目录 facts 到 stat 变量")
+	return "collect remote file/directory facts into a stat variable"
 }
 
 // Params 参数文档。
 func (m *StatModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "path", Type: "string", Desc: "远端路径"},
-		{Name: "get_checksum", Type: "bool", Default: "true", Desc: "采集 sha256（仅普通文件且小于 1MB 时）"},
-		{Name: "follow", Type: "bool", Default: "false", Desc: "跟随符号链接统计最终目标（readlink -f）"},
+		{Name: "path", Type: "string", Desc: "remote path"},
+		{Name: "get_checksum", Type: "bool", Default: "true", Desc: "collect sha256 (regular files under 1MB only)"},
+		{Name: "follow", Type: "bool", Default: "false", Desc: "follow symlinks and stat the final target (readlink -f)"},
 	}
 }
 
 // Example 示例任务。
 func (m *StatModule) Example() string {
-	return `- name: 采集配置文件 facts（结果直接进入变量域 .stat.*，同 setup 语义）
+	return `- name: gather config file facts (results land in .stat.*, same semantics as setup)
   stat:
     path: /etc/nginx/nginx.conf
     get_checksum: true
 
-- name: 配置存在才重启
+- name: restart only when the config exists
   service:
     name: nginx
     state: restarted
@@ -50,10 +49,10 @@ func (m *StatModule) Example() string {
 }
 
 // Run 执行采集。
-func (m *StatModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *StatModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	path, ok := argStr(args, "path")
 	if !ok || path == "" {
-		return Fail("%s", i18n.T("stat requires a path parameter", "stat 需要 path 参数"))
+		return Fail("%s", "stat requires a path parameter")
 	}
 	getChecksum := true
 	if b, ok := argBool(args, "get_checksum"); ok {
@@ -79,7 +78,7 @@ func (m *StatModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 		return bad
 	}
 	if kind == "missing" {
-		return &Result{Msg: fmt.Sprintf(i18n.T("%s does not exist", "%s 不存在"), path), Facts: map[string]any{"stat": facts}}
+		return &Result{Msg: fmt.Sprintf("%s does not exist", path), Facts: map[string]any{"stat": facts}}
 	}
 	facts["exists"] = true
 	origKind := kind
@@ -129,14 +128,14 @@ func (m *StatModule) Run(rc *RunContext, args map[string]any, free string) *Resu
 		}
 	}
 
-	msg := fmt.Sprintf(i18n.T("%s exists (%s", "%s 存在（%s"), path, kind)
+	msg := fmt.Sprintf("%s exists (%s", path, kind)
 	if s, _ := facts["mode"].(string); s != "" {
 		msg += ", mode " + s
 	}
 	if kind == "file" && sizeKnown {
-		msg += fmt.Sprintf(i18n.T(", %d bytes", ", %d 字节"), fileSize)
+		msg += fmt.Sprintf(", %d bytes", fileSize)
 	}
-	msg += i18n.T(")", "）")
+	msg += ")"
 	return &Result{Msg: msg, Facts: map[string]any{"stat": facts}}
 }
 
@@ -166,11 +165,11 @@ exit 0`, shellquote.Quote(path))
 	case 3:
 		return 0, false, nil
 	default:
-		return 0, false, Fail(i18n.T("failed to read size: %s", "读取大小失败: %s"), firstLine(out.Stderr))
+		return 0, false, Fail("failed to read size: %s", firstLine(out.Stderr))
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(out.Stdout), 10, 64)
 	if err != nil || n < 0 {
-		return 0, false, Fail(i18n.T("unable to parse size %q", "无法解析大小 %q"), out.Stdout)
+		return 0, false, Fail("unable to parse size %q", out.Stdout)
 	}
 	return n, true, nil
 }

@@ -9,64 +9,65 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 	"wdp/internal/model"
 )
 
 // newTestRC 构造带 Fake 连接的模块执行上下文。
 // Fake 的 Exec 模拟了远端 sha256sum / stat / 探测 / mkdir / touch / rm 行为。
-func newTestRC(t *testing.T) (*RunContext, *connection.Fake) {
+func newTestRC(t *testing.T) (*RunContext, *fake.Fake) {
 	t.Helper()
-	fake := connection.NewFake(&model.Host{Name: "test"})
+	fake := fake.NewFake(&model.Host{Name: "test"})
 	dirs := map[string]bool{}
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
 		case strings.Contains(s, "sha256sum"):
 			path := extractQuoted(s, "p=")
 			data, ok := fake.Files[path]
 			if !ok {
-				return connection.ExecResult{Code: 3}, nil
+				return conn.ExecResult{Code: 3}, nil
 			}
 			h := sha256.Sum256(data)
-			return connection.ExecResult{Code: 0, Stdout: hex.EncodeToString(h[:]) + "  " + path + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: hex.EncodeToString(h[:]) + "  " + path + "\n"}, nil
 		case strings.Contains(s, "stat -c"):
 			path := extractQuoted(s, "p=")
 			mode, ok := fake.Modes[path]
 			if !ok {
-				return connection.ExecResult{Code: 3}, nil
+				return conn.ExecResult{Code: 3}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: fmt.Sprintf("%o", mode.Perm())}, nil
+			return conn.ExecResult{Code: 0, Stdout: fmt.Sprintf("%o", mode.Perm())}, nil
 		case strings.Contains(s, "mkdir -p"):
 			path := firstQuoted(s)
 			dirs[path] = true
-			return connection.ExecResult{}, nil
+			return conn.ExecResult{}, nil
 		case strings.Contains(s, "touch --"):
 			path := firstQuoted(s)
 			fake.Files[path] = []byte{}
 			fake.Modes[path] = 0o644
-			return connection.ExecResult{}, nil
+			return conn.ExecResult{}, nil
 		case strings.Contains(s, "rm -rf"):
 			path := firstQuoted(s)
 			delete(fake.Files, path)
 			delete(fake.Modes, path)
 			delete(dirs, path)
-			return connection.ExecResult{}, nil
+			return conn.ExecResult{}, nil
 		case strings.Contains(s, "[ -L"):
 			path := extractQuoted(s, "p=")
 			switch {
 			case dirs[path]:
-				return connection.ExecResult{Code: 0, Stdout: "directory\n"}, nil
+				return conn.ExecResult{Code: 0, Stdout: "directory\n"}, nil
 			default:
 				_, ok := fake.Files[path]
 				kind := "missing"
 				if ok {
 					kind = "file"
 				}
-				return connection.ExecResult{Code: 0, Stdout: kind + "\n"}, nil
+				return conn.ExecResult{Code: 0, Stdout: kind + "\n"}, nil
 			}
 		default:
-			return connection.ExecResult{}, nil
+			return conn.ExecResult{}, nil
 		}
 	}
 	rc := &RunContext{
@@ -81,11 +82,11 @@ func newTestRC(t *testing.T) (*RunContext, *connection.Fake) {
 
 // extractQuoted 从脚本中提取 p='路径' 形式的值。
 func extractQuoted(script, prefix string) string {
-	i := strings.Index(script, prefix)
-	if i < 0 {
+	_, after, ok := strings.Cut(script, prefix)
+	if !ok {
 		return ""
 	}
-	rest := script[i+len(prefix):]
+	rest := after
 	if !strings.HasPrefix(rest, "'") {
 		return ""
 	}
@@ -98,16 +99,16 @@ func extractQuoted(script, prefix string) string {
 
 // firstQuoted 提取脚本中第一个单引号字符串。
 func firstQuoted(script string) string {
-	i := strings.IndexByte(script, '\'')
-	if i < 0 {
+	_, after, ok := strings.Cut(script, "'")
+	if !ok {
 		return ""
 	}
-	rest := script[i+1:]
-	end := strings.IndexByte(rest, '\'')
-	if end < 0 {
+	rest := after
+	before0, _, ok0 := strings.Cut(rest, "'")
+	if !ok0 {
 		return ""
 	}
-	return rest[:end]
+	return before0
 }
 
 func TestCopyModuleIdempotent(t *testing.T) {
@@ -206,9 +207,9 @@ func TestFileModuleStates(t *testing.T) {
 
 func TestShellModule(t *testing.T) {
 	rc, _ := newTestRC(t)
-	fake := rc.Conn.(*connection.Fake)
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0, Stdout: "up 1 day\n"}, nil
+	fake := rc.Conn.(*fake.Fake)
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "up 1 day\n"}, nil
 	}
 	mod := &ShellModule{}
 	r := mod.Run(rc, nil, "uptime")
@@ -221,8 +222,8 @@ func TestShellModule(t *testing.T) {
 		t.Fatal("空命令应失败")
 	}
 
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 2, Stderr: "boom"}, nil
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 2, Stderr: "boom"}, nil
 	}
 	r = mod.Run(rc, nil, "false")
 	if !r.Failed || r.Rc != 2 {
@@ -232,11 +233,11 @@ func TestShellModule(t *testing.T) {
 
 func TestShellCreatesSkips(t *testing.T) {
 	rc, fake := newTestRC(t)
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "[ -e") {
-			return connection.ExecResult{Code: 0}, nil // 文件存在
+			return conn.ExecResult{Code: 0}, nil // 文件存在
 		}
-		return connection.ExecResult{Code: 0}, nil
+		return conn.ExecResult{Code: 0}, nil
 	}
 	mod := &ShellModule{}
 	r := mod.Run(rc, map[string]any{"creates": "/done"}, "heavy-job")

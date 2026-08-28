@@ -22,17 +22,17 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/ulikunitz/xz"
-	"wdp/internal/i18n"
 )
 
 // ExtractArchive 解压 src 到 dest（格式按魔数识别），返回解出的条目数。
 func ExtractArchive(src, dest string) (int, error) {
 	f, err := os.Open(src)
 	if err != nil {
-		return 0, fmt.Errorf(i18n.T("failed to read archive: %w", "读取归档失败: %w"), err)
+		return 0, fmt.Errorf("failed to read archive: %w", err)
 	}
 	defer f.Close()
 	head := make([]byte, 6)
@@ -45,7 +45,7 @@ func ExtractArchive(src, dest string) (int, error) {
 	case n >= 2 && head[0] == 0x1f && head[1] == 0x8b:
 		gz, err := gzip.NewReader(f)
 		if err != nil {
-			return 0, fmt.Errorf(i18n.T("gzip decompression failed: %w", "gzip 解压失败: %w"), err)
+			return 0, fmt.Errorf("gzip decompression failed: %w", err)
 		}
 		defer gz.Close()
 		return extractTar(tar.NewReader(gz), dest)
@@ -53,7 +53,7 @@ func ExtractArchive(src, dest string) (int, error) {
 		head[3] == 0x58 && head[4] == 0x5a && head[5] == 0x00:
 		xr, err := xz.NewReader(f)
 		if err != nil {
-			return 0, fmt.Errorf(i18n.T("xz decompression failed: %w", "xz 解压失败: %w"), err)
+			return 0, fmt.Errorf("xz decompression failed: %w", err)
 		}
 		return extractTar(tar.NewReader(xr), dest)
 	case n >= 4 && string(head[:4]) == "PK\x03\x04":
@@ -68,12 +68,10 @@ func safeJoin(dest, name string) (string, error) {
 	name = strings.TrimPrefix(filepath.ToSlash(name), "/")
 	clean := filepath.FromSlash(name)
 	if clean == "" || clean == "." {
-		return "", errors.New(i18n.T("archive entry name is empty", "归档条目名为空"))
+		return "", errors.New("archive entry name is empty")
 	}
-	for _, part := range strings.Split(filepath.ToSlash(clean), "/") {
-		if part == ".." {
-			return "", fmt.Errorf(i18n.T("archive entry %q contains .., refusing to extract", "归档条目 %q 含 ..，拒绝解压"), name)
-		}
+	if slices.Contains(strings.Split(filepath.ToSlash(clean), "/"), "..") {
+		return "", fmt.Errorf("archive entry %q contains .., refusing to extract", name)
 	}
 	return filepath.Join(dest, clean), nil
 }
@@ -86,7 +84,7 @@ func checkIntermediateSymlinks(dest, target string) error {
 	rel, err := filepath.Rel(dest, target)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		// safeJoin 已做词法校验，这里只防御性兜底
-		return fmt.Errorf(i18n.T("archive entry %q resolves outside dest", "归档条目 %q 解析到 dest 之外"), target)
+		return fmt.Errorf("archive entry %q resolves outside dest", target)
 	}
 	parts := strings.Split(filepath.ToSlash(rel), "/")
 	cur := dest
@@ -101,11 +99,11 @@ func checkIntermediateSymlinks(dest, target string) error {
 		if fi, err := os.Lstat(cur); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 			resolved, rerr := filepath.EvalSymlinks(cur)
 			if rerr != nil {
-				return fmt.Errorf(i18n.T("symlink %s is dangling, refusing to extract through it", "符号链接 %s 悬空，拒绝穿过解压"), cur)
+				return fmt.Errorf("symlink %s is dangling, refusing to extract through it", cur)
 			}
 			rd, rerr := filepath.Rel(dest, resolved)
 			if rerr != nil || rd == ".." || strings.HasPrefix(rd, ".."+string(filepath.Separator)) {
-				return fmt.Errorf(i18n.T("symlink directory %s points outside dest, refusing to extract", "符号链接目录 %s 指向 dest 之外，拒绝解压"), cur)
+				return fmt.Errorf("symlink directory %s points outside dest, refusing to extract", cur)
 			}
 		}
 	}
@@ -127,13 +125,11 @@ func removeSymlinkAt(path string) bool {
 // 仅对原始值做 safeJoin 校验是不够的，绝对路径会被剥除前导 "/" 后通过检查。
 func safeLinkTarget(link string) (string, error) {
 	if strings.HasPrefix(link, "/") {
-		return "", fmt.Errorf(i18n.T("refusing absolute-path symlink target %q", "拒绝绝对路径符号链接目标 %q"), link)
+		return "", fmt.Errorf("refusing absolute-path symlink target %q", link)
 	}
 	slash := filepath.ToSlash(link)
-	for _, part := range strings.Split(slash, "/") {
-		if part == ".." {
-			return "", fmt.Errorf(i18n.T("symlink target %q contains .., refusing to extract", "符号链接目标 %q 含 ..，拒绝解压"), link)
-		}
+	if slices.Contains(strings.Split(slash, "/"), "..") {
+		return "", fmt.Errorf("symlink target %q contains .., refusing to extract", link)
 	}
 	return filepath.FromSlash(slash), nil
 }
@@ -147,7 +143,7 @@ func extractTar(tr *tar.Reader, dest string) (int, error) {
 			return count, nil
 		}
 		if err != nil {
-			return count, fmt.Errorf(i18n.T("failed to read archive entry: %w", "读取归档条目失败: %w"), err)
+			return count, fmt.Errorf("failed to read archive entry: %w", err)
 		}
 		target, err := safeJoin(dest, hdr.Name)
 		if err != nil {
@@ -160,7 +156,7 @@ func extractTar(tr *tar.Reader, dest string) (int, error) {
 		case tar.TypeDir:
 			removeSymlinkAt(target)
 			if err := os.MkdirAll(target, hdr.FileInfo().Mode().Perm()); err != nil {
-				return count, fmt.Errorf(i18n.T("failed to create directory %s: %w", "创建目录 %s 失败: %w"), hdr.Name, err)
+				return count, fmt.Errorf("failed to create directory %s: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
 			removeSymlinkAt(target)
@@ -168,27 +164,27 @@ func extractTar(tr *tar.Reader, dest string) (int, error) {
 				return count, err
 			}
 			if err := writeFile(target, tr, hdr.FileInfo().Mode().Perm()); err != nil {
-				return count, fmt.Errorf(i18n.T("failed to write %s: %w", "写入 %s 失败: %w"), hdr.Name, err)
+				return count, fmt.Errorf("failed to write %s: %w", hdr.Name, err)
 			}
 		case tar.TypeSymlink:
 			// 链接目标必须落在 dest 内：拒绝绝对路径/".."，并用归一化后的
 			// 相对目标创建（不能用原始 Linkname，见 safeLinkTarget 注释）
 			rel, err := safeLinkTarget(hdr.Linkname)
 			if err != nil {
-				return count, fmt.Errorf(i18n.T("symlink %q target is out of bounds: %w", "符号链接 %q 目标越界: %w"), hdr.Name, err)
+				return count, fmt.Errorf("symlink %q target is out of bounds: %w", hdr.Name, err)
 			}
 			_ = os.Remove(target) // 已存在任何类型条目均替换（tar -x 语义）
 			if err := os.Symlink(rel, target); err != nil {
-				return count, fmt.Errorf(i18n.T("failed to create symlink %s: %w", "创建符号链接 %s 失败: %w"), hdr.Name, err)
+				return count, fmt.Errorf("failed to create symlink %s: %w", hdr.Name, err)
 			}
 		case tar.TypeLink:
 			linkTarget, err := safeJoin(dest, hdr.Linkname)
 			if err != nil {
-				return count, fmt.Errorf(i18n.T("hardlink %q target is out of bounds: %w", "硬链接 %q 目标越界: %w"), hdr.Name, err)
+				return count, fmt.Errorf("hardlink %q target is out of bounds: %w", hdr.Name, err)
 			}
 			_ = os.Remove(target)
 			if err := os.Link(linkTarget, target); err != nil {
-				return count, fmt.Errorf(i18n.T("failed to create hardlink %s: %w", "创建硬链接 %s 失败: %w"), hdr.Name, err)
+				return count, fmt.Errorf("failed to create hardlink %s: %w", hdr.Name, err)
 			}
 		default:
 			// 其余类型（fifo/device 等）静默跳过——agent 不引入设备文件
@@ -202,7 +198,7 @@ func extractTar(tr *tar.Reader, dest string) (int, error) {
 func extractZip(src, dest string) (int, error) {
 	zr, err := zip.OpenReader(src)
 	if err != nil {
-		return 0, fmt.Errorf(i18n.T("failed to read zip: %w", "读取 zip 失败: %w"), err)
+		return 0, fmt.Errorf("failed to read zip: %w", err)
 	}
 	defer zr.Close()
 	count := 0
@@ -219,7 +215,7 @@ func extractZip(src, dest string) (int, error) {
 		case zf.FileInfo().IsDir():
 			removeSymlinkAt(target)
 			if err := os.MkdirAll(target, mode.Perm()); err != nil {
-				return count, fmt.Errorf(i18n.T("failed to create directory %s: %w", "创建目录 %s 失败: %w"), zf.Name, err)
+				return count, fmt.Errorf("failed to create directory %s: %w", zf.Name, err)
 			}
 		case mode&fs.ModeSymlink != 0:
 			rc, err := zf.Open()
@@ -233,11 +229,11 @@ func extractZip(src, dest string) (int, error) {
 			}
 			rel, err := safeLinkTarget(string(link))
 			if err != nil {
-				return count, fmt.Errorf(i18n.T("symlink %q target is out of bounds: %w", "符号链接 %q 目标越界: %w"), zf.Name, err)
+				return count, fmt.Errorf("symlink %q target is out of bounds: %w", zf.Name, err)
 			}
 			_ = os.Remove(target) // 已存在任何类型条目均替换
 			if err := os.Symlink(rel, target); err != nil {
-				return count, fmt.Errorf(i18n.T("failed to create symlink %s: %w", "创建符号链接 %s 失败: %w"), zf.Name, err)
+				return count, fmt.Errorf("failed to create symlink %s: %w", zf.Name, err)
 			}
 		default:
 			rc, err := zf.Open()
@@ -252,7 +248,7 @@ func extractZip(src, dest string) (int, error) {
 			err = writeFile(target, rc, mode.Perm())
 			rc.Close()
 			if err != nil {
-				return count, fmt.Errorf(i18n.T("failed to write %s: %w", "写入 %s 失败: %w"), zf.Name, err)
+				return count, fmt.Errorf("failed to write %s: %w", zf.Name, err)
 			}
 		}
 		count++

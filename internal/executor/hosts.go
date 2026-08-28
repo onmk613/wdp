@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -48,7 +47,7 @@ func (e *Executor) filterDead(hosts []*model.Host) []*model.Host {
 	out := hosts[:0:0]
 	for _, h := range hosts {
 		if e.deadHosts[h.Name] {
-			e.Rep.PlayMsg("%s 此前失败，跳过本 play", h.Name)
+			e.Rep.PlayMsg("%s failed previously, skipping this play", h.Name)
 			continue
 		}
 		out = append(out, h)
@@ -63,15 +62,6 @@ func (e *Executor) markDead(host string) {
 	e.deadMu.Unlock()
 }
 
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
-}
-
 // splitBatches 按 serial 表达式分批："5"（每批 5 台）/"10%"（百分比）/
 // "5,10,20"（逐批尺寸，最后一个尺寸对剩余主机重复）；空 = 一批。
 // 表达式含空段（如 "5," 笔误）时报错，而不是静默回退默认分批。
@@ -80,10 +70,10 @@ func splitBatches(hosts []*model.Host, serial string) ([][]*model.Host, error) {
 		return [][]*model.Host{hosts}, nil
 	}
 	var sizes []int
-	for _, t := range strings.Split(serial, ",") {
+	for t := range strings.SplitSeq(serial, ",") {
 		t = strings.TrimSpace(t)
 		if t == "" {
-			return nil, fmt.Errorf(i18n.T("invalid serial %q: empty segment (check for stray commas)", "serial %q 非法：存在空段（检查多余逗号）"), serial)
+			return nil, fmt.Errorf("invalid serial %q: empty segment (check for stray commas)", serial)
 		}
 		sizes = append(sizes, parseBatchSize(t, len(hosts)))
 	}
@@ -96,10 +86,7 @@ func splitBatches(hosts []*model.Host, serial string) ([][]*model.Host, error) {
 		if len(out) < len(sizes) {
 			size = sizes[len(out)]
 		}
-		end := i + size
-		if end > len(hosts) {
-			end = len(hosts)
-		}
+		end := min(i+size, len(hosts))
 		out = append(out, hosts[i:end])
 		i = end
 	}

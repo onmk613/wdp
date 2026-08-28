@@ -4,7 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 )
 
 // fakeUser 模拟一条 passwd/组记录。
@@ -27,15 +28,15 @@ func newUserRC(t *testing.T) (*RunContext, *userShell) {
 	t.Helper()
 	rc, _ := newTestRC(t)
 	sh := &userShell{users: map[string]*fakeUser{}}
-	fake := rc.Conn.(*connection.Fake)
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	fake := rc.Conn.(*fake.Fake)
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
 		case strings.Contains(s, "userdel"):
 			name := firstQuoted(s)
 			delete(sh.users, name)
 			sh.runs = append(sh.runs, s)
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "useradd"), strings.Contains(s, "usermod"):
 			flags, name := parseUserCmd(s)
 			if strings.Contains(s, "useradd") {
@@ -58,7 +59,7 @@ func newUserRC(t *testing.T) (*RunContext, *userShell) {
 			} else {
 				u := sh.users[name]
 				if u == nil {
-					return connection.ExecResult{Code: 6, Stderr: "usermod: user does not exist"}, nil
+					return conn.ExecResult{Code: 6, Stderr: "usermod: user does not exist"}, nil
 				}
 				if v := flags["u"]; v != "" {
 					u.uid = v
@@ -77,38 +78,38 @@ func newUserRC(t *testing.T) (*RunContext, *userShell) {
 				}
 			}
 			sh.runs = append(sh.runs, s)
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "getent passwd"):
 			u := sh.users[firstQuoted(s)]
 			if u == nil {
-				return connection.ExecResult{Code: 2}, nil
+				return conn.ExecResult{Code: 2}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: u.home + ":" + u.shell + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: u.home + ":" + u.shell + "\n"}, nil
 		case strings.Contains(s, "id -gn"):
 			u := sh.users[firstQuoted(s)]
 			if u == nil {
-				return connection.ExecResult{Code: 1}, nil
+				return conn.ExecResult{Code: 1}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: u.primary + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: u.primary + "\n"}, nil
 		case strings.Contains(s, "id -nG"):
 			u := sh.users[firstQuoted(s)]
 			if u == nil {
-				return connection.ExecResult{Code: 1}, nil
+				return conn.ExecResult{Code: 1}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: strings.Join(u.groups, " ") + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: strings.Join(u.groups, " ") + "\n"}, nil
 		case strings.Contains(s, "id -u") && strings.Contains(s, ">/dev/null"):
 			if sh.users[firstQuoted(s)] == nil {
-				return connection.ExecResult{Code: 1}, nil
+				return conn.ExecResult{Code: 1}, nil
 			}
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "id -u"):
 			u := sh.users[firstQuoted(s)]
 			if u == nil {
-				return connection.ExecResult{Code: 1}, nil
+				return conn.ExecResult{Code: 1}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: u.uid + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: u.uid + "\n"}, nil
 		default:
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		}
 	}
 	return rc, sh
@@ -262,7 +263,7 @@ func TestUserCheckMode(t *testing.T) {
 
 	// 创建预估
 	r := mod.Run(rc, map[string]any{"name": "deploy", "uid": 1500, "shell": "/sbin/nologin"}, "")
-	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "[check] 用户 deploy 将创建") {
+	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "[check] user deploy would be created") {
 		t.Fatalf("创建预估: %+v", r)
 	}
 	if !strings.Contains(r.Diff, "+ uid 1500") || !strings.Contains(r.Diff, "+ shell /sbin/nologin") {
@@ -272,7 +273,7 @@ func TestUserCheckMode(t *testing.T) {
 	// 漂移预估：报告逐属性，不执行 usermod
 	sh.users["app"] = &fakeUser{uid: "1000", primary: "app", groups: []string{"app"}, home: "/home/app", shell: "/bin/sh"}
 	r = mod.Run(rc, map[string]any{"name": "app", "shell": "/bin/bash"}, "")
-	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "将调整 shell") {
+	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "would adjust shell") {
 		t.Fatalf("漂移预估: %+v", r)
 	}
 	if !strings.Contains(r.Diff, "- shell /bin/sh") || !strings.Contains(r.Diff, "+ shell /bin/bash") {
@@ -286,7 +287,7 @@ func TestUserCheckMode(t *testing.T) {
 
 	// 删除预估
 	r = mod.Run(rc, map[string]any{"name": "app", "state": "absent"}, "")
-	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "将删除") {
+	if r.Failed || !r.Changed || !strings.Contains(r.Msg, "would be removed") {
 		t.Fatalf("删除预估: %+v", r)
 	}
 	if !strings.Contains(r.Diff, "- app") {

@@ -114,9 +114,14 @@ func TestAnalyze(t *testing.T) {
 	if r.AutoRollback {
 		t.Fatal("未配置 auto_rollback")
 	}
-	s := r.Summary()
-	if !strings.Contains(s, "不可逆 2") || !strings.Contains(s, "支持卸载") {
-		t.Fatalf("摘要: %s", s)
+	var irr int
+	for _, row := range r.Rows() {
+		if row.Label == "irreversible" {
+			irr = row.Count
+		}
+	}
+	if irr != 2 || !strings.Contains(r.LifecycleNote(), "uninstallable") {
+		t.Fatalf("摘要行/生命周期: %+v %s", r.Rows(), r.LifecycleNote())
 	}
 }
 
@@ -131,9 +136,15 @@ func TestAnalyzePartialReversible(t *testing.T) {
 	if r.Partial != 1 || r.Irreversible != 1 {
 		t.Fatalf("unarchive 应计为部分可逆: %+v", r)
 	}
-	s := r.Summary()
-	if !strings.Contains(s, "部分可逆 1") || !strings.Contains(s, "覆盖已有文件不恢复") {
-		t.Fatalf("摘要应说明部分可逆边界: %s", s)
+	var partial int
+	var note string
+	for _, row := range r.Rows() {
+		if row.Label == "partially reversible" {
+			partial, note = row.Count, row.Note
+		}
+	}
+	if partial != 1 || !strings.Contains(note, "overwritten files are not restored") {
+		t.Fatalf("摘要应说明部分可逆边界: %+v", r.Rows())
 	}
 }
 

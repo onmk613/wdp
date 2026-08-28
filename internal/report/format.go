@@ -5,7 +5,6 @@ import (
 	"io"
 	"sync"
 
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/render"
 )
@@ -26,13 +25,13 @@ func NewFormatter(out io.Writer, format string) *Formatter {
 	return &Formatter{Out: out, Format: format, engine: render.DefaultEngine()}
 }
 
-func (f *Formatter) PlayStart(name string, hosts []string) {}
-func (f *Formatter) TaskStart(task, module string)         {}
-func (f *Formatter) TaskDone()                             {}
-func (f *Formatter) PlayMsg(format string, a ...any)       {}
+func (_ *Formatter) PlayStart(_ string, _ []string) {}
+func (_ *Formatter) TaskStart(_, _ string)          {}
+func (f *Formatter) TaskDone()                      {}
+func (_ *Formatter) PlayMsg(_ string, _ ...any)     {}
 
 // Recap 静默（脚本消费 stdout，统计走 stderr 由调用方按需重定向）。
-func (f *Formatter) Recap(playName string, stats map[string]*model.Stats) {}
+func (_ *Formatter) Recap(_ string, _ map[string]*model.Stats) {}
 
 // HostResult 渲染单主机结果。
 func (f *Formatter) HostResult(host string, r *model.TaskResult) {
@@ -52,7 +51,7 @@ func (f *Formatter) HostResult(host string, r *model.TaskResult) {
 	}
 	line, err := f.engine.Render(f.Format, vars)
 	if err != nil {
-		fmt.Fprintf(f.Out, i18n.T("[format render failed: %v]\n", "[format 渲染失败: %v]\n"), err)
+		fmt.Fprintf(f.Out, "[format render failed: %v]\n", err)
 		return
 	}
 	fmt.Fprint(f.Out, line)

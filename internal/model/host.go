@@ -2,6 +2,7 @@ package model
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"strings"
 )
@@ -17,15 +18,16 @@ import (
 //   - push 专属：BinaryPath/KeepAgent
 //   - 提权：BecomePassword(Env)
 type Host struct {
-	Name             string // inventory 中的主机名（inventory_hostname）
-	Address          string // 实际连接地址，缺省等于 Name
-	Port             int    // SSH 端口，缺省 22
-	User             string // SSH 用户，缺省 root
-	Password         string // SSH 密码认证（可选，支持 "env:VAR" 引用）
-	PasswordEnv      string // SSH 密码环境变量（避免 inventory 明文）
-	KeyPath          string // 私钥路径（可选，缺省尝试 ~/.ssh/id_ed25519、id_rsa）
-	KeyPassphrase    string // 私钥口令（可选，支持 "env:VAR"）
-	KeyPassphraseEnv string // 私钥口令环境变量
+	Name             string   // inventory 中的主机名（inventory_hostname）
+	Address          string   // 实际连接地址，缺省等于 Name
+	Port             int      // SSH 端口，缺省 22
+	User             string   // SSH 用户，缺省 root
+	Password         string   // SSH 密码认证（可选，支持 "env:VAR" 引用）
+	PasswordEnv      string   // SSH 密码环境变量（避免 inventory 明文）
+	KeyPath          string   // 私钥路径（可选，缺省尝试 ~/.ssh/id_ed25519、id_rsa；显式指定时优先于 IdentityFiles）
+	IdentityFiles    []string // ~/.ssh/config 匹配块解析出的身份文件（多个累积；显式 KeyPath 为空时生效）
+	KeyPassphrase    string   // 私钥口令（可选，支持 "env:VAR"）
+	KeyPassphraseEnv string   // 私钥口令环境变量
 
 	HostKeyCheck      bool   // 校验主机指纹（known_hosts）
 	KnownHosts        string // known_hosts 路径（缺省 ~/.ssh/known_hosts）
@@ -101,7 +103,7 @@ func ParseBool(v any) (bool, error) {
 			return false, nil
 		}
 	}
-	return false, fmt.Errorf("无法解析为布尔值: %v", v)
+	return false, fmt.Errorf("cannot parse as bool: %v", v)
 }
 
 // Clone 深拷贝主机（变量单独一份，供每主机独立变量域使用）。
@@ -109,9 +111,7 @@ func (h *Host) Clone() *Host {
 	nh := *h
 	if h.Vars != nil {
 		nh.Vars = make(map[string]any, len(h.Vars))
-		for k, v := range h.Vars {
-			nh.Vars[k] = v
-		}
+		maps.Copy(nh.Vars, h.Vars)
 	}
 	return &nh
 }

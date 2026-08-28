@@ -61,7 +61,7 @@ func (r *JSONReporter) TaskStart(task, module string) {
 // HostResult 记录单主机结果。
 // no_log 任务遮蔽 stdout/stderr/msg/diff（含 loop 逐项）：
 // JSON 报告常落 CI 工件，敏感输出不得随报告持久化（register 变量不受影响）。
-func (r *JSONReporter) HostResult(host string, res *model.TaskResult) {
+func (r *JSONReporter) HostResult(_ string, res *model.TaskResult) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.curTask == nil {
@@ -107,10 +107,10 @@ func redact(res *model.TaskResult) *model.TaskResult {
 func (r *JSONReporter) TaskDone() {}
 
 // PlayMsg 忽略进度消息（JSON 仅含结构化结果）。
-func (r *JSONReporter) PlayMsg(format string, a ...any) {}
+func (_ *JSONReporter) PlayMsg(_ string, _ ...any) {}
 
 // Recap 记录 play 汇总。
-func (r *JSONReporter) Recap(playName string, stats map[string]*model.Stats) {
+func (r *JSONReporter) Recap(_ string, stats map[string]*model.Stats) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.curPlay != nil {

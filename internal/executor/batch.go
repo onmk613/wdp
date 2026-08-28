@@ -3,9 +3,10 @@ package executor
 import (
 	"context"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/module"
 )
@@ -31,30 +32,27 @@ func (e *Executor) runBatch(ctx context.Context, p *model.Play, playHosts, hosts
 func (e *Executor) prepareBatchRuns(p *model.Play, playHosts, hosts []*model.Host, stats map[string]*model.Stats, st *playState) []*hostRun {
 	runs := make([]*hostRun, 0, len(hosts))
 	for _, h := range hosts {
-		// 内置变量取值先于合并捕获（inventory_hostname/group_names 由 inventory 层写入 h.Vars）
-		builtinGroups, _ := h.Vars["group_names"]
 		vars := map[string]any{}
-		for k, v := range h.Vars { // inventory 层（最低）
-			vars[k] = v
+		// inventory 层（最低）
+		maps.Copy(vars, h.Vars)
+		// chart 合并 values（覆盖 inventory：默认同名时 values 恒赢）
+		maps.Copy(vars, e.Opts.Values)
+		// inventory_override 白名单（chart.yaml 显式 opt-in）：列入的键
+		// 允许 inventory 同名变量反超 values（ansible 式语义按 chart 领取）。
+		// 仅顶层 values 域生效；play vars 及以上层级不受影响。
+		if e.Opts.Chart != nil {
+			for _, k := range e.Opts.Chart.Meta.InventoryOverride {
+				if v, ok := h.Vars[k]; ok {
+					vars[k] = v
+				}
+			}
 		}
-		for k, v := range e.Opts.Values { // chart 合并 values（覆盖 inventory）
-			vars[k] = v
-		}
-		for k, v := range p.Vars { // play vars（最高静态层）
-			vars[k] = v
-		}
+		// play vars（最高静态层）
+		maps.Copy(vars, p.Vars)
 		st.seed(h.Name, vars) // 叠加此前批次的运行时变量（register/facts）
 		e.seedFacts(h.Name, vars)
-		// 内置变量最后强制注入，不可被任何静态层/运行时层覆盖：
-		//   inventory_hostname 主机名 / group_names 所属组 /
-		//   play_hosts 当前 play 全部选中主机 / play_batch 当前批次 /
-		//   groups 组→成员（含 children 与 all）/ hosts 主机名→{name,address,port,conn}
-		vars["inventory_hostname"] = h.Name
-		vars["group_names"] = builtinGroups
-		vars["play_hosts"] = hostNames(playHosts)
-		vars["play_batch"] = hostNames(hosts)
-		vars["groups"] = e.Inv.GroupsMap()
-		vars["hosts"] = e.Inv.HostsMeta()
+		// 内置变量最后强制注入（清单与赋值统一在 builtins.go，子 chart 作用域共用）
+		e.injectBuiltins(vars, h, playHosts, hosts)
 		runs = append(runs, &hostRun{
 			host:       h,
 			vars:       vars,
@@ -80,7 +78,7 @@ func (e *Executor) runBatchTasks(ctx context.Context, p *model.Play, runs []*hos
 	taskFailed := false
 	for _, task := range p.Tasks {
 		if ctx.Err() != nil {
-			e.Rep.PlayMsg(i18n.T("execution cancelled (%v), terminating remaining tasks", "执行已取消（%v），终止剩余任务"), ctx.Err())
+			e.Rep.PlayMsg("execution cancelled (%v), terminating remaining tasks", ctx.Err())
 			return true, true
 		}
 		if !started {
@@ -106,7 +104,7 @@ func (e *Executor) runBatchTasks(ctx context.Context, p *model.Play, runs []*hos
 		}
 		e.Rep.TaskDone()
 		if !anyAlive(runs) {
-			e.Rep.PlayMsg(i18n.T("all hosts unavailable, terminating remaining tasks of this play", "全部主机不可用，终止本 play 剩余任务"))
+			e.Rep.PlayMsg("all hosts unavailable, terminating remaining tasks of this play")
 			return taskFailed, true
 		}
 	}
@@ -121,9 +119,9 @@ func (e *Executor) flushHandlers(ctx context.Context, p *model.Play, runs []*hos
 		return false
 	}
 	failed := false
-	e.Rep.PlayMsg(i18n.T("triggering handlers: %s", "触发 handlers: %s"), strings.Join(notifiedList, ", "))
+	e.Rep.PlayMsg("triggering handlers: %s", strings.Join(notifiedList, ", "))
 	for _, h := range p.Handlers {
-		if !contains(notifiedList, h.Name) {
+		if !slices.Contains(notifiedList, h.Name) {
 			continue
 		}
 		targets := make([]*hostRun, 0, len(runs))
@@ -197,7 +195,7 @@ func (e *Executor) fanOut(ctx context.Context, p *model.Play, task *model.Task, 
 				}
 				out = append(out, fanResult{hr, &model.TaskResult{
 					Host: hr.host.Name, Task: task.Label(), Module: task.Module,
-					Failed: true, Msg: fmt.Sprintf("未知模块 %q", task.Module),
+					Failed: true, Msg: fmt.Sprintf("unknown module %q", task.Module),
 				}})
 			}
 			return out

@@ -15,7 +15,6 @@ import (
 	"regexp"
 	"strings"
 
-	"wdp/internal/i18n"
 	"wdp/internal/module"
 )
 
@@ -27,7 +26,7 @@ var nameRe = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 // ValidName 校验应用名（小写字母数字与连字符，作目录/服务名安全）。
 func ValidName(name string) error {
 	if !nameRe.MatchString(name) {
-		return fmt.Errorf(i18n.T("app name %q is invalid (must match ^[a-z][a-z0-9-]*$)", "应用名 %q 不合法（需匹配 ^[a-z][a-z0-9-]*$）"), name)
+		return fmt.Errorf("app name %q is invalid (must match ^[a-z][a-z0-9-]*$)", name)
 	}
 	return nil
 }
@@ -40,7 +39,7 @@ func Scaffold(dst, name string, full bool) (string, error) {
 	}
 	root := filepath.Join(dst, name)
 	if _, err := os.Stat(filepath.Join(root, "chart.yaml")); err == nil {
-		return "", fmt.Errorf(i18n.T("%s already contains chart.yaml, refusing to overwrite", "%s 已存在 chart.yaml，拒绝覆盖"), root)
+		return "", fmt.Errorf("%s already contains chart.yaml, refusing to overwrite", root)
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return "", err
@@ -67,7 +66,7 @@ func Scaffold(dst, name string, full bool) (string, error) {
 		return os.WriteFile(target, []byte(content), 0o644)
 	})
 	if err != nil {
-		return "", fmt.Errorf(i18n.T("failed to scaffold: %w", "生成骨架失败: %w"), err)
+		return "", fmt.Errorf("failed to scaffold: %w", err)
 	}
 
 	if full {
@@ -89,7 +88,7 @@ func writePayload(path, name string) error {
 	tw := tar.NewWriter(gz)
 	members := []struct{ name, body string }{
 		{"VERSION", name + "-0.1.0\n"},
-		{"README", "wdp 应用包骨架生成的 unarchive 演示制品\n"},
+		{"README", "demo artifact produced by the wdp chart skeleton (unarchive demo)\n"},
 	}
 	for _, m := range members {
 		if err := tw.WriteHeader(&tar.Header{Name: m.name, Mode: 0o644, Size: int64(len(m.body))}); err != nil {
@@ -113,27 +112,26 @@ func ModuleSnippet(name string) (string, error) {
 	m, ok := module.Get(name)
 	if !ok {
 		return "", fmt.Errorf("%s: %q (%s)",
-			i18n.T("unknown module", "未知模块"), name, i18n.T("see the built-in module list", "查看内置模块列表"))
+			"unknown module", name, "see the built-in module list")
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# %s — %s\n", name, m.Desc())
 	params := module.Usage(m)
 	if len(params) == 0 {
-		fmt.Fprintf(&sb, "%s\n", i18n.T("(parameter docs pending: module does not implement UsageProvider)",
-			"（参数文档待补：模块未实现 UsageProvider）"))
+		fmt.Fprintf(&sb, "%s\n", "(parameter docs pending: module does not implement UsageProvider)")
 	} else {
-		fmt.Fprintf(&sb, "%s\n", i18n.T("parameters:", "参数："))
+		fmt.Fprintf(&sb, "%s\n", "parameters:")
 		for _, p := range params {
 			def := p.Default
 			if def == "" {
 				def = "-"
 			}
 			fmt.Fprintf(&sb, "  %-14s %-6s %s %-8s %s\n", p.Name, p.Type,
-				i18n.T("default", "默认"), def, p.Desc)
+				"default", def, p.Desc)
 		}
 	}
 	if ex := module.Example(m); ex != "" {
-		fmt.Fprintf(&sb, "%s\n%s", i18n.T("example task:", "示例任务："), ex)
+		fmt.Fprintf(&sb, "%s\n%s", "example task:", ex)
 		if !strings.HasSuffix(ex, "\n") {
 			sb.WriteString("\n")
 		}

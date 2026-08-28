@@ -5,9 +5,9 @@ package playbook
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -27,7 +27,7 @@ var taskKeys = map[string]bool{
 func parseTask(raw any, isHandler bool) (*model.Task, error) {
 	m, ok := raw.(map[string]any)
 	if !ok {
-		return nil, fmt.Errorf(i18n.T("task must be a map, got %T", "任务必须是 map，实际为 %T"), raw)
+		return nil, fmt.Errorf("task must be a map, got %T", raw)
 	}
 	t := &model.Task{IsHandler: isHandler}
 	// name 先解析：后续字段报错时 Label() 能带上任务名
@@ -53,7 +53,7 @@ func parseTask(raw any, isHandler bool) (*model.Task, error) {
 		return t, nil
 	}
 	if t.Rescue != nil || t.Always != nil {
-		return nil, fmt.Errorf(i18n.T("task %q: rescue/always must appear together with block", "任务 %q: rescue/always 必须与 block 同时出现"), t.Label())
+		return nil, fmt.Errorf("task %q: rescue/always must appear together with block", t.Label())
 	}
 	return resolveTaskModule(m, t)
 }
@@ -63,7 +63,7 @@ func parseTaskFlowKeys(m map[string]any, t *model.Task) error {
 	if v, ok := m["when"]; ok {
 		l, ok := strOrList(v)
 		if !ok {
-			return errors.New(i18n.T("when only supports a string or a list", "when 仅支持字符串或列表"))
+			return errors.New("when only supports a string or a list")
 		}
 		t.When = l
 	}
@@ -96,12 +96,12 @@ func parseTaskFlowKeys(m map[string]any, t *model.Task) error {
 	if v, ok := m["loop_control"]; ok {
 		lc, ok := v.(map[string]any)
 		if !ok {
-			return fmt.Errorf(i18n.T("task %q: loop_control must be a map (loop_var: custom variable name)", "任务 %q: loop_control 必须是 map（loop_var: 自定义变量名）"), t.Label())
+			return fmt.Errorf("task %q: loop_control must be a map (loop_var: custom variable name)", t.Label())
 		}
 		if lv, ok := lc["loop_var"]; ok {
 			t.LoopVar = fmt.Sprint(lv)
 			if t.LoopVar == "" {
-				return fmt.Errorf(i18n.T("task %q: loop_var cannot be empty", "任务 %q: loop_var 不能为空"), t.Label())
+				return fmt.Errorf("task %q: loop_var cannot be empty", t.Label())
 			}
 		}
 	}
@@ -120,14 +120,14 @@ func parseTaskContextKeys(m map[string]any, t *model.Task) error {
 	if v, ok := m["ignore_errors"]; ok {
 		b, err := model.ParseBool(v)
 		if err != nil {
-			return fmt.Errorf("任务 %q: ignore_errors: %w", t.Label(), err)
+			return fmt.Errorf("task %q: ignore_errors: %w", t.Label(), err)
 		}
 		t.IgnoreErrors = b
 	}
 	if v, ok := m["become"]; ok {
 		b, err := model.ParseBool(v)
 		if err != nil {
-			return fmt.Errorf("任务 %q: become: %w", t.Label(), err)
+			return fmt.Errorf("task %q: become: %w", t.Label(), err)
 		}
 		t.Become = &b
 	}
@@ -140,7 +140,7 @@ func parseTaskContextKeys(m map[string]any, t *model.Task) error {
 	if v, ok := m["run_once"]; ok {
 		b, err := model.ParseBool(v)
 		if err != nil {
-			return fmt.Errorf("任务 %q: run_once: %w", t.Label(), err)
+			return fmt.Errorf("task %q: run_once: %w", t.Label(), err)
 		}
 		t.RunOnce = b
 	}
@@ -149,7 +149,7 @@ func parseTaskContextKeys(m map[string]any, t *model.Task) error {
 		switch t.Hook {
 		case "pre_install", "post_install", "pre_uninstall", "post_uninstall":
 		default:
-			return fmt.Errorf(i18n.T("task %q: unsupported hook %q (options: pre_install/post_install/pre_uninstall/post_uninstall)", "任务 %q: 不支持的 hook %q（可选: pre_install/post_install/pre_uninstall/post_uninstall）"),
+			return fmt.Errorf("task %q: unsupported hook %q (options: pre_install/post_install/pre_uninstall/post_uninstall)",
 				t.Label(), t.Hook)
 		}
 	}
@@ -176,13 +176,13 @@ func parseTaskReportKeys(m map[string]any, t *model.Task) error {
 	if v, ok := m["output"]; ok {
 		t.Output = fmt.Sprint(v)
 		if err := validateOutputSpec(t.Output); err != nil {
-			return fmt.Errorf("任务 %q: output: %w", t.Label(), err)
+			return fmt.Errorf("task %q: output: %w", t.Label(), err)
 		}
 	}
 	if v, ok := m["no_log"]; ok {
 		b, err := model.ParseBool(v)
 		if err != nil {
-			return fmt.Errorf("任务 %q: no_log: %w", t.Label(), err)
+			return fmt.Errorf("task %q: no_log: %w", t.Label(), err)
 		}
 		t.NoLog = b
 	}
@@ -238,26 +238,46 @@ func resolveTaskModule(m map[string]any, t *model.Task) (*model.Task, error) {
 		explicitArgs = am
 	}
 
-	// 剩余唯一键 = 模块（或 chart 引用）
+	// 剩余唯一键 = 模块（或 chart 引用 / include 片段引用）
 	var modName string
 	var modVal any
+	var include string
 	for k, v := range m {
 		if taskKeys[k] || playKeys[k] {
 			continue
 		}
+		if k == "include" {
+			s, ok := v.(string)
+			if !ok || s == "" {
+				return nil, fmt.Errorf("task %q: include must be a non-empty path string", t.Label())
+			}
+			include = s
+			continue
+		}
 		if modName != "" {
-			return nil, fmt.Errorf(i18n.T("task %q specifies multiple modules (%s, %s)", "任务 %q 同时指定了多个模块（%s、%s）"), t.Label(), modName, k)
+			return nil, fmt.Errorf("task %q specifies multiple modules (%s, %s)", t.Label(), modName, k)
 		}
 		modName, modVal = k, v
 	}
+	if include != "" && modName != "" {
+		return nil, fmt.Errorf("task %q: include cannot be combined with module %s", t.Label(), modName)
+	}
+	if include != "" {
+		// include 片段（`include: tasks/x.yaml`）：Load 阶段静态展开，
+		// 展开后此占位任务被片段任务序列替换（executor 不会见到它）
+		t.Module = "include"
+		t.Include = include
+		t.Args = map[string]any{}
+		return t, nil
+	}
 	if modName == "" {
-		return nil, fmt.Errorf(i18n.T("task %q does not specify a module", "任务 %q 未指定模块"), t.Label())
+		return nil, fmt.Errorf("task %q does not specify a module", t.Label())
 	}
 	if modName == "chart" {
 		// `chart: <子chart名>` 引用，展开执行子 chart 任务序列
 		ref, ok := modVal.(string)
 		if !ok || ref == "" {
-			return nil, fmt.Errorf(i18n.T("task %q: chart reference must be a subchart name string", "任务 %q: chart 引用必须是子 chart 名字符串"), t.Label())
+			return nil, fmt.Errorf("task %q: chart reference must be a subchart name string", t.Label())
 		}
 		t.Module = "chart"
 		t.ChartRef = ref
@@ -265,7 +285,7 @@ func resolveTaskModule(m map[string]any, t *model.Task) (*model.Task, error) {
 		return t, nil
 	}
 	if t.ChartVars != nil {
-		return nil, fmt.Errorf(i18n.T("task %q: vars is only for chart reference tasks", "任务 %q: vars 仅用于 chart 引用任务"), t.Label())
+		return nil, fmt.Errorf("task %q: vars is only for chart reference tasks", t.Label())
 	}
 	t.Module = modName
 	switch x := modVal.(type) {
@@ -277,15 +297,13 @@ func resolveTaskModule(m map[string]any, t *model.Task) (*model.Task, error) {
 	case map[string]any:
 		t.Args = x
 	default:
-		return nil, fmt.Errorf(i18n.T("module %s parameters must be a string or a map", "模块 %s 的参数必须是字符串或 map"), modName)
+		return nil, fmt.Errorf("module %s parameters must be a string or a map", modName)
 	}
 	if explicitArgs != nil {
 		if t.FreeForm != "" {
-			return nil, fmt.Errorf(i18n.T("task %q: shorthand params and args cannot be used together", "任务 %q: 简写参数与 args 不能同时使用"), t.Label())
+			return nil, fmt.Errorf("task %q: shorthand params and args cannot be used together", t.Label())
 		}
-		for k, v := range explicitArgs {
-			t.Args[k] = v
-		}
+		maps.Copy(t.Args, explicitArgs)
 	}
 	return t, nil
 }
@@ -318,5 +336,5 @@ func validateOutputSpec(s string) error {
 			}
 		}
 	}
-	return fmt.Errorf(i18n.T("cannot parse %q (use: full/none/oneline/head=N/tail=N)", "无法解析 %q（可用: full/none/oneline/head=N/tail=N）"), s)
+	return fmt.Errorf("cannot parse %q (use: full/none/oneline/head=N/tail=N)", s)
 }

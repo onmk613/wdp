@@ -1,0 +1,24 @@
+# docker 状态巡检：只读，报告服务状态与版本。
+
+- name: docker 巡检
+  hosts: docker
+  become: true
+  tasks:
+    - name: 服务状态（active/enabled 单行）
+      shell: printf '%s/%s' "$(systemctl is-active docker)" "$(systemctl is-enabled docker)"
+      register: dst
+      changed_when: '{{ false }}'
+
+    - name: 版本
+      shell: docker version --format '{{`{{ .Server.Version }}`}}'
+      register: dver
+      changed_when: '{{ false }}'
+
+    - name: compose 插件版本（未安装报 absent）
+      shell: docker compose version --short 2>/dev/null || echo absent
+      register: dcompose
+      changed_when: '{{ false }}'
+
+    - name: 汇报
+      debug:
+        msg: 'host={{ .inventory_hostname }} docker={{ .dver.stdout }} compose={{ .dcompose.stdout }} state={{ .dst.stdout }}'

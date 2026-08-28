@@ -6,11 +6,12 @@ import (
 
 	"wdp/internal/config"
 	"wdp/internal/model"
+	"wdp/internal/sshcfg"
 )
 
 // hostKeys 是主机条目中连接参数键的白名单（其余键进入 Vars）。
 // 内置基线为 SSH 通道与通用键；各连接包经 RegisterHostKeys 在 init 中
-// 注册自己的专属键（与 connection.RegisterFactory 同一 blank-import 路径），
+// 注册自己的专属键（与 conn.RegisterFactory 同一 blank-import 路径），
 // 新增连接类型无需改动本包。
 var (
 	hostKeysMu sync.RWMutex
@@ -39,8 +40,16 @@ func isHostKey(k string) bool {
 	return hostKeys[k]
 }
 
-func buildHost(name string, vars map[string]any, cfg *config.Config) (*model.Host, error) {
-	// 连接默认值取调用方显式传入的 wdp.cfg [ssh] 配置（主机条目未显式指定的键生效；
+// buildHost 构建主机对象。连接参数三层合并（高→低）：
+//  1. 主机条目键（vars）
+//  2. 组级键（groupVars：all.vars < 组 vars 链，与变量域合并同序）
+//  3. wdp.cfg [ssh] 默认值 / 内置默认；仍未给出的 user/port/身份文件
+//     由 ~/.ssh/config 补全（见 FillFromSSHConfig）
+//
+// 组级与条目同属 inventory 显式配置，均优先于 ~/.ssh/config。
+// groupVars 只提取连接参数键；非键组变量由 applyVars 合入变量域。
+func buildHost(name string, vars, groupVars map[string]any, cfg *config.Config) (*model.Host, error) {
+	// 连接默认值取调用方显式传入的 wdp.cfg [ssh] 配置（inventory 未显式指定的键生效；
 	// 组合根传 config.Current()，测试与内联构造传 nil 即内置默认）
 	if cfg == nil {
 		cfg = &config.Config{}
@@ -48,31 +57,33 @@ func buildHost(name string, vars map[string]any, cfg *config.Config) (*model.Hos
 	h := &model.Host{
 		Name:              name,
 		Vars:              map[string]any{},
-		Conn:              "ssh",
+		Conn:              cfg.DefaultConn(),
 		Port:              22,
 		User:              cfg.SSHUser(),
 		HostKeyCheck:      cfg.SSHHostKeyCheck(),
 		KnownHosts:        cfg.SSH.KnownHosts,
 		ConnectTimeoutSec: cfg.SSHConnectTimeout(),
 	}
-	for k, v := range vars {
-		if !isHostKey(k) {
-			h.Vars[k] = v
-			continue
-		}
+	// 连接参数是否由 inventory 显式给出（组级或条目均算；决定 ~/.ssh/config
+	// 能否补全：显式键 > ssh config > wdp.cfg/内置默认，对齐 OpenSSH 优先级）
+	explicitUser, explicitPort, explicitKeyPath := false, false, false
+	applyKeys := func(k string, v any) error {
 		switch k {
 		case "host":
 			h.Address = fmt.Sprint(v)
 		case "port":
 			h.Port = toInt(v, 22)
+			explicitPort = true
 		case "user":
 			h.User = fmt.Sprint(v)
+			explicitUser = true
 		case "password":
 			h.Password = fmt.Sprint(v)
 		case "password_env":
 			h.PasswordEnv = fmt.Sprint(v)
 		case "key_path":
 			h.KeyPath = fmt.Sprint(v)
+			explicitKeyPath = true
 		case "key_passphrase":
 			h.KeyPassphrase = fmt.Sprint(v)
 		case "key_passphrase_env":
@@ -87,7 +98,7 @@ func buildHost(name string, vars map[string]any, cfg *config.Config) (*model.Hos
 			// 严格解析：非布尔值直接报错（静默当 false 会关闭指纹校验）
 			b, err := model.ParseBool(v)
 			if err != nil {
-				return nil, fmt.Errorf("host_key_check: %w", err)
+				return fmt.Errorf("host_key_check: %w", err)
 			}
 			h.HostKeyCheck = b
 		case "known_hosts":
@@ -105,7 +116,7 @@ func buildHost(name string, vars map[string]any, cfg *config.Config) (*model.Hos
 		case "keep_agent":
 			b, err := model.ParseBool(v)
 			if err != nil {
-				return nil, fmt.Errorf("keep_agent: %w", err)
+				return fmt.Errorf("keep_agent: %w", err)
 			}
 			h.KeepAgent = b
 		case "become_password":
@@ -115,28 +126,49 @@ func buildHost(name string, vars map[string]any, cfg *config.Config) (*model.Hos
 		case "tls":
 			b, err := model.ParseBool(v)
 			if err != nil {
-				return nil, fmt.Errorf("tls: %w", err)
+				return fmt.Errorf("tls: %w", err)
 			}
 			h.TLS = b
 		case "insecure_skip_verify":
 			b, err := model.ParseBool(v)
 			if err != nil {
-				return nil, fmt.Errorf("insecure_skip_verify: %w", err)
+				return fmt.Errorf("insecure_skip_verify: %w", err)
 			}
 			h.InsecureSkipVerify = b
 		case "tls_skip_host_verify":
 			b, err := model.ParseBool(v)
 			if err != nil {
-				return nil, fmt.Errorf("tls_skip_host_verify: %w", err)
+				return fmt.Errorf("tls_skip_host_verify: %w", err)
 			}
 			h.TLSSkipHostVerify = b
 		case "tls_server_name":
 			h.TLSServerName = fmt.Sprint(v)
 		}
+		return nil
+	}
+	// 组级连接键（低层）先应用，主机条目随后覆盖
+	for k, v := range groupVars {
+		if isHostKey(k) {
+			if err := applyKeys(k, v); err != nil {
+				return nil, err
+			}
+		}
+	}
+	for k, v := range vars {
+		if !isHostKey(k) {
+			h.Vars[k] = v
+			continue
+		}
+		if err := applyKeys(k, v); err != nil {
+			return nil, err
+		}
 	}
 	if h.Address == "" {
 		h.Address = name
 	}
+	// ~/.ssh/config 补全未显式给出的 SSH 参数（仅 ssh/push 通道；显式键
+	// 优先），使交互 ssh 可达的主机 wdp 同样可达
+	sshcfg.FillFromSSHConfig(h, explicitUser, explicitPort, explicitKeyPath)
 	return h, nil
 }
 

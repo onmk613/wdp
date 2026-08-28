@@ -37,7 +37,7 @@ func TestWaitForPortReady(t *testing.T) {
 	if r.Changed {
 		t.Fatal("wait_for 不产生变更")
 	}
-	if !strings.Contains(r.Msg, "就绪") {
+	if !strings.Contains(r.Msg, "ready") {
 		t.Fatalf("msg: %s", r.Msg)
 	}
 }
@@ -50,7 +50,7 @@ func TestWaitForPortAbsentReady(t *testing.T) {
 	if r.Failed {
 		t.Fatalf("端口已关闭应立即满足: %s", r.Msg)
 	}
-	if !strings.Contains(r.Msg, "已关闭") {
+	if !strings.Contains(r.Msg, "closed") {
 		t.Fatalf("msg: %s", r.Msg)
 	}
 }
@@ -61,12 +61,12 @@ func TestWaitForPortTimeout(t *testing.T) {
 	mod := &WaitForModule{}
 	start := time.Now()
 	r := mod.Run(rc, map[string]any{
-		"host": "127.0.0.1", "port": port, "timeout": 1, "sleep": 1, "msg": "服务未起来",
+		"host": "127.0.0.1", "port": port, "timeout": 1, "sleep": 1, "msg": "service not up",
 	}, "")
 	if !r.Failed {
 		t.Fatal("端口持续不可达应超时失败")
 	}
-	if !strings.Contains(r.Msg, "服务未起来") || !strings.Contains(r.Msg, "超时") {
+	if !strings.Contains(r.Msg, "service not up") || !strings.Contains(r.Msg, "timeout") {
 		t.Fatalf("超时消息: %s", r.Msg)
 	}
 	if d := time.Since(start); d > 3*time.Second {
@@ -98,8 +98,8 @@ func TestWaitForPathStates(t *testing.T) {
 		t.Fatalf("路径存在应就绪: %s", r.Msg)
 	}
 	// absent：路径存在 → 超时失败（自定义 msg 透出）
-	r := mod.Run(rc, map[string]any{"path": "/data/ready", "state": "absent", "timeout": 1, "sleep": 1, "msg": "服务未退出"}, "")
-	if !r.Failed || !strings.Contains(r.Msg, "服务未退出") {
+	r := mod.Run(rc, map[string]any{"path": "/data/ready", "state": "absent", "timeout": 1, "sleep": 1, "msg": "service did not exit"}, "")
+	if !r.Failed || !strings.Contains(r.Msg, "service did not exit") {
 		t.Fatalf("路径未消失应超时: %+v", r)
 	}
 	// absent：路径不存在 → 立即满足
@@ -123,7 +123,7 @@ func TestWaitForCheckModeNoWait(t *testing.T) {
 	if r.Failed {
 		t.Fatalf("check 只报告状态不应失败: %s", r.Msg)
 	}
-	if !strings.Contains(r.Msg, "[check]") || !strings.Contains(r.Msg, "未就绪") {
+	if !strings.Contains(r.Msg, "[check]") || !strings.Contains(r.Msg, "not ready") {
 		t.Fatalf("check 报告: %s", r.Msg)
 	}
 	if d := time.Since(start); d > 2*time.Second {
@@ -134,7 +134,7 @@ func TestWaitForCheckModeNoWait(t *testing.T) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	defer ln.Close()
 	r = mod.Run(rc, map[string]any{"host": "127.0.0.1", "port": ln.Addr().(*net.TCPAddr).Port}, "")
-	if r.Failed || !strings.Contains(r.Msg, "就绪") {
+	if r.Failed || !strings.Contains(r.Msg, "ready") {
 		t.Fatalf("check 就绪报告: %+v", r)
 	}
 }
@@ -148,7 +148,7 @@ func TestWaitForContextCancel(t *testing.T) {
 	mod := &WaitForModule{}
 	start := time.Now()
 	r := mod.Run(rc, map[string]any{"host": "127.0.0.1", "port": port, "timeout": 30, "sleep": 1}, "")
-	if !r.Failed || !strings.Contains(r.Msg, "取消") {
+	if !r.Failed || !strings.Contains(r.Msg, "cancelled") {
 		t.Fatalf("ctx 取消应失败: %+v", r)
 	}
 	if d := time.Since(start); d > 2*time.Second {

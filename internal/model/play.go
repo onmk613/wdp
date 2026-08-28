@@ -1,17 +1,21 @@
 package model
 
 // Play 是 playbook 中的一个执行单元：选定一批主机，按顺序执行任务列表。
+// 简单字段带 yaml tag 由 playbook 包直接映射（新增简单字段只需打 tag，
+// 见 parsePlayNode）；特殊语义字段标 yaml:"-" 手工解析：
+// become（宽容 yes/no/on/off）、serial（批次表达式校验）、strategy
+// （默认值填充）、tasks/handlers（动态模块键语法）。
 type Play struct {
-	Name        string            // play 名称（可选）
-	Hosts       string            // 主机选择模式，如 all / webservers / web1,web2
-	Vars        map[string]any    // play 级变量
-	Environment map[string]string // play 级环境变量
-	Become      bool              // 是否提权
-	BecomeUser  string            // 提权目标用户，缺省 root
-	Serial      string            // 分批大小："5"（绝对数）/"10%"（百分比）/"5,10,20"（逐批尺寸，最后一个重复），空 = 一批
-	Strategy    *Strategy         // 部署策略（nil = 传统线性语义）
-	Tasks       []*Task           // 主任务列表
-	Handlers    []*Task           // 处理器（notify 触发，play 末尾 flush）
+	Name        string            `yaml:"name"`        // play 名称（可选）
+	Hosts       string            `yaml:"hosts"`       // 主机选择模式，如 all / webservers / web1,web2
+	Vars        map[string]any    `yaml:"vars"`        // play 级变量
+	Environment map[string]string `yaml:"environment"` // play 级环境变量
+	Become      bool              `yaml:"-"`           // 是否提权（手工解析：model.ParseBool 宽容布尔）
+	BecomeUser  string            `yaml:"become_user"` // 提权目标用户，缺省 root
+	Serial      string            `yaml:"-"`           // 手工解析：分批大小 "5"/"10%"/"5,10,20"（最后一个重复），空 = 一批
+	Strategy    *Strategy         `yaml:"-"`           // 手工解析：部署策略（nil = 传统线性语义）
+	Tasks       []*Task           `yaml:"-"`           // 手工解析：主任务列表（单键 map 模块语法）
+	Handlers    []*Task           `yaml:"-"`           // 手工解析：处理器（notify 触发，play 末尾 flush）
 }
 
 // Strategy 是 play 级部署策略：分批节奏 + 批间健康门 + 失败自动回滚。
@@ -69,6 +73,8 @@ type Task struct {
 	Block  []*Task // block 组：顺序执行，失败转 rescue
 	Rescue []*Task // rescue 组：block 失败时执行
 	Always []*Task // always 组：恒执行
+
+	Include string // include 片段路径（`include: tasks/x.yaml`）：Load 阶段静态展开为任务序列
 
 	IsHandler bool // 标记该 Task 是 handler（解析时使用）
 }

@@ -5,7 +5,8 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 )
@@ -34,17 +35,17 @@ func setupStrategy(t *testing.T, gateRC int) (*Executor, *captureReporter) {
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
-		f := connection.NewFake(h)
-		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		f := fake.NewFake(h)
+		f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 			s := req.Script
 			switch {
 			case strings.Contains(s, "sha256sum"):
-				return connection.ExecResult{Code: 3}, nil // 文件不存在
+				return conn.ExecResult{Code: 3}, nil // 文件不存在
 			case strings.Contains(s, "health-probe"):
-				return connection.ExecResult{Code: gateRC}, nil
+				return conn.ExecResult{Code: gateRC}, nil
 			default:
-				return connection.ExecResult{Code: 0}, nil
+				return conn.ExecResult{Code: 0}, nil
 			}
 		}
 		fakeMu.Lock()
@@ -53,7 +54,7 @@ func setupStrategy(t *testing.T, gateRC int) (*Executor, *captureReporter) {
 		return f, nil
 	})
 	rep := &captureReporter{}
-	return New(parseTestInv(t), connection.NewManager(), rep, Options{Forks: 2}), rep
+	return New(parseTestInv(t), conn.NewManager(), rep, Options{Forks: 2}), rep
 }
 
 // TestCanaryGateFailureRollback：金丝雀批次健康门失败 → 回滚该批 → 后续批次不执行。
@@ -88,7 +89,7 @@ func TestCanaryGateFailureRollback(t *testing.T) {
 	if len(fakes) != 1 {
 		t.Fatalf("canary 失败后 h2 不应建连，实际 %d 台", len(fakes))
 	}
-	if !strings.Contains(rep.joined(), "健康门未通过") {
+	if !strings.Contains(rep.joined(), "health gate not passed") {
 		t.Fatalf("缺少终止消息:\n%s", rep.joined())
 	}
 }
@@ -127,17 +128,17 @@ func TestBatchFailureRollback(t *testing.T) {
 	fakeMu.Lock()
 	fakes = nil
 	fakeMu.Unlock()
-	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
-		f := connection.NewFake(h)
-		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		f := fake.NewFake(h)
+		f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 			s := req.Script
 			switch {
 			case strings.Contains(s, "sha256sum"):
-				return connection.ExecResult{Code: 3}, nil
+				return conn.ExecResult{Code: 3}, nil
 			case strings.Contains(s, "will-fail"):
-				return connection.ExecResult{Code: 1, Stderr: "boom"}, nil
+				return conn.ExecResult{Code: 1, Stderr: "boom"}, nil
 			default:
-				return connection.ExecResult{Code: 0}, nil
+				return conn.ExecResult{Code: 0}, nil
 			}
 		}
 		fakeMu.Lock()
@@ -146,7 +147,7 @@ func TestBatchFailureRollback(t *testing.T) {
 		return f, nil
 	})
 	rep := &captureReporter{}
-	ex := New(parseTestInv(t), connection.NewManager(), rep, Options{Forks: 2})
+	ex := New(parseTestInv(t), conn.NewManager(), rep, Options{Forks: 2})
 	plays := []*model.Play{{
 		Hosts:    "h1",
 		Strategy: &model.Strategy{Type: "rolling", Batch: "1", AutoRollback: true},
@@ -188,7 +189,7 @@ func TestParseBatchSize(t *testing.T) {
 	}
 }
 
-func joinExecScripts(fakes []*connection.Fake) string {
+func joinExecScripts(fakes []*fake.Fake) string {
 	var sb strings.Builder
 	for _, f := range fakes {
 		for _, r := range f.ExecLog {

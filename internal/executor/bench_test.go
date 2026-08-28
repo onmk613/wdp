@@ -11,7 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 )
@@ -19,15 +20,15 @@ import (
 func BenchmarkRun1000Hosts5Tasks(b *testing.B) {
 	var sb strings.Builder
 	sb.WriteString("bench:\n  hosts:\n")
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		fmt.Fprintf(&sb, "    h%03d: {conn: fake}\n", i)
 	}
 	invSrc := []byte(sb.String())
 
-	connection.RegisterFactory("fake", func(h *model.Host, dc *connection.Defaults) (connection.Connection, error) {
-		f := connection.NewFake(h)
-		f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
-			return connection.ExecResult{Code: 0, Stdout: "ok\n"}, nil
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		f := fake.NewFake(h)
+		f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
+			return conn.ExecResult{Code: 0, Stdout: "ok\n"}, nil
 		}
 		return f, nil
 	})
@@ -43,7 +44,7 @@ func BenchmarkRun1000Hosts5Tasks(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		ex := New(inv, connection.NewManager(), nopReporter{}, Options{Forks: 20})
+		ex := New(inv, conn.NewManager(), nopReporter{}, Options{Forks: 20})
 		if failed := ex.Run(context.Background(), []*model.Play{play}); failed {
 			b.Fatal("unexpected failure")
 		}

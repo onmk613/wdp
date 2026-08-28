@@ -1,18 +1,17 @@
 package cli
 
-// 代理命令组（--help 的 Agent Commands）：目标机常驻 agent。
-
 import (
+	"errors"
 	"fmt"
+	"net/http"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"wdp/internal/agent"
 	"wdp/internal/config"
-	"wdp/internal/i18n"
 )
 
-// newAgentCmd 构造 `wdp agent`：目标机常驻服务。
 func newAgentCmd() *cobra.Command {
 	var (
 		listen        string
@@ -20,19 +19,35 @@ func newAgentCmd() *cobra.Command {
 		cleanup       bool
 		pins          []string
 		allowNoAuth   bool
+		systemdUnit   string
 		maxRequestMB  int64
+		idleTimeout   time.Duration
+		logLevel      string
+		logFile       string
 	)
+
 	cmd := &cobra.Command{
 		Use:   "agent",
-		Short: i18n.T("start the resident agent (on target hosts)", "启动常驻 agent（目标机）"),
+		Short: "start the resident agent (on target hosts)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 默认值在 RunE 内求值：命令树构造早于 wdp.cfg 加载，
 			// 构造期取 config.Current() 会拿到内置默认端口而非配置值
 			if !cmd.Flags().Changed("listen") {
 				listen = "127.0.0.1:" + fmt.Sprint(config.Current().AgentPort())
 			}
+			// 最小值校验放在 CLI 层：防手滑配 1s 之类把常驻 agent 秒杀
+			// （服务端不限制，测试可用任意短周期）
+			if idleTimeout != 0 && idleTimeout < time.Minute {
+				return fmt.Errorf("%s", "--idle-timeout must be 0 (disabled) or at least 1m")
+			}
 			srv := agent.New(listen)
 			srv.SetMaxRequestBody(maxRequestMB)
+			if err := srv.SetLogLevel(logLevel); err != nil {
+				return err
+			}
+			if err := srv.SetLogFile(logFile); err != nil {
+				return err
+			}
 			if err := srv.ConfigureAuth(ca, cert, key); err != nil {
 				return err
 			}
@@ -41,41 +56,74 @@ func newAgentCmd() *cobra.Command {
 			}
 			srv.CleanupOnShutdown(cleanup)
 			srv.AllowNoAuth(allowNoAuth)
+			srv.SetSystemdUnit(systemdUnit)
+			srv.SetIdleTimeout(idleTimeout)
 
-			mode := i18n.T("no auth", "无认证")
+			mode := "no auth"
 			if ca != "" && cert != "" && key != "" {
-				mode = i18n.T("mutual TLS", "mTLS 双向认证")
+				mode = "mutual TLS"
 				if len(pins) > 0 {
-					mode += i18n.T(" + pinned clients", " +指纹准许名单")
+					mode += " + pinned clients"
 				}
 			} else if agent.IsLoopbackListen(listen) {
-				mode = i18n.T("no auth (loopback only)", "无认证（仅本机回环）")
-				fmt.Fprintln(cmd.ErrOrStderr(), i18n.T(
-					"warning: loopback without auth only blocks remote access; any local user on this host can invoke /exec and /file. Use mTLS on multi-user hosts.",
-					"警告：无认证回环监听只挡远程访问，本机任意用户均可调用 /exec 与 /file；多用户主机请启用 mTLS。"))
+				mode = "no auth (loopback only)"
+				fmt.Fprintln(cmd.ErrOrStderr(), "warning: loopback without auth only blocks remote access; any local user on this host can invoke /exec and /file. Use mTLS on multi-user hosts.")
 			}
-			fmt.Printf(i18n.T("wdp agent %s listening on %s (%s)\n", "wdp agent %s 监听 %s（%s）\n"), Version, listen, mode)
-			return srv.ListenAndServe()
+			if idleTimeout > 0 {
+				mode += ", idle exit after " + idleTimeout.String()
+			}
+			if logFile != "" {
+				mode += ", log file " + logFile
+			}
+			fmt.Printf("wdp agent %s listening on %s (%s)\n", Version, listen, mode)
+			if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+			return nil
 		},
 	}
 
+	// Listen
 	cmd.Flags().StringVar(&listen, "listen", "",
-		i18n.T("listen address (default 127.0.0.1:<agent port from wdp.cfg>; use 0.0.0.0:PORT to expose)",
-			"监听地址（默认 127.0.0.1:<wdp.cfg 中 agent 端口>；对外监听需显式 0.0.0.0:端口）"))
-	cmd.Flags().StringVar(&ca, "ca", "", i18n.T("mTLS: CA certificate (client certs must be issued by it)", "mTLS：CA 证书（客户端证书由该 CA 签发）"))
-	cmd.Flags().StringVar(&cert, "cert", "", i18n.T("mTLS: server certificate", "mTLS：服务端证书"))
-	cmd.Flags().StringVar(&key, "key", "", i18n.T("mTLS: server private key", "mTLS：服务端私钥"))
-	cmd.Flags().BoolVar(&cleanup, "cleanup-on-shutdown", false,
-		i18n.T("delete own binary and mTLS material files on /shutdown then exit (for push temp agents)",
-			"收到 /shutdown 时删除自身二进制与 mTLS 证书文件后退出（push 临时 agent 用）"))
+		"listen address (default 127.0.0.1:<agent port from wdp.cfg>; use 0.0.0.0:PORT to expose)",
+	)
+
+	// mTLS
+	cmd.Flags().StringVar(&ca, "ca", "", "mTLS: CA certificate (client certs must be issued by it)")
+	cmd.Flags().StringVar(&cert, "cert", "", "mTLS: server certificate")
+	cmd.Flags().StringVar(&key, "key", "", "mTLS: server private key")
+
+	// auth
 	cmd.Flags().StringArrayVar(&pins, "pin-client-fp", nil,
-		i18n.T("allowed client cert SHA256 fingerprints (repeatable; exact revocation: drop a fingerprint and restart)",
-			"客户端证书 SHA256 指纹准许名单（可多次；精确吊销：移除指纹重启即拒收）"))
+		"allowed client cert SHA256 fingerprints (repeatable; exact revocation: drop a fingerprint and restart)",
+	)
 	cmd.Flags().BoolVar(&allowNoAuth, "allow-no-auth", false,
-		i18n.T("explicitly allow unauthenticated non-loopback listen (trusted LAN only)",
-			"显式允许无认证对外监听（仅限可信内网）"))
+		"explicitly allow unauthenticated non-loopback listen (trusted LAN only)",
+	)
+
+	// cleanup & idle
+	cmd.Flags().BoolVar(&cleanup, "cleanup-on-shutdown", false,
+		"self-clean on idle-timeout exit (push temp agents); the /shutdown signal always self-cleans regardless",
+	)
+	cmd.Flags().StringVar(&systemdUnit, "systemd-unit", "wdp-agent",
+		"systemd unit to disable on self-cleanup (match your unit name, else Restart=always may loop on the deleted binary)",
+	)
+	cmd.Flags().DurationVar(&idleTimeout, "idle-timeout", 0,
+		"exit (with --cleanup-on-shutdown cleanup) when no authenticated request completes for this long; /health probes do not count (0 = never; push agents are started with 60m by wdp.cfg [agent].idle_timeout_min)",
+	)
+
+	// request body size limit
 	cmd.Flags().Int64Var(&maxRequestMB, "max-request-mb", 0,
-		i18n.T("request body size limit in MiB (0 = built-in default 64)",
-			"请求体大小上限（MiB，0 = 内置默认 64）"))
+		"request body size limit in MiB (0 = built-in default 64)",
+	)
+
+	// logging
+	cmd.Flags().StringVar(&logLevel, "log-level", "info",
+		"log level: trace|debug|info|warn|error (default info). info = executed commands, file transfers, extracts, cert updates, shutdown signals; debug = every operation in detail; trace = debug + httpdump of every request/response (sensitive fields redacted)",
+	)
+	cmd.Flags().StringVar(&logFile, "log-file", "",
+		"also append logs to this file (auto-creates the parent dir; NOT removed by self-cleanup — kept for audit; controller can fetch via agentctl logs or GET /file)",
+	)
+
 	return cmd
 }

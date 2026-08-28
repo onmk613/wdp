@@ -9,14 +9,12 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/cyphar/filepath-securejoin"
 	"gopkg.in/yaml.v3"
 
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/playbook"
 	"wdp/internal/render"
@@ -31,9 +29,15 @@ type Meta struct {
 	MarkerDir   string   `yaml:"marker_dir"` // 目标机 release marker 目录（缺省 /var/lib/wdp）
 	NoMarker    bool     `yaml:"no_marker"`  // 不写 release marker
 	// CheckMode 声明 chart 的脚本模块（modules/<名>）支持 check 模式预演。
-	// 未声明时脚本模块在 --check 下被跳过（脚本为外部代码，默认不信任其预演安全）。
+	// 未声明时脚本模块在 --check 下被跳过（脚本是外部代码，默认不信任其预演安全）。
 	// YAML 取值：supported / true（启用）或 false（显式关闭）。
 	CheckMode CheckModeSupport `yaml:"check_mode"`
+	// InventoryOverride 是 values 键白名单：这些键允许被 inventory 组/主机
+	// 同名变量直接覆盖（ansible 式语义的显式 opt-in）。未列入的键维持
+	// "同名时 values 恒赢"，跨名覆盖仍走模板 dig 约定。
+	// 仅作用于顶层 values 域（子 chart 作用域不适用）；marker/drift 的
+	// values 摘要不包含覆盖结果。
+	InventoryOverride []string `yaml:"inventory_override"`
 }
 
 // CheckModeSupport 解析 check_mode 字段（布尔或 "supported" 字面量）。
@@ -47,7 +51,7 @@ func (c *CheckModeSupport) UnmarshalYAML(value *yaml.Node) error {
 	case "", "false", "no", "off", "0":
 		*c = false
 	default:
-		return fmt.Errorf(i18n.T("check_mode only supports supported / true / false, got %q", "check_mode 仅支持 supported / true / false，得到 %q"), value.Value)
+		return fmt.Errorf("check_mode only supports supported / true / false, got %q", value.Value)
 	}
 	return nil
 }
@@ -98,7 +102,7 @@ func Load(path string) (*Chart, error) {
 func LoadWithLimits(path string, limits Limits) (*Chart, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf(i18n.T("failed to access chart: %w", "访问 chart 失败: %w"), err)
+		return nil, fmt.Errorf("failed to access chart: %w", err)
 	}
 	if fi.IsDir() {
 		return loadDir(path)
@@ -106,7 +110,7 @@ func LoadWithLimits(path string, limits Limits) (*Chart, error) {
 	if strings.HasSuffix(path, ".tgz") {
 		return loadTgz(path, limits)
 	}
-	return nil, fmt.Errorf(i18n.T("%s is neither a chart directory nor a .tgz package", "%s 既不是 chart 目录也不是 .tgz 包"), path)
+	return nil, fmt.Errorf("%s is neither a chart directory nor a .tgz package", path)
 }
 
 // Open 加载 chart 并完成执行前准备：合并 values 覆盖（-f 文件与 --set 点路径）
@@ -145,21 +149,21 @@ func (c *Chart) Close() error {
 func loadDir(dir string) (*Chart, error) {
 	metaData, err := os.ReadFile(filepath.Join(dir, "chart.yaml"))
 	if err != nil {
-		return nil, fmt.Errorf(i18n.T("missing chart.yaml: %w", "缺少 chart.yaml: %w"), err)
+		return nil, fmt.Errorf("missing chart.yaml: %w", err)
 	}
 	var meta Meta
 	if err := yaml.Unmarshal(metaData, &meta); err != nil {
-		return nil, fmt.Errorf(i18n.T("failed to parse chart.yaml: %w", "解析 chart.yaml 失败: %w"), err)
+		return nil, fmt.Errorf("failed to parse chart.yaml: %w", err)
 	}
 	if meta.Name == "" {
-		return nil, errors.New(i18n.T("chart.yaml is missing name", "chart.yaml 缺少 name"))
+		return nil, errors.New("chart.yaml is missing name")
 	}
 
 	c := &Chart{Meta: meta, Dir: dir, Subs: map[string]*Chart{}}
 
 	if data, err := os.ReadFile(filepath.Join(dir, "values.yaml")); err == nil {
 		if c.Values, err = LoadValuesYAML(data); err != nil {
-			return nil, fmt.Errorf(i18n.T("failed to parse values.yaml: %w", "解析 values.yaml 失败: %w"), err)
+			return nil, fmt.Errorf("failed to parse values.yaml: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
 		return nil, err
@@ -176,7 +180,7 @@ func loadDir(dir string) (*Chart, error) {
 
 	plays, err := playbook.Load(filepath.Join(dir, "deploy.yaml"))
 	if err != nil {
-		return nil, fmt.Errorf(i18n.T("failed to parse deploy.yaml: %w", "解析 deploy.yaml 失败: %w"), err)
+		return nil, fmt.Errorf("failed to parse deploy.yaml: %w", err)
 	}
 	c.Deploy = plays
 
@@ -189,7 +193,7 @@ func loadDir(dir string) (*Chart, error) {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
 			}
-			return nil, fmt.Errorf(i18n.T("failed to parse %s: %w", "解析 %s 失败: %w"), name, err)
+			return nil, fmt.Errorf("failed to parse %s: %w", name, err)
 		}
 		*field = p
 	}
@@ -202,7 +206,7 @@ func loadDir(dir string) (*Chart, error) {
 			}
 			sub, err := loadDir(filepath.Join(dir, "charts", e.Name()))
 			if err != nil {
-				return nil, fmt.Errorf(i18n.T("subchart %s: %w", "子 chart %s: %w"), e.Name(), err)
+				return nil, fmt.Errorf("subchart %s: %w", e.Name(), err)
 			}
 			c.Subs[sub.Meta.Name] = sub
 		}
@@ -210,7 +214,7 @@ func loadDir(dir string) (*Chart, error) {
 	// 子 chart 的 deploy.yaml 仅支持单 play（hosts 等沿用父 play）
 	for name, sub := range c.Subs {
 		if len(sub.Deploy) > 1 {
-			return nil, fmt.Errorf(i18n.T("subchart %s deploy.yaml contains %d plays (only one is supported)", "子 chart %s 的 deploy.yaml 含 %d 个 play（仅支持单个）"), name, len(sub.Deploy))
+			return nil, fmt.Errorf("subchart %s deploy.yaml contains %d plays (only one is supported)", name, len(sub.Deploy))
 		}
 	}
 	return c, nil
@@ -229,7 +233,7 @@ func loadTgz(path string, limits Limits) (*Chart, error) {
 	defer f.Close()
 	gz, err := gzip.NewReader(f)
 	if err != nil {
-		return nil, fmt.Errorf(i18n.T("failed to decompress: %w", "解压失败: %w"), err)
+		return nil, fmt.Errorf("failed to decompress: %w", err)
 	}
 	defer gz.Close()
 
@@ -246,14 +250,14 @@ func loadTgz(path string, limits Limits) (*Chart, error) {
 		}
 		if err != nil {
 			os.RemoveAll(tmp)
-			return nil, fmt.Errorf(i18n.T("failed to read tar: %w", "读取 tar 失败: %w"), err)
+			return nil, fmt.Errorf("failed to read tar: %w", err)
 		}
 		// 解包目标经 securejoin 约束在 tmp 内: .. 穿越、绝对路径
 		// 与符号链接条目均收敛为 tmp 内路径, 不会越出解包根目录.
 		target, jerr := securejoin.SecureJoin(tmp, hdr.Name)
 		if jerr != nil {
 			os.RemoveAll(tmp)
-			return nil, fmt.Errorf(i18n.T("failed to resolve unpack path %q: %w", "解包路径 %q 解析失败: %w"), hdr.Name, jerr)
+			return nil, fmt.Errorf("failed to resolve unpack path %q: %w", hdr.Name, jerr)
 		}
 		if target == tmp {
 			continue // "." 等退化为解包根本身的条目跳过
@@ -269,22 +273,18 @@ func loadTgz(path string, limits Limits) (*Chart, error) {
 			// 创建相对链接（绝对目标收敛为 tmp 内相对写法），缺链接条目
 			// 会导致后续模板渲染出现难以定位的文件缺失
 			rel := strings.TrimPrefix(filepath.ToSlash(hdr.Linkname), "/")
-			for _, part := range strings.Split(rel, "/") {
-				if part == ".." {
-					rel = ".wdp-rejected-link"
-					break
-				}
+			if slices.Contains(strings.Split(rel, "/"), "..") {
+				rel = ".wdp-rejected-link"
 			}
 			_ = os.Remove(target)
 			if err := os.Symlink(filepath.FromSlash(rel), target); err != nil {
 				os.RemoveAll(tmp)
-				return nil, fmt.Errorf(i18n.T("failed to create symlink %q: %w", "创建符号链接 %q 失败: %w"), hdr.Name, err)
+				return nil, fmt.Errorf("failed to create symlink %q: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
 			if hdr.Size < 0 || total+hdr.Size > limits.extractLimit() {
 				os.RemoveAll(tmp)
-				return nil, fmt.Errorf(i18n.T("chart archive exceeds extract limit: %s declares %d bytes, over the %d byte total cap (suspected extraction bomb)",
-					"chart 包解压超限: %s 声明 %d 字节, 超出总量上限 %d 字节（疑似解压炸弹）"),
+				return nil, fmt.Errorf("chart archive exceeds extract limit: %s declares %d bytes, over the %d byte total cap (suspected extraction bomb)",
 					hdr.Name, hdr.Size, limits.extractLimit())
 			}
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
@@ -336,80 +336,6 @@ func loadTgz(path string, limits Limits) (*Chart, error) {
 	return c, nil
 }
 
-// FindSub 按名递归查找子 chart（支持嵌套引用）。
-// 遍历按子 chart 名排序：同名子 chart 分布在不同分支时结果确定，
-// 不随 map 迭代顺序漂移（同一份 chart 两次解析命中同一实例）。
-func (c *Chart) FindSub(name string) *Chart {
-	if sub, ok := c.Subs[name]; ok {
-		return sub
-	}
-	for _, n := range sortedSubNames(c.Subs) {
-		if found := c.Subs[n].FindSub(name); found != nil {
-			return found
-		}
-	}
-	return nil
-}
-
-// sortedSubNames 返回子 chart 名的有序列表（map 迭代随机，
-// 需要确定性的遍历统一走这里）。
-func sortedSubNames(subs map[string]*Chart) []string {
-	names := make([]string, 0, len(subs))
-	for n := range subs {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// ResolveSub 解析子 chart 引用：`jdk` 或 `jdk@1.2.0`（版本约束，semver 语法，
-// 如 jdk@^1.2 / jdk@>=1.0,<2.0）。执行、lint、template 预览统一走本入口，
-// 保证版本语义不分叉。
-func (c *Chart) ResolveSub(ref string) (*Chart, error) {
-	name, constraint, constrained := strings.Cut(ref, "@")
-	sub := c.FindSub(name)
-	if sub == nil {
-		return nil, fmt.Errorf("子 chart %q 不存在", name)
-	}
-	if constrained && constraint != "" {
-		v, err := semver.NewVersion(sub.Meta.Version)
-		if err != nil {
-			return nil, fmt.Errorf(i18n.T("subchart %s version %q is not a semantic version, cannot apply constraint %q", "子 chart %s 的 version %q 不是语义化版本，无法应用约束 %q"),
-				name, sub.Meta.Version, constraint)
-		}
-		rng, err := semver.NewConstraint(constraint)
-		if err != nil {
-			return nil, fmt.Errorf(i18n.T("failed to parse version constraint %q: %w", "解析版本约束 %q 失败: %w"), constraint, err)
-		}
-		if !rng.Check(v) {
-			return nil, fmt.Errorf(i18n.T("subchart %s version %s does not satisfy constraint %q", "子 chart %s 版本 %s 不满足约束 %q"), name, sub.Meta.Version, constraint)
-		}
-	}
-	return sub, nil
-}
-
-// CollectHelpers 汇集自身与全部子 chart 的 _helpers.tpl（父在前，子重名覆盖；
-// 兄弟子 chart 之间按名字典序遍历，覆盖顺序确定、渲染可复现）。
-func (c *Chart) CollectHelpers() string {
-	parts := []string{}
-	if c.Helpers != "" {
-		parts = append(parts, c.Helpers)
-	}
-	var walk func(sub *Chart)
-	walk = func(sub *Chart) {
-		if sub.Helpers != "" {
-			parts = append(parts, sub.Helpers)
-		}
-		for _, n := range sortedSubNames(sub.Subs) {
-			walk(sub.Subs[n])
-		}
-	}
-	for _, n := range sortedSubNames(c.Subs) {
-		walk(c.Subs[n])
-	}
-	return strings.Join(parts, "\n")
-}
-
 // TemplatesDir 返回 templates 目录路径。
 func (c *Chart) TemplatesDir() string { return filepath.Join(c.Dir, "templates") }
 
@@ -440,29 +366,4 @@ func (c *Chart) EnvFiles() []string {
 		}
 	}
 	return out
-}
-
-// BuildValues 构建最终 values：默认 values → 依序合并 -f 文件 → --set 参数。
-// 默认 values 先深拷贝：--set 的点路径写入是原地写，浅拷贝会让嵌套 map
-// 与 c.Values 共享引用而污染 chart 默认值。
-func (c *Chart) BuildValues(files []string, sets []string) (map[string]any, error) {
-	merged := deepCopyValues(c.Values)
-	for _, f := range files {
-		data, err := os.ReadFile(f)
-		if err != nil {
-			return nil, fmt.Errorf(i18n.T("failed to read values file: %w", "读取 values 文件失败: %w"), err)
-		}
-		ov, err := LoadValuesYAML(data)
-		if err != nil {
-			return nil, fmt.Errorf(i18n.T("failed to parse %s: %w", "解析 %s 失败: %w"), f, err)
-		}
-		merged = Merge(merged, ov)
-	}
-	for _, s := range sets {
-		var err error
-		if merged, err = ApplySet(merged, s); err != nil {
-			return nil, err
-		}
-	}
-	return merged, nil
 }

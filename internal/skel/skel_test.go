@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"wdp/internal/chart"
-	"wdp/internal/connection"
-	_ "wdp/internal/connection/localconn" // 注册 local 连接工厂（演练主机）
+	"wdp/internal/conn"
+	_ "wdp/internal/conn/local" // 注册 local 连接工厂（演练主机）
 	"wdp/internal/executor"
 	"wdp/internal/inventory"
 	"wdp/internal/render"
@@ -54,7 +54,7 @@ func runCheckDeploy(t *testing.T, c *chart.Chart, values map[string]any) {
 		t.Fatal(err)
 	}
 	rep := report.NewConsole(io.Discard, false, -1)
-	ex := executor.New(inv, connection.NewManager(), rep, executor.Options{
+	ex := executor.New(inv, conn.NewManager(), rep, executor.Options{
 		Forks: 2, CheckMode: true, Chart: c, Values: values, Engine: eng,
 		BaseDir: c.Dir, Phase: "deploy", WdpVersion: "test",
 	})

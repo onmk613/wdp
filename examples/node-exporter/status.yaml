@@ -1,0 +1,29 @@
+# node-exporter 状态巡检：只读，报告版本、服务状态与指标端口探测。
+
+- name: node-exporter 巡检
+  hosts: node-exporter
+  become: true
+  tasks:
+    - name: 服务状态（active/enabled 单行）
+      shell: printf '%s/%s' "$(systemctl is-active node-exporter)" "$(systemctl is-enabled node-exporter)"
+      register: nst
+      changed_when: '{{ false }}'
+
+    - name: 版本
+      shell: '{{ .bin_dir }}/node_exporter --version 2>&1 | head -1'
+      register: nver
+      changed_when: '{{ false }}'
+
+    - name: SMART 采集状态（timer active 且指标文件存在）
+      shell: printf '%s/%s' "$(systemctl is-active node-exporter-smartmon.timer 2>/dev/null)" "$(test -f {{ .collector_textfile_directory }}/smartmon.prom && echo file-ok || echo no-file)"
+      register: nsmart
+      changed_when: '{{ false }}'
+
+    - name: 采集器就绪探测（本地自抓首行）
+      shell: curl -sf http://127.0.0.1:{{ dig "node_exporter_port" .port . }}/metrics | head -1
+      register: nprobe
+      changed_when: '{{ false }}'
+
+    - name: 汇报
+      debug:
+        msg: 'host={{ .inventory_hostname }} ver={{ .nver.stdout }} port={{ dig "node_exporter_port" .port . }} state={{ .nst.stdout }} smart={{ .nsmart.stdout }} probe={{ .nprobe.stdout }}'

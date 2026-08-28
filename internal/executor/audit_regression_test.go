@@ -7,18 +7,18 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
 	"wdp/internal/model"
 )
 
 // TestBlockAlwaysFailureFailsPlay 回归：block 主体成功、always 清理任务失败时
 // block 必须判失败（此前失败被吞、部署误报成功，RECAP 与退出码矛盾）。
 func TestBlockAlwaysFailureFailsPlay(t *testing.T) {
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "always-step") {
-			return connection.ExecResult{Code: 1, Stderr: "boom"}, nil
+			return conn.ExecResult{Code: 1, Stderr: "boom"}, nil
 		}
-		return connection.ExecResult{Code: 0, Stdout: "ok\n"}, nil
+		return conn.ExecResult{Code: 0, Stdout: "ok\n"}, nil
 	})
 	play := &model.Play{
 		Name:  "always-fail",
@@ -47,11 +47,11 @@ func TestBlockAlwaysFailureFailsPlay(t *testing.T) {
 
 // TestBlockAlwaysFailureAfterRescue rescue 成功兜底后 always 失败同样判失败。
 func TestBlockAlwaysFailureAfterRescue(t *testing.T) {
-	ex, rep := setup(t, func(host string, req connection.ExecRequest) (connection.ExecResult, error) {
+	ex, rep := setup(t, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
 		if strings.Contains(req.Script, "always-step") || strings.Contains(req.Script, "deploy.sh") {
-			return connection.ExecResult{Code: 1, Stderr: "boom"}, nil
+			return conn.ExecResult{Code: 1, Stderr: "boom"}, nil
 		}
-		return connection.ExecResult{Code: 0, Stdout: "ok\n"}, nil
+		return conn.ExecResult{Code: 0, Stdout: "ok\n"}, nil
 	})
 	play := &model.Play{
 		Name:  "always-after-rescue",

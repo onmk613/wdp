@@ -3,12 +3,12 @@ package executor
 import (
 	"context"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 	"time"
 	"wdp/internal/chart"
-	"wdp/internal/connection"
-	"wdp/internal/i18n"
+	"wdp/internal/conn"
 	"wdp/internal/model"
 	"wdp/internal/shellquote"
 )
@@ -19,7 +19,7 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 	e.mergeSubHandlers(p)
 	hosts, err := e.selectHosts(p.Hosts)
 	if err != nil {
-		e.Rep.PlayMsg(i18n.T("failed to select hosts: %v", "选择主机失败: %v"), err)
+		e.Rep.PlayMsg("failed to select hosts: %v", err)
 		return true
 	}
 	name := p.Name
@@ -68,7 +68,7 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 
 	if len(preHooks) > 0 && runHooks(preHooks, "[pre-hook]") {
 		failed = true
-		e.Rep.PlayMsg(i18n.T("pre-hook failed, aborting play", "pre-hook 失败，终止 play"))
+		e.Rep.PlayMsg("pre-hook failed, aborting play")
 		// 与正常路径同样走 finishPlay：清理回滚快照目录、跳过 marker 写入
 		e.finishPlay(ctx, name, stats, failed, executedRuns, hosts)
 		return true
@@ -109,7 +109,7 @@ func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts [
 		var err error
 		batches, err = splitBatches(hosts, main.Serial)
 		if err != nil {
-			e.Rep.PlayMsg(i18n.T("batch split failed: %v", "批次切分失败: %v"), err)
+			e.Rep.PlayMsg("batch split failed: %v", err)
 			return true, nil
 		}
 	}
@@ -118,7 +118,7 @@ func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts [
 	var executed []*hostRun
 	for _, batch := range batches {
 		if ctx.Err() != nil {
-			e.Rep.PlayMsg(i18n.T("execution cancelled (%v), terminating remaining batches", "执行已取消（%v），终止剩余批次"), ctx.Err())
+			e.Rep.PlayMsg("execution cancelled (%v), terminating remaining batches", ctx.Err())
 			failed = true
 			break
 		}
@@ -132,17 +132,17 @@ func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts [
 		}
 		if batchFailed {
 			if main.Strategy.AutoRollback {
-				e.rollbackBatch(ctx, main, runs, stats)
+				e.rollbackBatch(ctx, runs, stats)
 			}
-			e.Rep.PlayMsg(i18n.T("batch failed, aborting subsequent batches (strategy=%s)", "批次失败，终止后续批次（strategy=%s）"), main.Strategy.Type)
+			e.Rep.PlayMsg("batch failed, aborting subsequent batches (strategy=%s)", main.Strategy.Type)
 			break
 		}
 		if main.Strategy.Gate != nil && e.runGate(ctx, main, main.Strategy.Gate, runs, stats) {
 			failed = true
 			if main.Strategy.AutoRollback {
-				e.rollbackBatch(ctx, main, runs, stats)
+				e.rollbackBatch(ctx, runs, stats)
 			}
-			e.Rep.PlayMsg("健康门未通过，终止后续批次")
+			e.Rep.PlayMsg("health gate not passed, terminating remaining batches")
 			break
 		}
 	}
@@ -154,7 +154,7 @@ func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts [
 func (e *Executor) finishPlay(ctx context.Context, name string, stats map[string]*model.Stats, failed bool, executedRuns []*hostRun, hosts []*model.Host) {
 	e.Rep.Recap(name, stats)
 	if e.Opts.CheckMode {
-		e.Rep.PlayMsg(i18n.T("check mode: changed is a change estimate (use --diff to see content-level diffs)", "check 模式：changed 为变更预估（--diff 可看内容级差异）"))
+		e.Rep.PlayMsg("check mode: changed is a change estimate (use --diff to see content-level diffs)")
 	}
 	// 回滚快照清理：play 结束后 shadow 目录不再有用（成功批次保留变更，
 	// 失败批次已回滚），只清理登记过变更的主机，best-effort 清除避免 /tmp 残留。
@@ -197,17 +197,17 @@ func (e *Executor) cleanupSnapshots(ctx context.Context, runs []*hostRun) {
 			targets[t.Name] = t
 		}
 		for _, t := range targets {
-			conn, err := e.Conns.Get(ctx, t)
+			cn, err := e.Conns.Get(ctx, t)
 			if err != nil {
 				continue
 			}
-			if out, bad := conn.Exec(ctx, connection.ExecRequest{Script: script, TimeoutMs: 30_000}); bad == nil && out.Code == 0 {
+			if out, bad := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30_000}); bad == nil && out.Code == 0 {
 				done++
 			}
 		}
 	}
 	if done > 0 {
-		e.Rep.PlayMsg(i18n.T("rollback snapshots cleaned from %d hosts", "回滚快照已从 %d 台主机清理"), done)
+		e.Rep.PlayMsg("rollback snapshots cleaned from %d hosts", done)
 	}
 }
 
@@ -220,18 +220,14 @@ func (e *Executor) recordFacts(host string, facts map[string]any) {
 		cur = map[string]any{}
 		e.facts[host] = cur
 	}
-	for k, v := range facts {
-		cur[k] = v
-	}
+	maps.Copy(cur, facts)
 }
 
 // seedFacts 把已积累的主机 facts 叠加进新建变量域（运行时数据覆盖静态层）。
 func (e *Executor) seedFacts(host string, vars map[string]any) {
 	e.factsMu.Lock()
 	defer e.factsMu.Unlock()
-	for k, v := range e.facts[host] {
-		vars[k] = v
-	}
+	maps.Copy(vars, e.facts[host])
 }
 
 // writeMarkers 部署成功后写 release marker（best-effort：失败仅告警不中断）。
@@ -243,23 +239,23 @@ func (e *Executor) writeMarkers(ctx context.Context, hosts []*model.Host, ch *ch
 	content := ch.MarkerContent(e.Opts.WdpVersion, e.Opts.Values)
 	written := 0
 	for _, h := range hosts {
-		conn, err := e.Conns.Get(ctx, h)
+		cn, err := e.Conns.Get(ctx, h)
 		if err != nil {
 			continue
 		}
-		if out, bad := conn.Exec(ctx, connection.ExecRequest{
+		if out, bad := cn.Exec(ctx, conn.ExecRequest{
 			Script: fmt.Sprintf("mkdir -p -- %s", shellquote.Quote(pathDir(path))), TimeoutMs: 10_000,
 		}); bad != nil || out.Code != 0 {
 			continue
 		}
-		if err := conn.UploadFile(ctx, path, strings.NewReader(string(content)), 0o644); err == nil {
+		if err := cn.UploadFile(ctx, path, strings.NewReader(string(content)), 0o644); err == nil {
 			written++
 		}
 	}
 	if written > 0 {
-		e.Rep.PlayMsg(i18n.T("release marker written to %d hosts: %s", "release marker 已写入 %d 台主机: %s"), written, path)
+		e.Rep.PlayMsg("release marker written to %d hosts: %s", written, path)
 	} else if len(hosts) > 0 {
-		e.Rep.PlayMsg(i18n.T("warning: release marker write failed (uninstall/status will be unavailable): %s", "警告: release marker 写入失败（uninstall/status 将不可用）: %s"), path)
+		e.Rep.PlayMsg("warning: release marker write failed (uninstall/status will be unavailable): %s", path)
 	}
 }
 
@@ -268,16 +264,16 @@ func (e *Executor) removeMarkers(ctx context.Context, hosts []*model.Host, ch *c
 	script := fmt.Sprintf("rm -rf -- %s", shellquote.Quote(pathDir(ch.MarkerPath())))
 	done := 0
 	for _, h := range hosts {
-		conn, err := e.Conns.Get(ctx, h)
+		cn, err := e.Conns.Get(ctx, h)
 		if err != nil {
 			continue
 		}
-		if out, bad := conn.Exec(ctx, connection.ExecRequest{Script: script, TimeoutMs: 10_000}); bad == nil && out.Code == 0 {
+		if out, bad := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 10_000}); bad == nil && out.Code == 0 {
 			done++
 		}
 	}
 	if done > 0 {
-		e.Rep.PlayMsg(i18n.T("release marker removed from %d hosts", "release marker 已从 %d 台主机清除"), done)
+		e.Rep.PlayMsg("release marker removed from %d hosts", done)
 	}
 }
 
@@ -295,7 +291,7 @@ func (e *Executor) mergeSubHandlers(p *model.Play) {
 		for _, subPlay := range sub.Deploy {
 			for _, h := range subPlay.Handlers {
 				if seen[h.Name] {
-					e.Rep.PlayMsg(i18n.T("handler %q duplicated, ignoring the same-named handler from subchart %s", "handler %q 重名，忽略子 chart %s 的同名 handler"), h.Name, sub.Meta.Name)
+					e.Rep.PlayMsg("handler %q duplicated, ignoring the same-named handler from subchart %s", h.Name, sub.Meta.Name)
 					continue
 				}
 				seen[h.Name] = true
@@ -323,19 +319,15 @@ func taskSelected(t *model.Task, opts Options) bool {
 func tagsMatch(tags []string, opts Options) bool {
 	if len(opts.Tags) > 0 {
 		for _, want := range opts.Tags {
-			for _, has := range tags {
-				if has == want {
-					return true
-				}
+			if slices.Contains(tags, want) {
+				return true
 			}
 		}
 		return false
 	}
 	for _, skip := range opts.SkipTags {
-		for _, has := range tags {
-			if has == skip {
-				return false
-			}
+		if slices.Contains(tags, skip) {
+			return false
 		}
 	}
 	return true
@@ -359,18 +351,14 @@ func effectiveTags(t *model.Task, inherited []string) []string {
 func blockSelected(t *model.Task, opts Options, inherited []string) bool {
 	eff := effectiveTags(t, inherited)
 	for _, skip := range opts.SkipTags {
-		for _, has := range eff {
-			if has == skip {
-				return false
-			}
+		if slices.Contains(eff, skip) {
+			return false
 		}
 	}
 	if len(opts.Tags) > 0 {
 		for _, want := range opts.Tags {
-			for _, has := range eff {
-				if has == want {
-					return true
-				}
+			if slices.Contains(eff, want) {
+				return true
 			}
 		}
 		for _, group := range [][]*model.Task{t.Block, t.Rescue, t.Always} {
@@ -407,6 +395,6 @@ func collectNotified(runs []*hostRun, handlers []*model.Task) ([]string, map[str
 			out = append(out, h.Name)
 		}
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out, byHost
 }

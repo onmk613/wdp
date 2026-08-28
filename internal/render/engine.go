@@ -2,11 +2,11 @@ package render
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 	"text/template"
 
 	"github.com/Masterminds/sprig/v3"
-	"wdp/internal/i18n"
 )
 
 // Engine 持有一组共享的命名模板（chart _helpers.tpl 中的 define），
@@ -26,7 +26,7 @@ func DefaultEngine() *Engine { return defaultEngine }
 // 证书/密钥生成与凭据散列等高危原语）+ wdp 自有函数覆盖：
 // 自有函数签名优先（join/split/default 等保持 wdp 既有语义，旧 chart 不破坏）。
 // 安全考量：env/expandenv（chart 模板不得读取控制端环境变量——其中可能含
-// WDP_CA_PASSPHRASE 与各类 *_env 密钥）与 getHostByName（DNS 可作隐蔽外传
+// 各类 *_env 密钥与 SSH 口令）与 getHostByName（DNS 可作隐蔽外传
 // 信道）不在白名单内。
 func newEngine() *Engine {
 	e := &Engine{}
@@ -37,16 +37,15 @@ func newEngine() *Engine {
 			fm[name] = fn
 		}
 	}
-	for k, v := range funcs { // 自有函数覆盖同名 sprig 函数
-		fm[k] = v
-	}
+	// 自有函数覆盖同名 sprig 函数
+	maps.Copy(fm, funcs)
 	e.base = template.New("wdp").
 		Funcs(fm).
 		Funcs(template.FuncMap{
 			"include": func(name string, data any) (string, error) {
 				var sb strings.Builder
 				if err := e.base.ExecuteTemplate(&sb, name, data); err != nil {
-					return "", fmt.Errorf(i18n.T("include %q failed: %w", "include %q 失败: %w"), name, err)
+					return "", fmt.Errorf("include %q failed: %w", name, err)
 				}
 				return sb.String(), nil
 			},
@@ -61,7 +60,7 @@ func NewEngine(helpers string) (*Engine, error) {
 	e := newEngine()
 	if helpers != "" {
 		if _, err := e.base.Parse(helpers); err != nil {
-			return nil, fmt.Errorf(i18n.T("helpers template parse failed: %w", "helpers 模板解析失败: %w"), err)
+			return nil, fmt.Errorf("helpers template parse failed: %w", err)
 		}
 	}
 	return e, nil
@@ -94,13 +93,22 @@ func (e *Engine) Render(tpl string, vars map[string]any) (string, error) {
 		return "", err
 	}
 	if _, err := clone.New("w").Parse(tpl); err != nil {
-		return "", fmt.Errorf(i18n.T("template parse failed %q: %w", "模板解析失败 %q: %w"), tpl, err)
+		return "", fmt.Errorf("template parse failed %q: %w%s", tpl, err, bareIdentHint(err))
 	}
 	var sb strings.Builder
 	if err := clone.ExecuteTemplate(&sb, "w", vars); err != nil {
-		return "", fmt.Errorf(i18n.T("template render failed %q: %w", "模板渲染失败 %q: %w"), tpl, err)
+		return "", fmt.Errorf("template render failed %q: %w", tpl, err)
 	}
 	return sb.String(), nil
+}
+
+// bareIdentHint 对"裸标识符被当函数调用"的 parse 错误附加修正提示——
+// Ansible 习语 {{ var }} 在 Go template 语义下必须带前导点 {{ .var }}。
+func bareIdentHint(err error) string {
+	if strings.Contains(err.Error(), `function "`) && strings.Contains(err.Error(), "not defined") {
+		return ` (variable references need a leading dot: {{ .var.stdout }} — a bare name parses as a function call, see docs/07)`
+	}
+	return ""
 }
 
 // RenderValue 递归渲染任意值中的所有字符串。

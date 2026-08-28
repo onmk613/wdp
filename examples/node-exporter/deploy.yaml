@@ -1,0 +1,79 @@
+# node-exporter 部署相位（独立 chart，主机组 node-exporter）。
+#
+# 用法：
+#   wdp run test/node-exporter -i test/inventory.yaml                    # 在线模式
+#   wdp run test/node-exporter -i test/inventory.yaml --check --diff     # 零风险预演
+#   wdp run test/node-exporter -i test/inventory.yaml --set online_install=false
+#   SMART 磁盘指标（按主机覆盖：inventory 主机变量 node_exporter_smart: true）
+#   wdp run test/node-exporter -i test/inventory.yaml --set smart=true
+#   打包：wdp package test/node-exporter → node-exporter-1.0.0.tgz
+
+- name: 安装 node_exporter
+  hosts: node-exporter
+  become: true
+  tasks:
+    - name: 采集 facts（架构判定）
+      setup:
+
+    - name: 不支持的架构直接失败（仅 x86_64 / aarch64）
+      shell: 'echo "unsupported architecture: {{ .arch }}" >&2; exit 1'
+      when: '{{ if eq (include "node-exporter.arch_alias" .) "unsupported" }}yes{{ else }}no{{ end }}'
+
+    - name: 创建运行账户（系统用户，无登录 shell）
+      user:
+        name: "{{ .user }}"
+        system: true
+        shell: /sbin/nologin
+
+    # ---------- 在线模式：官方 release tar.gz → 解包暂存 → install 单二进制 ----------
+    - name: 下载 node_exporter 发布包
+      get_url:
+        url: '{{ .download_base }}/v{{ .version }}/node_exporter-{{ .version }}.linux-{{ include "node-exporter.arch_alias" . }}.tar.gz'
+        dest: /tmp/wdp-ne-{{ .version }}.tar.gz
+        mode: "0644"
+      when: '{{ .online_install }}'
+
+    - name: 解包到暂存目录
+      unarchive:
+        src: /tmp/wdp-ne-{{ .version }}.tar.gz
+        dest: /tmp/wdp-ne-dist
+        remote_src: true
+        creates: '/tmp/wdp-ne-dist/node_exporter-{{ .version }}.linux-{{ include "node-exporter.arch_alias" . }}/node_exporter'
+      when: '{{ .online_install }}'
+
+    - name: 安装二进制
+      shell: 'install -m 0755 /tmp/wdp-ne-dist/node_exporter-{{ .version }}.linux-{{ include "node-exporter.arch_alias" . }}/node_exporter {{ .bin_dir }}/node_exporter'
+      when: '{{ .online_install }}'
+
+    # ---------- 离线模式：packages/<arch>/ 预置制品（copy 按 sha256 幂等） ----------
+    - name: 分发 node_exporter 二进制
+      copy:
+        src: "packages/{{ .arch }}/node_exporter"
+        dest: "{{ .bin_dir }}/node_exporter"
+        mode: "0755"
+      when: '{{ not .online_install }}'
+
+    # ---------- SMART 磁盘指标（tasks/smart.yaml 片段，共享当前变量域） ----------
+    - name: SMART 采集（smartmon.sh + textfile + timer）
+      include: tasks/smart.yaml
+      when: '{{ dig "node_exporter_smart" .smart . }}'
+
+    # ---------- 服务（端口经 dig 走主机变量优先） ----------
+    - name: 部署 node_exporter 单元并启动
+      systemd_unit:
+        name: node-exporter.service
+        src: templates/node-exporter.service.tpl
+        state: started
+        enabled: true
+      notify: 重启 node-exporter
+
+    - name: 等待指标端口就绪
+      wait_for:
+        port: '{{ dig "node_exporter_port" .port . }}'
+        timeout: 30
+
+  handlers:
+    - name: 重启 node-exporter
+      service:
+        name: node-exporter
+        state: restarted

@@ -2,6 +2,7 @@ package report
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -69,7 +70,7 @@ func TestConsoleTaskTable(t *testing.T) {
 	}
 	// 状态列对齐：两行 status 文本起点一致（changed 与 fatal 同列）
 	var chg, ft = -1, -1
-	for _, l := range strings.Split(out, "\n") {
+	for l := range strings.SplitSeq(out, "\n") {
 		if strings.Contains(l, "=") {
 			continue // 汇总行
 		}
@@ -145,7 +146,7 @@ func TestConsoleRecapTable(t *testing.T) {
 	}
 	// 右对齐：OK 列的 "2" 与 "100" 结束列位置一致
 	var l1, l2 string
-	for _, l := range strings.Split(out, "\n") {
+	for l := range strings.SplitSeq(out, "\n") {
 		if strings.HasPrefix(l, "h1") {
 			l1 = l
 		}
@@ -189,6 +190,65 @@ func TestConsoleQuietLegacyLines(t *testing.T) {
 	}
 }
 
+// TestConsolePerHostSummary 缺省聚合模式计数行下列出每主机状态（异常主机
+// 附错误信息首行）；-v 表格已逐主机呈现不重复；超过 20 台退化为纯计数。
+func TestConsolePerHostSummary(t *testing.T) {
+	var buf bytes.Buffer
+	c := NewConsole(&buf, false, 0)
+
+	c.TaskStart("部署", "shell")
+	c.HostResult("h1", &model.TaskResult{Host: "h1", Changed: true})
+	c.HostResult("h2", &model.TaskResult{Host: "h2", Failed: true, Msg: "Non-zero return code"})
+	c.HostResult("h3", &model.TaskResult{Host: "h3"})
+	c.TaskDone()
+
+	out := buf.String()
+	for _, want := range []string{
+		fmt.Sprintf("    %-20s changed", "h1"),
+		fmt.Sprintf("    %-20s fatal: Non-zero return code", "h2"),
+		fmt.Sprintf("    %-20s ok", "h3"),
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("主机清单缺少 %q:\n%s", want, out)
+		}
+	}
+
+	// Msg 为空时回退 stderr 首行
+	buf.Reset()
+	c.TaskStart("t", "shell")
+	c.HostResult("h1", &model.TaskResult{Host: "h1", Failed: true, Stderr: "line1\nline2\n"})
+	c.TaskDone()
+	if out := buf.String(); !strings.Contains(out, "fatal: line1") {
+		t.Fatalf("应回退 stderr 首行:\n%s", out)
+	}
+
+	// -v：表格已逐主机呈现，计数行下不再重复清单
+	buf.Reset()
+	v := NewConsole(&buf, false, 1)
+	v.TaskStart("t", "shell")
+	v.HostResult("h1", &model.TaskResult{Host: "h1", Changed: true})
+	v.TaskDone()
+	if out := buf.String(); strings.Contains(out, "\n    h1") {
+		t.Fatalf("-v 不应有缩进主机清单行（表格已逐主机呈现）:\n%s", out)
+	}
+
+	// 超过 20 台：退化为纯计数，不输出主机清单
+	buf.Reset()
+	big := NewConsole(&buf, false, 0)
+	big.TaskStart("t", "shell")
+	for i := 1; i <= 21; i++ {
+		big.HostResult(fmt.Sprintf("h%02d", i), &model.TaskResult{Host: fmt.Sprintf("h%02d", i), Changed: true})
+	}
+	big.TaskDone()
+	out = buf.String()
+	if !strings.Contains(out, "changed=21") {
+		t.Fatalf("纯计数汇总缺失:\n%s", out)
+	}
+	if strings.Contains(out, fmt.Sprintf("%-20s changed", "h01")) {
+		t.Fatalf("超阈值不应输出主机清单:\n%s", out)
+	}
+}
+
 // TestConsoleLoopItemRows 聚合模式下 loop 异常项以独立行入表。
 func TestConsoleLoopItemRows(t *testing.T) {
 	var buf bytes.Buffer
@@ -210,5 +270,58 @@ func TestConsoleLoopItemRows(t *testing.T) {
 	}
 	if strings.Contains(out, "ok-item") {
 		t.Fatalf("正常项不应显示:\n%s", out)
+	}
+}
+
+// TestConsoleDebugVisibleAtAggregate debug 模块结果在聚合(0)与逐主机(1)
+// 级别都展示（Msg 即产出物，status/巡检场景依赖）；quiet(-1) 仍仅异常。
+func TestConsoleDebugVisibleAtAggregate(t *testing.T) {
+	var buf bytes.Buffer
+	c := NewConsole(&buf, false, 0)
+
+	c.PlayStart("p", []string{"h1"})
+	c.TaskStart("汇报", "debug")
+	c.HostResult("h1", &model.TaskResult{Host: "h1", Module: "debug", Msg: "port=18080"})
+	c.TaskDone()
+	if out := buf.String(); !strings.Contains(out, "port=18080") {
+		t.Fatalf("聚合模式下 debug 产出应可见:\n%s", out)
+	}
+
+	// 对照：普通模块 ok 结果聚合模式仍隐藏
+	buf.Reset()
+	c.PlayStart("p", []string{"h1"})
+	c.TaskStart("探测", "shell")
+	c.HostResult("h1", &model.TaskResult{Host: "h1", Module: "shell", Msg: "probe-done"})
+	c.TaskDone()
+	if out := buf.String(); strings.Contains(out, "probe-done") {
+		t.Fatalf("普通模块 ok 结果在聚合模式不应展示:\n%s", out)
+	}
+}
+
+// TestConsoleSingleLineDetailNoDup 长单行消息只出现一次：单元格不重复展示
+// 截断文本，全量内容进详情块（回归：曾出现"截断行 + 完整块"双份输出）。
+func TestConsoleSingleLineDetailNoDup(t *testing.T) {
+	long := strings.Repeat("x", 120)
+	var buf bytes.Buffer
+	c := NewConsole(&buf, false, 0)
+
+	c.PlayStart("p", []string{"h1"})
+	c.TaskStart("汇报", "debug")
+	c.HostResult("h1", &model.TaskResult{Host: "h1", Module: "debug", Msg: long})
+	c.TaskDone()
+
+	out := buf.String()
+	if n := strings.Count(out, long); n != 1 {
+		t.Fatalf("全量内容应恰好出现一次: count=%d\n%s", n, out)
+	}
+	runX := strings.Repeat("x", 20)
+	n := 0
+	for l := range strings.SplitSeq(out, "\n") {
+		if strings.Contains(l, runX) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("含长内容的行应只有详情块一行（单元格不重复展示截断文本）: %d\n%s", n, out)
 	}
 }

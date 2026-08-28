@@ -7,8 +7,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"wdp/internal/i18n"
 )
 
 func init() {
@@ -25,42 +23,42 @@ func (m *WaitForModule) Name() string { return "wait_for" }
 
 // Desc 模块说明。
 func (m *WaitForModule) Desc() string {
-	return i18n.T("wait until a port/path condition is met (polled from the controller)", "等待端口/路径条件满足（控制端视角轮询）")
+	return "wait until a port/path condition is met (polled from the controller)"
 }
 
 // Params 参数文档。
 func (m *WaitForModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "host", Type: "string", Desc: "探测地址（缺省用主机 Address）"},
-		{Name: "port", Type: "int", Desc: "TCP 端口：state=present 等待可达，absent 等待关闭（与 path 二选一）"},
-		{Name: "path", Type: "string", Desc: "远端路径：state=present 等待存在，absent 等待消失（与 port 二选一）"},
-		{Name: "state", Type: "string", Default: "present", Desc: "present 条件出现 / absent 条件消失"},
-		{Name: "timeout", Type: "int", Default: "300", Desc: "总等待秒数（超时判失败）"},
-		{Name: "delay", Type: "int", Default: "0", Desc: "首次探测前等待秒数"},
-		{Name: "sleep", Type: "int", Default: "1", Desc: "两次探测间隔秒数"},
-		{Name: "msg", Type: "string", Desc: "超时失败时的自定义消息"},
+		{Name: "host", Type: "string", Desc: "probe address (defaults to the host Address)"},
+		{Name: "port", Type: "int", Desc: "TCP port: state=present waits for reachable, absent waits for closed (mutually exclusive with path)"},
+		{Name: "path", Type: "string", Desc: "remote path: state=present waits for existence, absent waits for removal (mutually exclusive with port)"},
+		{Name: "state", Type: "string", Default: "present", Desc: "present waits for the condition / absent waits for it to clear"},
+		{Name: "timeout", Type: "int", Default: "300", Desc: "total wait seconds (timeout fails the task)"},
+		{Name: "delay", Type: "int", Default: "0", Desc: "seconds to wait before the first probe"},
+		{Name: "sleep", Type: "int", Default: "1", Desc: "seconds between probes"},
+		{Name: "msg", Type: "string", Desc: "custom message on timeout failure"},
 	}
 }
 
 // Example 示例任务。
 func (m *WaitForModule) Example() string {
-	return `- name: 等待服务端口就绪（host 缺省用主机地址）
+	return `- name: wait for the service port (host defaults to the host address)
   wait_for:
     port: 8080
     delay: 5
     timeout: 120
 
-- name: 等待远端锁文件消失
+- name: wait for the remote lock file to disappear
   wait_for:
     path: /var/run/app.lock
     state: absent
     timeout: 60
-    msg: 应用未能及时退出
+    msg: app failed to exit in time
 `
 }
 
 // Run 执行等待。
-func (m *WaitForModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *WaitForModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	host, _ := argStr(args, "host")
 	if host == "" {
 		host = rc.Host.Address
@@ -71,7 +69,7 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, free string) *R
 	path, hasPath := argStr(args, "path")
 	state, ok := parseState(args, "present", "present", "absent")
 	if !ok {
-		return Fail(i18n.T("unsupported state %q (options: present/absent)", "不支持的 state %q（可选: present/absent）"), state)
+		return Fail("unsupported state %q (options: present/absent)", state)
 	}
 	absent := state == "absent"
 
@@ -79,39 +77,39 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, free string) *R
 	if s, ok := argStr(args, "port"); ok && strings.TrimSpace(s) != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil || n < 1 || n > 65535 {
-			return Fail("%s", i18n.T("port must be an integer between 1 and 65535", "port 应为 1-65535 的整数"))
+			return Fail("%s", "port must be an integer between 1 and 65535")
 		}
 		port = n
 	}
 	if port == 0 && !hasPath {
-		return Fail("%s", i18n.T("wait_for requires a port or path parameter", "wait_for 需要 port 或 path 参数"))
+		return Fail("%s", "wait_for requires a port or path parameter")
 	}
 	if port != 0 && hasPath {
-		return Fail("%s", i18n.T("port and path are mutually exclusive", "port 与 path 只能二选一"))
+		return Fail("%s", "port and path are mutually exclusive")
 	}
 	if hasPath && path == "" {
-		return Fail("%s", i18n.T("path must not be empty", "path 不能为空"))
+		return Fail("%s", "path must not be empty")
 	}
 
 	timeoutSec, ok := argSecs(args, "timeout", 300)
 	if !ok || timeoutSec <= 0 {
-		return Fail("%s", i18n.T("timeout must be a positive integer", "timeout 应为正整数"))
+		return Fail("%s", "timeout must be a positive integer")
 	}
 	delaySec, ok := argSecs(args, "delay", 0)
 	if !ok {
-		return Fail("%s", i18n.T("delay must be a non-negative integer", "delay 应为非负整数"))
+		return Fail("%s", "delay must be a non-negative integer")
 	}
 	sleepSec, ok := argSecs(args, "sleep", 1)
 	if !ok || sleepSec < 0 {
-		return Fail("%s", i18n.T("sleep must be a non-negative integer", "sleep 应为非负整数"))
+		return Fail("%s", "sleep must be a non-negative integer")
 	}
 	customMsg, _ := argStr(args, "msg")
 
 	desc := path
-	readyWord, goneWord := "就绪", "已移除"
+	readyWord, goneWord := "ready", "removed"
 	if port != 0 {
 		desc = net.JoinHostPort(host, strconv.Itoa(port))
-		goneWord = "已关闭"
+		goneWord = "closed"
 	}
 
 	// check 模式：单次只读探测报告当前状态，不等待
@@ -120,14 +118,14 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, free string) *R
 		if bad != nil {
 			return bad
 		}
-		label := "未就绪"
+		label := "not ready"
 		if ok {
 			label = readyWord
 			if absent {
 				label = goneWord
 			}
 		}
-		return &Result{Msg: fmt.Sprintf("[check] %s 当前%s（单次探测，不等待）", desc, label)}
+		return &Result{Msg: fmt.Sprintf("[check] %s currently %s (single probe, no waiting)", desc, label)}
 	}
 
 	// 轮询窗口：timeout 与任务级超时（rc.TimeoutMs）取较小值
@@ -138,7 +136,7 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, free string) *R
 		}
 	}
 	if delaySec > 0 && !waitInterruptible(rc.Ctx, time.Duration(delaySec)*time.Second) {
-		return Fail("wait_for 被取消: %v", rc.Ctx.Err())
+		return Fail("wait_for cancelled: %v", rc.Ctx.Err())
 	}
 
 	start := time.Now()
@@ -152,7 +150,7 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, free string) *R
 			if absent {
 				word = goneWord
 			}
-			return &Result{Msg: fmt.Sprintf("%s %s（%.0f 秒）", desc, word, time.Since(start).Seconds())}
+			return &Result{Msg: fmt.Sprintf("%s %s (%.0fs)", desc, word, time.Since(start).Seconds())}
 		}
 		now := time.Now()
 		if !now.Before(deadline) {
@@ -163,15 +161,15 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, free string) *R
 			wait = deadline.Sub(now) // 收口到 deadline，避免超出 timeout
 		}
 		if !waitInterruptible(rc.Ctx, wait) {
-			return Fail("wait_for 被取消: %v", rc.Ctx.Err())
+			return Fail("wait_for cancelled: %v", rc.Ctx.Err())
 		}
 	}
 
 	base := customMsg
 	if base == "" {
-		base = fmt.Sprintf("等待 %s 超时", desc)
+		base = fmt.Sprintf("timed out waiting for %s", desc)
 	}
-	return &Result{Failed: true, Msg: fmt.Sprintf("%s（超时 %d 秒）", base, timeoutSec)}
+	return &Result{Failed: true, Msg: fmt.Sprintf("%s (timeout %ds)", base, timeoutSec)}
 }
 
 // probe 单次探测条件是否满足（ok=条件达成）。

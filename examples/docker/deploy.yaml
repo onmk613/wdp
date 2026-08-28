@@ -1,0 +1,98 @@
+# docker 部署相位（独立 chart，主机组 docker）。
+#
+# 用法：
+#   wdp run test/docker -i test/inventory.yaml                    # 在线模式
+#   wdp run test/docker -i test/inventory.yaml --check --diff     # 零风险预演
+#   wdp run test/docker -i test/inventory.yaml --set online_install=false   # 离线模式
+#   打包：wdp package test/docker → docker-1.0.0.tgz（离线制品先放 packages/）
+
+- name: 安装 docker（官方静态包）
+  hosts: docker
+  become: true
+  tasks:
+    - name: 采集 facts（架构判定）
+      setup:
+
+    - name: 不支持的架构直接失败（仅 x86_64 / aarch64）
+      shell: 'echo "unsupported architecture: {{ .arch }}" >&2; exit 1'
+      when: '{{ if eq (include "docker.arch_alias" .) "unsupported" }}yes{{ else }}no{{ end }}'
+
+    - name: 配置目录（daemon.json 与 cli 插件）
+      file:
+        path: "{{ .item }}"
+        state: directory
+        mode: "0755"
+      loop: ['{{ .conf_dir }}', '{{ .cli_plugins_dir }}']
+
+    # ---------- 在线模式：下载官方静态包 → 解包暂存（按版本键控，升级可重解） → install 展开 ----------
+    - name: 下载 docker 静态包
+      get_url:
+        url: "{{ .download_base }}/{{ .arch }}/docker-{{ .version }}.tgz"
+        dest: /tmp/wdp-docker-{{ .version }}.tgz
+        mode: "0644"
+      when: '{{ .online_install }}'
+
+    - name: 解包到暂存目录（tgz 内含 docker/ 前缀，wdp unarchive 无 strip）
+      unarchive:
+        src: /tmp/wdp-docker-{{ .version }}.tgz
+        dest: "{{ .staging_dir }}-{{ .version }}"
+        remote_src: true
+        creates: "{{ .staging_dir }}-{{ .version }}/docker/dockerd"
+      when: '{{ .online_install }}'
+
+    - name: 安装二进制到 bin_dir
+      shell: 'install -m 0755 {{ .staging_dir }}-{{ .version }}/docker/* {{ .bin_dir }}/'
+      when: '{{ .online_install }}'
+
+    - name: 下载 docker compose 插件（release 名用 x86_64 风格架构）
+      get_url:
+        url: "https://github.com/docker/compose/releases/download/{{ .compose_version }}/docker-compose-linux-{{ .arch }}"
+        dest: "{{ .cli_plugins_dir }}/docker-compose"
+        mode: "0755"
+      when: '{{ .online_install }}'
+
+    - name: 下载 docker buildx 插件（release 名用 Go 风格架构）
+      get_url:
+        url: 'https://github.com/docker/buildx/releases/download/{{ .buildx_version }}/buildx-{{ .buildx_version }}.linux-{{ include "docker.arch_alias" . }}'
+        dest: "{{ .cli_plugins_dir }}/docker-buildx"
+        mode: "0755"
+      when: '{{ .online_install }}'
+
+    # ---------- 离线模式：packages/<arch>/ 预置制品（copy 按 sha256 幂等） ----------
+    - name: 分发 docker/containerd 二进制
+      copy:
+        src: "packages/{{ .arch }}/{{ .item }}"
+        dest: "{{ .bin_dir }}/{{ .item }}"
+        mode: "0755"
+      loop: [containerd, containerd-shim-runc-v2, ctr, docker, docker-init, docker-proxy, dockerd, runc]
+      when: '{{ not .online_install }}'
+
+    - name: 分发 cli 插件（compose / buildx）
+      copy:
+        src: "packages/{{ .arch }}/{{ .item }}"
+        dest: "{{ .cli_plugins_dir }}/{{ .item }}"
+        mode: "0755"
+      loop: [docker-compose, docker-buildx]
+      when: '{{ not .online_install }}'
+
+    # ---------- 配置与服务（变更 → notify 重启） ----------
+    - name: 渲染 daemon.json
+      template:
+        src: templates/daemon.json.tpl
+        dest: "{{ .conf_dir }}/daemon.json"
+        mode: "0644"
+      notify: 重启 docker
+
+    - name: 部署 docker 单元并启动
+      systemd_unit:
+        name: docker.service
+        src: templates/docker.service.tpl
+        state: started
+        enabled: true
+      notify: 重启 docker
+
+  handlers:
+    - name: 重启 docker
+      service:
+        name: docker
+        state: restarted

@@ -3,9 +3,9 @@ package executor
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 	"wdp/internal/chart"
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -15,14 +15,14 @@ import (
 func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.Task, hr *hostRun, res *model.TaskResult, base func() map[string]any) *model.TaskResult {
 	if e.Opts.Chart == nil {
 		res.Failed = true
-		res.Msg = i18n.T("chart reference is only available in chart mode (run with a chart directory or .tgz package as entrypoint)", "chart 引用仅在 chart 模式下可用（需以 chart 目录或 tgz 包作为入口运行）")
+		res.Msg = "chart reference is only available in chart mode (run with a chart directory or .tgz package as entrypoint)"
 		return res
 	}
 	// 环引用防护：chart 自引用/互引用会在此递归展开中无限下钻，
 	// 超过深度上限即报错终止（Go 栈溢出无法 recover，必须前置拦截）。
 	if hr.chartDepth >= maxChartDepth {
 		res.Failed = true
-		res.Msg = fmt.Sprintf("chart 引用展开超过深度上限 %d（可能存在环引用: %s）", maxChartDepth, task.ChartRef)
+		res.Msg = fmt.Sprintf("chart reference expansion exceeded the depth limit %d (possible reference cycle: %s)", maxChartDepth, task.ChartRef)
 		return res
 	}
 	hr.chartDepth++
@@ -49,9 +49,7 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 			return fail(res, err)
 		}
 		if m, ok := cv.(map[string]any); ok {
-			for k, v := range m {
-				scope[k] = v
-			}
+			maps.Copy(scope, m)
 		}
 	}
 
@@ -84,7 +82,7 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 		}
 	}
 	if res.Msg == "" {
-		res.Msg = fmt.Sprintf(i18n.T("chart %s: %d items completed", "chart %s: %d 项执行完成"), sub.Meta.Name, len(items))
+		res.Msg = fmt.Sprintf("chart %s: %d items completed", sub.Meta.Name, len(items))
 		if res.Failed {
 			res.Msg = strings.Join(msgs, "; ")
 		}
@@ -122,12 +120,8 @@ func effSubPlay(p *model.Play, subPlay *model.Play) model.Play {
 	}
 	if len(p.Environment) > 0 {
 		merged := map[string]string{}
-		for k, v := range p.Environment {
-			merged[k] = v
-		}
-		for k, v := range effPlay.Environment {
-			merged[k] = v
-		}
+		maps.Copy(merged, p.Environment)
+		maps.Copy(merged, effPlay.Environment)
 		effPlay.Environment = merged
 	}
 	return effPlay
@@ -137,20 +131,14 @@ func effSubPlay(p *model.Play, subPlay *model.Play) model.Play {
 // host 基础变量 + 子作用域 values + 子 play vars + 内置变量/facts 穿透 + item。
 func (e *Executor) chartItemVars(hr *hostRun, scope map[string]any, subPlay *model.Play, savedVars map[string]any, item any, loopVar string) map[string]any {
 	vars := map[string]any{}
-	for k, v := range hr.host.Vars {
-		vars[k] = v
-	}
-	for k, v := range scope {
-		vars[k] = v
-	}
-	for k, v := range subPlay.Vars {
-		vars[k] = v
-	}
+	maps.Copy(vars, hr.host.Vars)
+	maps.Copy(vars, scope)
+	maps.Copy(vars, subPlay.Vars)
 	// 主机 facts（setup/stat 等运行时数据）同样穿透：属于主机而非 chart 作用域
 	e.seedFacts(hr.host.Name, vars)
-	// 内置变量最后注入：穿透子 chart 作用域（play_hosts/groups 等在组件内同样可用），
+	// 内置变量最后注入：穿透子 chart 作用域（清单与赋值统一在 builtins.go），
 	// 且不被 facts 或子作用域同名键覆盖（与顶层 prepareBatchRuns 的强制注入对齐）
-	for _, k := range builtinVars {
+	for _, k := range builtinVarNames {
 		if v, ok := savedVars[k]; ok {
 			vars[k] = v
 		}
@@ -198,11 +186,6 @@ func (e *Executor) runChartItemTasks(ctx context.Context, effPlay *model.Play, s
 	return true
 }
 
-// builtinVars 是强制注入的内置变量名（子 chart 作用域穿透清单）。
-var builtinVars = []string{
-	"inventory_hostname", "group_names", "play_hosts", "play_batch", "groups", "hosts",
-}
-
 // runBlock 执行 block/rescue/always 任务组（单主机内顺序，支持嵌套）。
 func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task, hr *hostRun, res *model.TaskResult) *model.TaskResult {
 	// block 状态变量只在 block/rescue/always 执行期间可见，任务结束即清理，
@@ -244,7 +227,7 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 			if _, un, amsgs := runSeq(task.Always); un {
 				res.Msg = strings.Join(append(msgs, amsgs...), "; ")
 			} else {
-				res.Msg += i18n.T(" (always attempted)", "（always 已尝试执行）")
+				res.Msg += " (always attempted)"
 			}
 		}
 		res.Task = task.Label()
@@ -259,7 +242,7 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 		hr.vars["block_failed_msgs"] = strings.Join(msgs, "; ")
 		if len(task.Rescue) == 0 {
 			res.Failed = true
-			res.Msg = i18n.T("block failed: ", "block 失败: ") + strings.Join(msgs, "; ")
+			res.Msg = "block failed: " + strings.Join(msgs, "; ")
 		} else {
 			rescueFailed, resUnreachable, rmsgs := runSeq(task.Rescue)
 			if resUnreachable {
@@ -275,10 +258,10 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 			}
 			if rescueFailed {
 				res.Failed = true
-				res.Msg = i18n.T("block failed and rescue failed: ", "block 失败且 rescue 失败: ") + strings.Join(append(msgs, rmsgs...), "; ")
+				res.Msg = "block failed and rescue failed: " + strings.Join(append(msgs, rmsgs...), "; ")
 			} else {
 				// rescue 成功兜底：组视为已恢复（changed 保持）
-				res.Msg = "block 失败已由 rescue 恢复: " + strings.Join(msgs, "; ")
+				res.Msg = "block failure recovered by rescue: " + strings.Join(msgs, "; ")
 				delete(hr.vars, "block_failed")
 			}
 		}
@@ -291,7 +274,7 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 		// always 清理任务失败同样视为 block 失败（控制流与 RECAP 保持一致；
 		// 此前该失败被静默吞掉，部署会误报成功）
 		res.Failed = true
-		res.Msg = i18n.T("always task failed: ", "always 任务失败: ") + strings.Join(amsgs, "; ")
+		res.Msg = "always task failed: " + strings.Join(amsgs, "; ")
 	}
 	res.Task = task.Label()
 	res.Module = "block"

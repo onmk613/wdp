@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"wdp/internal/i18n"
 )
 
 func init() {
@@ -23,7 +21,7 @@ func (m *SetupModule) ReadOnly() bool { return true }
 
 // Desc 模块说明。
 func (m *SetupModule) Desc() string {
-	return i18n.T("collect host facts (OS/network/memory/disk)", "采集主机 facts（OS/网络/内存/磁盘）")
+	return "collect host facts (OS/network/memory/disk)"
 }
 
 // setupScript 单次探测脚本：输出 key=value 行（缺失项输出空值而非报错，
@@ -42,16 +40,16 @@ echo "memory_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo 2>/dev/nul
 df -k / 2>/dev/null | awk 'NR==2 {printf "disk_total=%d\ndisk_used=%d\ndisk_avail=%d\ndisk_percent=%s\n", $2*1024, $3*1024, $4*1024, $5}'`
 
 // Run 采集主机 facts（只读，不记 changed）。
-func (m *SetupModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *SetupModule) Run(rc *RunContext, _ map[string]any, _ string) *Result {
 	out, bad := rc.exec(setupScript)
 	if bad != nil {
 		return bad
 	}
 	if out.Code != 0 {
-		return Fail(i18n.T("facts collection failed rc=%d: %s", "facts 采集失败 rc=%d: %s"), out.Code, firstLine(out.Stderr))
+		return Fail("facts collection failed rc=%d: %s", out.Code, firstLine(out.Stderr))
 	}
 	kv := map[string]string{}
-	for _, line := range strings.Split(out.Stdout, "\n") {
+	for line := range strings.SplitSeq(out.Stdout, "\n") {
 		if k, v, ok := strings.Cut(line, "="); ok {
 			kv[strings.TrimSpace(k)] = strings.TrimSpace(v)
 		}
@@ -90,7 +88,7 @@ func (m *SetupModule) Run(rc *RunContext, args map[string]any, free string) *Res
 		"os":           osFacts,
 		"disk":         diskFacts,
 	}
-	return &Result{Msg: fmt.Sprintf(i18n.T("facts: %s %s (%s)", "facts: %s %s（%s）"), kv["hostname"], osFacts["family"], kv["arch"]), Facts: facts}
+	return &Result{Msg: fmt.Sprintf("facts: %s %s (%s)", kv["hostname"], osFacts["family"], kv["arch"]), Facts: facts}
 }
 
 // osFamily 归一系统家族（与 package 模块的包管理器探测口径一致）。
@@ -125,16 +123,16 @@ func atoi(s string) int {
 // Params 参数文档（setup 无参数）。
 func (m *SetupModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "(无参数)", Type: "-", Desc: "采集 os/hostname/cpus/memory_mb/disk/default_ipv4 并入变量域"},
+		{Name: "(no arguments)", Type: "-", Desc: "collects os/hostname/cpus/memory_mb/disk/default_ipv4 into the variable scope"},
 	}
 }
 
 // Example 示例任务。
 func (m *SetupModule) Example() string {
-	return `- name: 采集 facts
+	return `- name: gather facts
   setup:
 
-- name: 引用
+- name: reference them
   shell: 'echo {{ .os.family }} {{ .cpus }}C {{ .memory_mb }}MB'
 `
 }

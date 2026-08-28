@@ -244,7 +244,7 @@ func (t *Table) render(emit func(Color, string), color bool) {
 		}
 		if plain {
 			sb.Reset()
-			for i := 0; i < ncol; i++ {
+			for i := range ncol {
 				text := ""
 				if i < len(cells) {
 					text = cells[i].Text
@@ -258,7 +258,7 @@ func (t *Table) render(emit func(Color, string), color bool) {
 			emit(None, sb.String())
 			return
 		}
-		for i := 0; i < ncol; i++ {
+		for i := range ncol {
 			text, clr := "", None
 			if i < len(cells) {
 				text, clr = cells[i].Text, cells[i].Color

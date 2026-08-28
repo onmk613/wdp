@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"wdp/internal/i18n"
 )
 
 // maxDownloadBytes 控制端单次下载的响应体上限（与 chart 解包 2GiB 上限对齐）。
@@ -29,27 +27,27 @@ func (m *GetURLModule) Name() string { return "get_url" }
 
 // Desc 模块说明。
 func (m *GetURLModule) Desc() string {
-	return i18n.T("download a URL to the remote host (sha256 verified, idempotent)", "下载 URL 文件到远端（sha256 校验、幂等）")
+	return "download a URL to the remote host (sha256 verified, idempotent)"
 }
 
 // Params 参数文档。
 func (m *GetURLModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "url", Type: "string", Desc: "下载地址（http/https），控制端发起 GET"},
-		{Name: "dest", Type: "string", Desc: "远端目标路径"},
-		{Name: "sha256", Type: "string", Desc: "期望 sha256（64 位十六进制）：校验下载内容；远端已一致时跳过下载"},
-		{Name: "mode", Type: "mode", Default: "0644", Desc: "目标文件权限"},
-		{Name: "owner", Type: "string", Desc: "属主（需 become: true）"},
-		{Name: "group", Type: "string", Desc: "属组（需 become: true）"},
-		{Name: "backup", Type: "bool", Default: "false", Desc: "覆盖前备份原文件（dest.bak.时间戳）"},
-		{Name: "timeout_secs", Type: "int", Default: "30", Desc: "控制端下载超时秒数"},
-		{Name: "headers", Type: "map", Desc: "附加请求头（如 Authorization）"},
+		{Name: "url", Type: "string", Desc: "download URL (http/https), GET issued from the control node"},
+		{Name: "dest", Type: "string", Desc: "remote destination path"},
+		{Name: "sha256", Type: "string", Desc: "expected sha256 (64 hex chars): verifies the download; skips when the remote file already matches"},
+		{Name: "mode", Type: "mode", Default: "0644", Desc: "destination file mode"},
+		{Name: "owner", Type: "string", Desc: "owner (requires become: true)"},
+		{Name: "group", Type: "string", Desc: "group (requires become: true)"},
+		{Name: "backup", Type: "bool", Default: "false", Desc: "back up the existing file before overwriting (dest.bak.<timestamp>)"},
+		{Name: "timeout_secs", Type: "int", Default: "30", Desc: "download timeout in seconds (control node)"},
+		{Name: "headers", Type: "map", Desc: "extra request headers (e.g. Authorization)"},
 	}
 }
 
 // Example 示例任务。
 func (m *GetURLModule) Example() string {
-	return `- name: 下载二进制并分发（sha256 校验 + 幂等）
+	return `- name: download and distribute a binary (sha256 verify + idempotent)
   get_url:
     url: https://example.com/releases/app/v1.2.0/app-linux-amd64
     dest: /usr/local/bin/app
@@ -61,19 +59,19 @@ func (m *GetURLModule) Example() string {
 }
 
 // Run 执行下载分发。
-func (m *GetURLModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *GetURLModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	url, ok := argStr(args, "url")
 	if !ok || url == "" {
-		return Fail("%s", i18n.T("get_url requires a url parameter", "get_url 需要 url 参数"))
+		return Fail("%s", "get_url requires a url parameter")
 	}
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("%s", i18n.T("get_url requires a dest parameter", "get_url 需要 dest 参数"))
+		return Fail("%s", "get_url requires a dest parameter")
 	}
 	wantSum, _ := argStr(args, "sha256")
 	wantSum = strings.ToLower(strings.TrimSpace(wantSum))
 	if wantSum != "" && !isSHA256Hex(wantSum) {
-		return Fail("%s", i18n.T("sha256 parameter must be a 64-character hex string", "sha256 参数应为 64 位十六进制串"))
+		return Fail("%s", "sha256 parameter must be a 64-character hex string")
 	}
 
 	mode := int64(0o644) // 缺省 0644（始终显式下发，覆盖上传缺省）
@@ -85,7 +83,7 @@ func (m *GetURLModule) Run(rc *RunContext, args map[string]any, free string) *Re
 	backup, _ := argBool(args, "backup")
 	timeoutSecs, ok := argSecs(args, "timeout_secs", 30)
 	if !ok || timeoutSecs <= 0 {
-		return Fail("%s", i18n.T("timeout_secs must be a positive integer", "timeout_secs 应为正整数"))
+		return Fail("%s", "timeout_secs must be a positive integer")
 	}
 	headers, bad := headerMapArg(args, "headers")
 	if bad != nil {
@@ -109,7 +107,7 @@ func (m *GetURLModule) Run(rc *RunContext, args map[string]any, free string) *Re
 	}
 	if wantSum != "" {
 		if got := sha256hex(data); got != wantSum {
-			return Fail("下载内容校验失败: sha256 期望 %s 实际 %s（url=%s）", wantSum, got, url)
+			return Fail("download checksum mismatch: sha256 expected %s got %s (url=%s)", wantSum, got, url)
 		}
 	}
 
@@ -117,9 +115,9 @@ func (m *GetURLModule) Run(rc *RunContext, args map[string]any, free string) *Re
 	if res != nil {
 		return res // 失败或 check 预估（含 --diff 内容差异）直接透传
 	}
-	msg := fmt.Sprintf(i18n.T("%s content is unchanged", "%s 内容一致"), dest)
+	msg := fmt.Sprintf("%s content is unchanged", dest)
 	if changed {
-		msg = fmt.Sprintf(i18n.T("downloaded %s to %s", "已下载 %s 到 %s"), url, dest)
+		msg = fmt.Sprintf("downloaded %s to %s", url, dest)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }
@@ -129,7 +127,7 @@ func (m *GetURLModule) Run(rc *RunContext, args map[string]any, free string) *Re
 // 属主漂移与权限漂移同权重估/校正（此前 check 漏报属主、实跑修复不报 changed）。
 func (m *GetURLModule) skipDownload(rc *RunContext, dest string, mode int64, owner, group string) *Result {
 	if (owner != "" || group != "") && !rc.Become {
-		return Fail(i18n.T("setting owner/group requires become: true (%s)", "设置 owner/group 需要 become: true（%s）"), dest)
+		return Fail("setting owner/group requires become: true (%s)", dest)
 	}
 	ownerDrift := false
 	if owner != "" || group != "" {
@@ -146,7 +144,7 @@ func (m *GetURLModule) skipDownload(rc *RunContext, dest string, mode int64, own
 		} else if ok && cur != mode {
 			would = true
 		}
-		return &Result{Changed: would, Msg: fmt.Sprintf(i18n.T("[check] %s content is unchanged (sha256 matches)", "[check] %s 内容一致（sha256 匹配）"), dest)}
+		return &Result{Changed: would, Msg: fmt.Sprintf("[check] %s content is unchanged (sha256 matches)", dest)}
 	}
 	changed := false
 	if fixed, bad := chmodIfDiffers(rc, dest, mode); bad != nil {
@@ -160,9 +158,9 @@ func (m *GetURLModule) skipDownload(rc *RunContext, dest string, mode int64, own
 		}
 		changed = true
 	}
-	msg := fmt.Sprintf(i18n.T("%s content is unchanged (sha256 matches, download skipped)", "%s 内容一致（sha256 匹配，跳过下载）"), dest)
+	msg := fmt.Sprintf("%s content is unchanged (sha256 matches, download skipped)", dest)
 	if changed {
-		msg = fmt.Sprintf(i18n.T("%s attributes corrected (content unchanged)", "%s 属性已校正（内容一致）"), dest)
+		msg = fmt.Sprintf("%s attributes corrected (content unchanged)", dest)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }
@@ -177,7 +175,7 @@ func (m *GetURLModule) fetch(rc *RunContext, url string, headers map[string]stri
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, Fail(i18n.T("unable to parse URL: %v", "URL 无法解析: %v"), err)
+		return nil, Fail("unable to parse URL: %v", err)
 	}
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -185,12 +183,12 @@ func (m *GetURLModule) fetch(rc *RunContext, url string, headers map[string]stri
 	client := &http.Client{Timeout: time.Duration(timeoutSecs) * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, Fail(i18n.T("download failed %s: %v", "下载失败 %s: %v"), url, err)
+		return nil, Fail("download failed %s: %v", url, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-		return nil, Fail(i18n.T("download failed %s: HTTP %d", "下载失败 %s: HTTP %d"), url, resp.StatusCode)
+		return nil, Fail("download failed %s: HTTP %d", url, resp.StatusCode)
 	}
 	// 响应体上限：RunContext 注入值优先（CLI/配置文件），否则内置默认 2GiB
 	limit := rc.MaxDownloadBytes
@@ -199,15 +197,15 @@ func (m *GetURLModule) fetch(rc *RunContext, url string, headers map[string]stri
 	}
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		if n, perr := strconv.ParseInt(cl, 10, 64); perr == nil && n > limit {
-			return nil, Fail(i18n.T("download failed %s: response body %d bytes exceeds the %d limit", "下载失败 %s: 响应体 %d 字节超过上限 %d"), url, n, limit)
+			return nil, Fail("download failed %s: response body %d bytes exceeds the %d limit", url, n, limit)
 		}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, Fail(i18n.T("failed to read response body %s: %v", "读取响应体失败 %s: %v"), url, err)
+		return nil, Fail("failed to read response body %s: %v", url, err)
 	}
 	if len(data) > int(limit) {
-		return nil, Fail(i18n.T("download failed %s: response body exceeds the %d byte limit (suspected abnormal/malicious URL)", "下载失败 %s: 响应体超过 %d 字节上限（疑似异常/恶意 URL）"), url, limit)
+		return nil, Fail("download failed %s: response body exceeds the %d byte limit (suspected abnormal/malicious URL)", url, limit)
 	}
 	return data, nil
 }
@@ -228,7 +226,7 @@ func headerMapArg(args map[string]any, key string) (map[string]string, *Result) 
 		}
 		return out, nil
 	default:
-		return nil, Fail(i18n.T("%s parameter must be a key-value mapping", "%s 参数应为键值映射"), key)
+		return nil, Fail("%s parameter must be a key-value mapping", key)
 	}
 }
 

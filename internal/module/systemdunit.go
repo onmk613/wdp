@@ -5,7 +5,6 @@ import (
 	"os"
 	"strings"
 
-	"wdp/internal/i18n"
 	"wdp/internal/render"
 	"wdp/internal/shellquote"
 )
@@ -25,26 +24,26 @@ func (m *SystemdUnitModule) Name() string { return "systemd_unit" }
 
 // Desc 模块说明。
 func (m *SystemdUnitModule) Desc() string {
-	return i18n.T("deploy systemd unit files and manage service state", "部署 systemd unit 文件并管理服务状态")
+	return "deploy systemd unit files and manage service state"
 }
 
 // Params 参数文档。
 func (m *SystemdUnitModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "unit 文件名（basename，如 myapp.service）"},
-		{Name: "content", Type: "string", Desc: "unit 文件字面量内容（与 src 二选一，不渲染模板）"},
-		{Name: "src", Type: "string", Desc: "本地 unit 模板路径（内容含 {{ 时经渲染引擎渲染）"},
-		{Name: "dest_dir", Type: "string", Default: "/etc/systemd/system", Desc: "unit 部署目录"},
-		{Name: "state", Type: "string", Desc: "started/stopped/restarted/reloaded（可选）"},
-		{Name: "enabled", Type: "bool", Desc: "是否开机自启（可选）"},
-		{Name: "daemon_reload", Type: "bool", Default: "true", Desc: "unit 文件变更后执行 systemctl daemon-reload"},
+		{Name: "name", Type: "string", Desc: "unit file name (basename, e.g. myapp.service)"},
+		{Name: "content", Type: "string", Desc: "unit file literal content (mutually exclusive with src, not templated; omit both for state-only management)"},
+		{Name: "src", Type: "string", Desc: "local unit template path (rendered by the engine when the content contains {{)"},
+		{Name: "dest_dir", Type: "string", Default: "/etc/systemd/system", Desc: "unit deploy directory"},
+		{Name: "state", Type: "string", Desc: "started/stopped/restarted/reloaded (optional)"},
+		{Name: "enabled", Type: "bool", Desc: "enable on boot (optional)"},
+		{Name: "daemon_reload", Type: "bool", Default: "true", Desc: "run systemctl daemon-reload after unit file changes"},
 	}
 }
 
 // Example 示例任务。
 func (m *SystemdUnitModule) Example() string {
-	return `# 部署并启动服务（内容变更自动 daemon-reload）
-- name: 部署 myapp 服务
+	return `# deploy and start the service (auto daemon-reload on content change)
+- name: deploy the myapp service
   become: true
   systemd_unit:
     name: myapp.service
@@ -60,8 +59,8 @@ func (m *SystemdUnitModule) Example() string {
     state: started
     enabled: true
 
-# 模板渲染部署（src 含 {{ .env }} 等变量时自动渲染）
-- name: 部署渲染后的 unit
+# template-rendered deploy (src containing {{ .env }} etc. is rendered automatically)
+- name: deploy the rendered unit
   become: true
   systemd_unit:
     name: worker.service
@@ -71,24 +70,24 @@ func (m *SystemdUnitModule) Example() string {
 }
 
 // Run 执行 unit 部署与服务管理。
-func (m *SystemdUnitModule) Run(rc *RunContext, args map[string]any, free string) *Result {
+func (m *SystemdUnitModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	name, ok := argStr(args, "name")
 	if !ok || name == "" {
-		return Fail("%s", i18n.T("systemd_unit requires a name parameter (unit file basename, e.g. myapp.service)", "systemd_unit 需要 name 参数（unit 文件 basename，如 myapp.service）"))
+		return Fail("%s", "systemd_unit requires a name parameter (unit file basename, e.g. myapp.service)")
 	}
 	if strings.Contains(name, "/") {
-		return Fail("%s", i18n.T("name must be a basename (no /); use dest_dir for the directory", "name 必须是 basename（不含 /），目录用 dest_dir 指定"))
+		return Fail("%s", "name must be a basename (no /); use dest_dir for the directory")
 	}
 	content, hasContent := argStr(args, "content")
 	src, hasSrc := argStr(args, "src")
-	if hasContent == hasSrc {
-		return Fail("%s", i18n.T("content and src are mutually exclusive", "content 与 src 必须二选一"))
+	if hasContent && hasSrc {
+		return Fail("%s", "content and src are mutually exclusive")
 	}
 	if hasContent && content == "" {
-		return Fail("%s", i18n.T("content must not be empty (an empty rendered unit file would break systemd)", "content 不能为空（模板渲染为空的 unit 文件会导致 systemd 不可用）"))
+		return Fail("%s", "content must not be empty (an empty rendered unit file would break systemd)")
 	}
 	if hasSrc && src == "" {
-		return Fail("%s", i18n.T("src must not be empty", "src 不能为空"))
+		return Fail("%s", "src must not be empty")
 	}
 	destDir, _ := argStr(args, "dest_dir")
 	if destDir == "" {
@@ -99,23 +98,29 @@ func (m *SystemdUnitModule) Run(rc *RunContext, args map[string]any, free string
 		switch state {
 		case "started", "stopped", "restarted", "reloaded":
 		default:
-			return Fail(i18n.T("unsupported state %q (options: started/stopped/restarted/reloaded)", "不支持的 state %q（可选: started/stopped/restarted/reloaded）"), state)
+			return Fail("unsupported state %q (options: started/stopped/restarted/reloaded)", state)
 		}
 	}
 	enabled, hasEnabled := argBool(args, "enabled")
+	// 纯状态管理（无 content/src）必须至少给出 state 或 enabled，
+	// 否则任务无事可做（历史上这里误判成 content/src 互斥，杀伤 handler 场景）
+	if !hasContent && !hasSrc && !hasState && !hasEnabled {
+		return Fail("%s", "nothing to manage: provide content/src to deploy a unit, or state/enabled to manage service state")
+	}
 	daemonReload, hasDR := argBool(args, "daemon_reload")
 	if !hasDR {
 		daemonReload = true
 	}
 
-	// 组装 unit 内容：content 字面量；src 本地文件（含 {{ 时渲染）
+	// 组装 unit 内容：content 字面量；src 本地文件（含 {{ 时渲染）；
+	// 两者都缺省 = 纯状态管理（不部署文件，handler/卸载场景），data 为 nil
 	var data []byte
 	if hasContent {
 		data = []byte(content)
-	} else {
+	} else if hasSrc {
 		raw, err := os.ReadFile(resolveLocal(rc, src))
 		if err != nil {
-			return Fail(i18n.T("failed to read unit template: %v", "读取 unit 模板失败: %v"), err)
+			return Fail("failed to read unit template: %v", err)
 		}
 		text := string(raw)
 		if strings.Contains(text, "{{") {
@@ -125,26 +130,31 @@ func (m *SystemdUnitModule) Run(rc *RunContext, args map[string]any, free string
 			}
 			rendered, err := eng.Render(text, rc.Vars)
 			if err != nil {
-				return Fail(i18n.T("unit template rendering failed: %v", "unit 模板渲染失败: %v"), err)
+				return Fail("unit template rendering failed: %v", err)
 			}
 			text = rendered
 		}
 		data = []byte(text)
 	}
+	deployFile := data != nil
 
 	if out, bad := rc.exec("command -v systemctl >/dev/null 2>&1"); bad != nil {
 		return bad
 	} else if out.Code != 0 {
-		return Fail("%s", i18n.T("target machine does not have systemctl installed (V1 only supports systemd)", "目标机未安装 systemctl（V1 仅支持 systemd）"))
+		return Fail("%s", "target machine does not have systemctl installed (V1 only supports systemd)")
 	}
 
 	dest := strings.TrimSuffix(destDir, "/") + "/" + name
 
 	// check 模式：文件部分由 putFile 预估，服务部分只探测返回预估
 	if rc.CheckMode {
-		fileChanged, fileRes := putFile(rc, data, dest, 0o644, false, true, "", "")
-		if fileRes != nil && fileRes.Failed {
-			return fileRes
+		var fileChanged bool
+		var fileRes *Result
+		if deployFile {
+			fileChanged, fileRes = putFile(rc, data, dest, 0o644, false, true, "", "")
+			if fileRes != nil && fileRes.Failed {
+				return fileRes
+			}
 		}
 		if fileRes == nil {
 			fileRes = &Result{}
@@ -156,12 +166,12 @@ func (m *SystemdUnitModule) Run(rc *RunContext, args map[string]any, free string
 		would := fileChanged || svcWould
 		var actions []string
 		if fileChanged {
-			actions = append(actions, "unit 文件将写入"+boolTo(daemonReload && fileChanged, "并 daemon-reload", ""))
+			actions = append(actions, "unit file would be written"+boolTo(daemonReload && fileChanged, " and daemon-reload", ""))
 		}
 		actions = append(actions, svcActions...)
-		msg := fmt.Sprintf(i18n.T("[check] %s no change", "[check] %s 无变化"), name)
+		msg := fmt.Sprintf("[check] %s no change", name)
 		if would {
-			msg = fmt.Sprintf("[check] %s: %s", name, joinCN(actions))
+			msg = fmt.Sprintf("[check] %s: %s", name, joinWords(actions))
 		}
 		var diffLines []string
 		if fileRes.Diff != "" {
@@ -171,23 +181,27 @@ func (m *SystemdUnitModule) Run(rc *RunContext, args map[string]any, free string
 		return &Result{Changed: would, Msg: msg, Diff: joinLines(diffLines)}
 	}
 
-	// 文件落盘：幂等 + 备份 + 回滚登记全由 putFile 承担
-	fileChanged, res := putFile(rc, data, dest, 0o644, false, true, "", "")
-	if res != nil {
-		return res
+	// 文件落盘：幂等 + 备份 + 回滚登记全由 putFile 承担（纯状态管理跳过）
+	var fileChanged bool
+	var res *Result
+	if deployFile {
+		fileChanged, res = putFile(rc, data, dest, 0o644, false, true, "", "")
+		if res != nil {
+			return res
+		}
 	}
 	changed := false
 	var actions []string
 	if fileChanged {
 		changed = true
-		actions = append(actions, "已写入 unit 文件")
+		actions = append(actions, "wrote unit file")
 		if daemonReload {
 			if out, bad := rc.exec("systemctl daemon-reload"); bad != nil {
 				return bad
 			} else if out.Code != 0 {
-				return Fail(i18n.T("systemctl daemon-reload failed: %s", "systemctl daemon-reload 失败: %s"), firstLine(out.Stderr))
+				return Fail("systemctl daemon-reload failed: %s", firstLine(out.Stderr))
 			}
-			actions = append(actions, "已 daemon-reload")
+			actions = append(actions, "daemon-reload done")
 		}
 	}
 
@@ -200,9 +214,9 @@ func (m *SystemdUnitModule) Run(rc *RunContext, args map[string]any, free string
 		changed = true
 		actions = append(actions, svcActions...)
 	}
-	msg := fmt.Sprintf(i18n.T("%s no change", "%s 无变化"), name)
+	msg := fmt.Sprintf("%s no change", name)
 	if changed {
-		msg = fmt.Sprintf("%s: %s", name, joinCN(actions))
+		msg = fmt.Sprintf("%s: %s", name, joinWords(actions))
 	}
 	return &Result{Changed: changed, Msg: msg}
 }
@@ -220,7 +234,7 @@ func estimateUnitState(rc *RunContext, name string, state string, hasState bool,
 		if (state == "started" && !active) || (state == "stopped" && active) ||
 			state == "restarted" || state == "reloaded" {
 			would = true
-			actions = append(actions, "将 "+verbFor(state))
+			actions = append(actions, "would "+verbFor(state))
 			diff = append(diff,
 				fmt.Sprintf("- %s: %s", name, boolTo(active, "active", "inactive")),
 				fmt.Sprintf("+ %s: %s", name, wantState(state)))
@@ -233,7 +247,7 @@ func estimateUnitState(rc *RunContext, name string, state string, hasState bool,
 		}
 		if enabledNow != enabled {
 			would = true
-			actions = append(actions, "将调整自启")
+			actions = append(actions, "would adjust autostart")
 			diff = append(diff,
 				fmt.Sprintf("- %s: %s", name, boolTo(enabledNow, "enabled", "disabled")),
 				fmt.Sprintf("+ %s: %s", name, boolTo(enabled, "enabled", "disabled")))
@@ -274,10 +288,10 @@ func applyUnitState(rc *RunContext, name string, state string, hasState bool, en
 			if out, bad := rc.exec(fmt.Sprintf("systemctl %s %s", verb, shellquote.Quote(name))); bad != nil {
 				return false, nil, bad
 			} else if out.Code != 0 {
-				return false, nil, Fail(i18n.T("systemctl %s %s failed: %s", "systemctl %s %s 失败: %s"), verb, name, firstLine(out.Stderr))
+				return false, nil, Fail("systemctl %s %s failed: %s", verb, name, firstLine(out.Stderr))
 			}
 			changed = true
-			actions = append(actions, "已"+verb)
+			actions = append(actions, verb)
 		}
 	}
 	if hasEnabled {
@@ -293,10 +307,10 @@ func applyUnitState(rc *RunContext, name string, state string, hasState bool, en
 			if out, bad := rc.exec(fmt.Sprintf("systemctl %s %s", verb, shellquote.Quote(name))); bad != nil {
 				return false, nil, bad
 			} else if out.Code != 0 {
-				return false, nil, Fail(i18n.T("systemctl %s %s failed: %s", "systemctl %s %s 失败: %s"), verb, name, firstLine(out.Stderr))
+				return false, nil, Fail("systemctl %s %s failed: %s", verb, name, firstLine(out.Stderr))
 			}
 			changed = true
-			actions = append(actions, "已"+verb)
+			actions = append(actions, verb)
 		}
 	}
 	return changed, actions, nil

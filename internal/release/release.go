@@ -7,13 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/cyphar/filepath-securejoin"
 
-	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -125,7 +124,7 @@ func List(chartFilter string) ([]*Record, error) {
 		}
 		out = append(out, rec)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Time.After(out[j].Time) })
+	slices.SortFunc(out, func(a, b *Record) int { return b.Time.Compare(a.Time) })
 	return out, nil
 }
 
@@ -142,7 +141,7 @@ func Load(id string) (*Record, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf(i18n.T("record %s does not exist", "记录 %s 不存在"), id)
+		return nil, fmt.Errorf("record %s does not exist", id)
 	}
 	var rec Record
 	if err := json.Unmarshal(data, &rec); err != nil {
@@ -177,9 +176,9 @@ func diffValues(prefix string, a, b map[string]any, out *[]string) {
 		bv, bok := b[k]
 		switch {
 		case !aok:
-			*out = append(*out, fmt.Sprintf(i18n.T("+ %s: %v (added)", "+ %s: %v（新增）"), path, bv))
+			*out = append(*out, fmt.Sprintf("+ %s: %v (added)", path, bv))
 		case !bok:
-			*out = append(*out, fmt.Sprintf(i18n.T("- %s: %v (removed)", "- %s: %v（删除）"), path, av))
+			*out = append(*out, fmt.Sprintf("- %s: %v (removed)", path, av))
 		default:
 			am, aIsMap := av.(map[string]any)
 			bm, bIsMap := bv.(map[string]any)
@@ -195,12 +194,12 @@ func diffValues(prefix string, a, b map[string]any, out *[]string) {
 	}
 	// 输出按路径排序：map 迭代顺序随机会让同一对记录的 diff 行序每次不同，
 	// 无法用于稳定的回归对比
-	sort.Slice(*out, func(i, j int) bool {
-		pi := strings.Fields((*out)[i])
-		pj := strings.Fields((*out)[j])
+	slices.SortFunc(*out, func(a, b string) int {
+		pi := strings.Fields(a)
+		pj := strings.Fields(b)
 		if len(pi) > 1 && len(pj) > 1 {
-			return pi[1] < pj[1]
+			return strings.Compare(pi[1], pj[1])
 		}
-		return (*out)[i] < (*out)[j]
+		return strings.Compare(a, b)
 	})
 }

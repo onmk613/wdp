@@ -6,7 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 	"wdp/internal/model"
 )
 
@@ -22,9 +23,9 @@ type statTestEnv struct {
 
 // newStatTestRC 构造带 stat 模拟的执行上下文。
 // Fake 需区分 remoteSize / remoteMode / remoteOwnerGroup 三类 stat 脚本，与 newTestRC 的通用模拟不同。
-func newStatTestRC(t *testing.T) (*RunContext, *connection.Fake, *statTestEnv) {
+func newStatTestRC(t *testing.T) (*RunContext, *fake.Fake, *statTestEnv) {
 	t.Helper()
-	fake := connection.NewFake(&model.Host{Name: "test"})
+	fake := fake.NewFake(&model.Host{Name: "test"})
 	env := &statTestEnv{
 		kinds:  map[string]string{},
 		modes:  map[string]string{},
@@ -33,47 +34,47 @@ func newStatTestRC(t *testing.T) (*RunContext, *connection.Fake, *statTestEnv) {
 		links:  map[string]string{},
 		sums:   map[string]string{},
 	}
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
 		case strings.Contains(s, "sha256sum"):
 			sum, ok := env.sums[extractQuoted(s, "p=")]
 			if !ok {
-				return connection.ExecResult{Code: 3}, nil
+				return conn.ExecResult{Code: 3}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: sum + "  file\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: sum + "  file\n"}, nil
 		case strings.Contains(s, "readlink -f"):
 			target, ok := env.links[extractQuoted(s, "readlink -f -- ")]
 			if !ok {
-				return connection.ExecResult{Code: 1}, nil
+				return conn.ExecResult{Code: 1}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: target + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: target + "\n"}, nil
 		case strings.Contains(s, "stat -c %s"), strings.Contains(s, "stat -f %z"):
 			size, ok := env.sizes[extractQuoted(s, "p=")]
 			if !ok {
-				return connection.ExecResult{Code: 3}, nil
+				return conn.ExecResult{Code: 3}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: strconv.FormatInt(size, 10)}, nil
+			return conn.ExecResult{Code: 0, Stdout: strconv.FormatInt(size, 10)}, nil
 		case strings.Contains(s, "stat -c '%U %G'"):
 			og, ok := env.owners[extractQuoted(s, "p=")]
 			if !ok {
-				return connection.ExecResult{Code: 3}, nil
+				return conn.ExecResult{Code: 3}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: og + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: og + "\n"}, nil
 		case strings.Contains(s, "stat -c %a"), strings.Contains(s, "stat -f %Lp"):
 			mode, ok := env.modes[extractQuoted(s, "p=")]
 			if !ok {
-				return connection.ExecResult{Code: 3}, nil
+				return conn.ExecResult{Code: 3}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: mode}, nil
+			return conn.ExecResult{Code: 0, Stdout: mode}, nil
 		case strings.Contains(s, "[ -L"):
 			kind := env.kinds[extractQuoted(s, "p=")]
 			if kind == "" {
 				kind = "missing"
 			}
-			return connection.ExecResult{Code: 0, Stdout: kind + "\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: kind + "\n"}, nil
 		default:
-			return connection.ExecResult{}, nil
+			return conn.ExecResult{}, nil
 		}
 	}
 	rc := &RunContext{

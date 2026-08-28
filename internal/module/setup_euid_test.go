@@ -7,14 +7,14 @@ package module
 import (
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
 )
 
 func setupWithOutput(t *testing.T, out string) map[string]any {
 	t.Helper()
 	rc, f := newTestRC(t)
-	f.ExecFn = func(connection.ExecRequest) (connection.ExecResult, error) {
-		return connection.ExecResult{Code: 0, Stdout: out}, nil
+	f.ExecFn = func(conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: out}, nil
 	}
 	res := (&SetupModule{}).Run(rc, nil, "")
 	if res.Failed {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
 )
 
 // TestAptUpgradableProbe apt 探测：模拟 "1 upgraded" 汇总行 → 有升级；
@@ -14,22 +14,22 @@ import (
 // apt 自身非零（源/网络错误）→ 报错而非静默判"无升级"。
 func TestAptUpgradableProbe(t *testing.T) {
 	rc, f := newTestRC(t)
-	f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
 		case strings.Contains(s, "dpkg-query"):
-			return connection.ExecResult{Code: 0}, nil // 已安装
+			return conn.ExecResult{Code: 0}, nil // 已安装
 		case strings.Contains(s, "apt-get -s"):
 			if strings.Contains(s, "err-pkg") {
-				return connection.ExecResult{Code: 100, Stderr: "E: Unable to fetch…\n"}, nil
+				return conn.ExecResult{Code: 100, Stderr: "E: Unable to fetch…\n"}, nil
 			}
 			if strings.Contains(s, "old-pkg") {
 				// apt-get 模拟成功且无升级（退出码 0，汇总行 N=0）
-				return connection.ExecResult{Code: 0, Stdout: "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"}, nil
+				return conn.ExecResult{Code: 0, Stdout: "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"}, nil
 			}
-			return connection.ExecResult{Code: 0, Stdout: "1 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: "1 upgraded, 0 newly installed, 0 to remove and 1 not upgraded.\n"}, nil
 		default:
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		}
 	}
 	p := &pkgManager{kind: "apt", family: "debian"}
@@ -58,21 +58,21 @@ func TestAptUpgradableProbe(t *testing.T) {
 func TestPackageLatestIdempotent(t *testing.T) {
 	rc, f := newTestRC(t)
 	upgraded := false
-	f.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
 		case strings.Contains(s, "os-release"):
-			return connection.ExecResult{Code: 0, Stdout: "id=debian\nlike=\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: "id=debian\nlike=\n"}, nil
 		case strings.Contains(s, "dpkg-query"):
-			return connection.ExecResult{Code: 0}, nil // 已安装
+			return conn.ExecResult{Code: 0}, nil // 已安装
 		case strings.Contains(s, "apt-get -s"):
 			// 真实脚本：awk 遇 "0 upgraded" 行不 exit（退出码 0）；">0 upgraded" 才 exit 1
-			return connection.ExecResult{Code: 0, Stdout: "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"}, nil
+			return conn.ExecResult{Code: 0, Stdout: "0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n"}, nil
 		case strings.Contains(s, "apt-get install"):
 			upgraded = true
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		default:
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		}
 	}
 	m := &PackageModule{}
@@ -86,13 +86,13 @@ func TestPackageLatestIdempotent(t *testing.T) {
 	if upgraded {
 		t.Fatal("无可用升级不应调用 upgrade")
 	}
-	if !strings.Contains(res.Msg, "已是最新") {
+	if !strings.Contains(res.Msg, "already latest") {
 		t.Fatalf("应说明已是最新: %s", res.Msg)
 	}
 	// check 模式应与实跑一致：同样"已是最新"且 Changed=false
 	rc.CheckMode = true
 	res = m.Run(rc, map[string]any{"name": "nginx", "state": "latest"}, "")
-	if res.Changed || !strings.Contains(res.Msg, "已是最新") {
+	if res.Changed || !strings.Contains(res.Msg, "already latest") {
 		t.Fatalf("check 模式应与实跑判定一致: %+v %s", res.Changed, res.Msg)
 	}
 }

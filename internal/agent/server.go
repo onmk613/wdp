@@ -1,65 +1,93 @@
-// Package agent 是部署在目标机上的常驻 HTTP 服务，
-// 为控制端提供 exec / 上传 / 下载原语。
-//
-// 认证两种模式（启动参数选择）：
-//   - mTLS：--ca/--cert/--key 双向证书认证
-//   - 无认证：默认仅允许监听回环地址；对外（非回环）监听且未配置 mTLS 时
-//     拒绝启动，除非显式 --allow-no-auth（仅限可信内网）
 package agent
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
-	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"regexp"
-	"runtime"
-	"strings"
 	"sync/atomic"
 	"time"
 
-	"wdp/internal/ca"
-	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
-// Version 是 agent 协议版本。
-const Version = "1"
+// Version 是 agent 协议版本
+const Version = "v1"
 
-// Server 是 agent HTTP 服务。
+// Server 是 agent HTTP 服务配置
 type Server struct {
-	Listen      string
+	Listen string
+
+	// CA file
+	tlsCAFile   string
+	tlsCertFile string
+	tlsKeyFile  string
+
+	// 无认证启动, 一般纯内网安全环境
+	allowNoAuth bool
+	// 是否自清理
+	cleanupOnShutdown atomic.Bool
+	// 空闲退出时长
+	idleTimeout time.Duration
+	// 最后一次已认证请求完成时刻（UnixNano）
+	lastActive atomic.Int64
+	// 当前正在请求的已认证请求数（空闲判定须为零，防长任务被误杀）
+	inflight atomic.Int64
+
+	// 请求体上限字节
+	maxRequestBody int64
+	// middlewares 是外部追加的中间件
 	middlewares []func(http.Handler) http.Handler
 
-	maxRequestBody    int64 // 请求体上限字节（0 = 默认 64MiB；--max-request-mb 可配）
-	tlsCAFile         string
-	tlsCertFile       string
-	tlsKeyFile        string
-	clientCAs         *x509.CertPool
-	clientPins        map[string]struct{} // 客户端证书 SHA256 指纹准许名单（空 = 不限制）
-	allowNoAuth       bool                // 显式允许无认证对外监听（仅限可信内网）
-	cleanupOnShutdown atomic.Bool
-	httpSrv           *http.Server
+	// material 是当前 mTLS 材料（服务端证书对 + 客户端 CA 池 + 指纹名单），
+	// 整体原子换入换出：/cert 热更新时构造新对象 Store，握手中途不受影响
+	material atomic.Pointer[tlsMaterial]
+
+	// 服务实例（serve 写入、关停路径读取，原子避免竞态）
+	httpSrv     atomic.Pointer[http.Server]
+	selfBin     string
+	systemdUnit string
+
+	// 日志内核（initLogger 装配）：stderr + 可选文件 + 内存环形缓冲，
+	// 控制端经 GET /logs 拉取近期日志（详见 log.go）
+	logger   *slog.Logger
+	logRing  *ringWriter
+	sink     *logSink
+	levelVar *slog.LevelVar
 }
 
-// New 创建 agent 服务。
+// tlsMaterial 是一次生效的 mTLS 材料快照
+type tlsMaterial struct {
+	cert      tls.Certificate     // 服务端证书对
+	leaf      *x509.Certificate   // 服务端证书叶子（/health 到期时间用）
+	clientCAs *x509.CertPool      // 客户端证书 CA 池
+	pins      map[string]struct{} // 客户端指纹准许名单（nil = 不限制）
+}
+
+// New 创建 agent 服务（listen 为空时回环默认地址）
 func New(listen string) *Server {
-	return &Server{Listen: listen}
+	s := &Server{}
+	if listen == "" {
+		listen = "127.0.0.1:7602"
+	}
+	s.Listen = listen
+	s.cleanupOnShutdown.Store(true)
+	exe, _ := os.Executable()
+	s.selfBin = exe
+	s.systemdUnit = "wdp-agent"
+	s.initLogger()
+	return s
 }
 
-// SetMaxRequestBody 设置请求体上限（MiB；<=0 回退内置默认 64MiB）。
+// SetMaxRequestBody 设置请求体上限（MiB；<=0 回退内置默认 64MiB）
 func (s *Server) SetMaxRequestBody(mb int64) {
 	if mb <= 0 {
 		mb = 64
@@ -67,7 +95,7 @@ func (s *Server) SetMaxRequestBody(mb int64) {
 	s.maxRequestBody = mb << 20
 }
 
-// maxRequestBodyLimit 返回生效的请求体上限（字节）。
+// maxRequestBodyLimit 返回生效的请求体上限（字节）
 func (s *Server) maxRequestBodyLimit() int64 {
 	if s.maxRequestBody > 0 {
 		return s.maxRequestBody
@@ -75,77 +103,53 @@ func (s *Server) maxRequestBodyLimit() int64 {
 	return 64 << 20
 }
 
-// Use 追加 middleware。
+// Use 追加 middleware
 func (s *Server) Use(mw func(http.Handler) http.Handler) {
 	s.middlewares = append(s.middlewares, mw)
 }
 
-// ConfigureAuth 配置 mTLS 认证：ca 校验客户端证书、cert/key 为服务端证书。
-func (s *Server) ConfigureAuth(ca, cert, key string) error {
-	if ca != "" || cert != "" || key != "" {
-		if ca == "" || cert == "" || key == "" {
-			return errors.New(i18n.T("mTLS requires --ca/--cert/--key all together", "mTLS 需要 --ca/--cert/--key 同时提供"))
-		}
-		pool := x509.NewCertPool()
-		caPEM, err := os.ReadFile(ca)
-		if err != nil {
-			return fmt.Errorf(i18n.T("failed to read CA certificate: %w", "读取 CA 证书失败: %w"), err)
-		}
-		if !pool.AppendCertsFromPEM(caPEM) {
-			return fmt.Errorf(i18n.T("failed to parse CA certificate: %s", "解析 CA 证书失败: %s"), ca)
-		}
-		s.clientCAs = pool
-		s.tlsCAFile, s.tlsCertFile, s.tlsKeyFile = ca, cert, key
-	}
-	return nil
+// CleanupOnShutdown 设置关停时是否自清理
+func (s *Server) CleanupOnShutdown(on bool) {
+	s.cleanupOnShutdown.Store(on)
 }
 
-// CleanupOnShutdown 设置收到 /shutdown 时删除自身二进制与 mTLS 材料文件
-// （证书/私钥启动时已载入内存，删除不影响运行；push 临时 agent 场景防残留）。
-func (s *Server) CleanupOnShutdown(on bool) { s.cleanupOnShutdown.Store(on) }
-
-// AllowNoAuth 显式允许无认证对外监听（仅限可信内网场景；
-// 默认拒绝，防止 agent 的 root 命令执行原语被同网段任意访问）。
-func (s *Server) AllowNoAuth(on bool) { s.allowNoAuth = on }
-
-// PinClientFingerprints 设置客户端证书指纹准许名单（精确吊销：
-// 从名单移除指纹并重启 agent 即可拒收某张证书，无需换 CA）。
-// 空切片 = 不限制（任何 CA 签发的有效客户端证书均可）。指纹格式见 ca.ParsePin。
-func (s *Server) PinClientFingerprints(pins []string) error {
-	if len(pins) == 0 {
-		s.clientPins = nil
-		return nil
-	}
-	m := make(map[string]struct{}, len(pins))
-	for _, p := range pins {
-		norm, err := ca.ParsePin(p)
-		if err != nil {
-			return err
-		}
-		m[norm] = struct{}{}
-	}
-	s.clientPins = m
-	return nil
+// AllowNoAuth 设置是否允许无认证启动
+func (s *Server) AllowNoAuth(on bool) {
+	s.allowNoAuth = on
 }
 
-// Handler 返回最终 HTTP 处理器。
-func (s *Server) Handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", s.handleHealth)
-	mux.HandleFunc("POST /exec", s.handleExec)
-	mux.HandleFunc("PUT /file", s.handleUpload)
-	mux.HandleFunc("GET /file", s.handleDownload)
-	mux.HandleFunc("POST /archive", s.handleArchive)
-	mux.HandleFunc("POST /shutdown", s.handleShutdown)
+// SetIdleTimeout 设置空闲自动退出周期
+func (s *Server) SetIdleTimeout(d time.Duration) {
+	if d <= 0 {
+		d = 0
+	}
+	s.idleTimeout = d
+}
 
-	var h http.Handler = mux
-	if s.clientPins != nil {
-		h = s.pinMiddleware(h)
+// SetSystemdUnit 设置远程清理 all 时停用的 systemd 单元名
+func (s *Server) SetSystemdUnit(unit string) {
+	if unit == "" {
+		unit = "wdp-agent"
 	}
-	for i := len(s.middlewares) - 1; i >= 0; i-- {
-		h = s.middlewares[i](h)
-	}
-	return h
+	s.systemdUnit = unit
+}
+
+// trackActivity 维护空闲判定的两个信号：请求开始/完成时间戳与在途计数。
+// 仅已通过外层认证的请求会走到这里（/health 直接放行不计时）。
+func (s *Server) trackActivity(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.idleTimeout <= 0 || r.URL.Path == "/health" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		s.lastActive.Store(time.Now().UnixNano())
+		s.inflight.Add(1)
+		defer func() {
+			s.inflight.Add(-1)
+			s.lastActive.Store(time.Now().UnixNano())
+		}()
+		next.ServeHTTP(w, r)
+	})
 }
 
 // pinMiddleware 校验客户端证书指纹在准许名单内（mTLS 模式生效）。
@@ -162,48 +166,82 @@ func (s *Server) pinMiddleware(next http.Handler) http.Handler {
 		}
 		sum := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
 		fp := hex.EncodeToString(sum[:])
-		if _, ok := s.clientPins[fp]; !ok && r.URL.Path != "/health" {
-			http.Error(w, "client certificate not pinned", http.StatusForbidden)
-			return
+		if pins := s.material.Load().pins; pins != nil {
+			if _, ok := pins[fp]; !ok && r.URL.Path != "/health" {
+				http.Error(w, "client certificate not pinned", http.StatusForbidden)
+				return
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// ListenAndServe 启动服务（阻塞）。mTLS 配置后以 TLS 启动。
+// ListenAndServe 启动服务（阻塞）。mTLS 配置后以 TLS 启动（证书对经
+// 回调读取当前材料快照，/cert 热更新无需重启）。
 // 对外（非回环）监听且未配置 mTLS 时拒绝启动，除非 AllowNoAuth。
 func (s *Server) ListenAndServe() error {
+	ln, err := net.Listen("tcp", s.Listen)
+	if err != nil {
+		return err
+	}
+	return s.serve(ln)
+}
+
+// serve 在给定监听器上服务（阻塞；ListenAndServe 的可测内核：
+// 测试可自建监听器断言空闲退出等行为）。返回 http.ErrServerClosed
+// 表示被 /shutdown 或空闲看门狗正常关停。
+func (s *Server) serve(ln net.Listener) error {
 	if err := s.checkAuthSafety(); err != nil {
 		return err
 	}
-	s.httpSrv = &http.Server{
-		Addr:              s.Listen,
+	idle := "off"
+	if s.idleTimeout > 0 {
+		idle = s.idleTimeout.String()
+	}
+	s.logInfo("wdp agent %s listening on %s (mtls=%v, idle_timeout=%s)", Version, s.Listen, s.material.Load() != nil, idle)
+	srv := &http.Server{
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	if s.clientCAs != nil {
-		s.httpSrv.TLSConfig = &tls.Config{
-			ClientCAs:  s.clientCAs,
-			ClientAuth: tls.RequireAndVerifyClientCert,
-			MinVersion: tls.VersionTLS12,
-		}
-		return s.httpSrv.ListenAndServeTLS(s.tlsCertFile, s.tlsKeyFile)
+	s.httpSrv.Store(srv)
+	go s.watchIdle()
+	if s.material.Load() != nil {
+		srv.TLSConfig = s.MTLSConfig()
+		// 证书经 GetCertificate 回调提供，无需文件路径
+		return srv.ServeTLS(ln, "", "")
 	}
-	return s.httpSrv.ListenAndServe()
+	return srv.Serve(ln)
 }
 
-// checkAuthSafety 拒绝不安全的启动配置：/exec、/file 提供的是 root 级
-// 远程命令执行与任意文件读写，对外监听必须配置 mTLS。
-// 回环监听视为仅本机可访问，允许无认证（便于本地调试）。
-func (s *Server) checkAuthSafety() error {
-	if s.clientCAs != nil || s.allowNoAuth || IsLoopbackListen(s.Listen) {
-		return nil
+// watchIdle 空闲看门狗：周期检查 idleExpired，触发即走 /shutdown 同款
+// 关停路径（push agent 带 --cleanup-on-shutdown，自然完成自删）。
+func (s *Server) watchIdle() {
+	if s.idleTimeout <= 0 {
+		return
 	}
-	return fmt.Errorf("%s",
-		i18n.T("refusing to start: listening on "+s.Listen+" without auth exposes remote code execution; "+
-			"configure mTLS (--ca/--cert/--key), or pass --allow-no-auth on a trusted network",
-			"拒绝启动："+s.Listen+" 对外监听且未配置认证，等于暴露远程命令执行；"+
-				"请配置 mTLS（--ca/--cert/--key），可信内网可显式 --allow-no-auth"))
+	s.lastActive.Store(time.Now().UnixNano())
+	tick := max(min(s.idleTimeout/4, 30*time.Second), 100*time.Millisecond)
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	for range t.C {
+		if s.idleExpired(time.Now()) {
+			s.logInfo("idle for over %s with no authenticated request, exiting (cleanup-on-shutdown=%v)", s.idleTimeout, s.cleanupOnShutdown.Load())
+			s.initiateShutdown(shutdownReq{}, s.cleanupOnShutdown.Load())
+			return
+		}
+	}
+}
+
+// idleExpired 空闲判定：无在途已认证请求，且距最后一次完成超过周期。
+// 在途保护——数小时的长任务执行期间不判空闲（否则击杀在途任务）。
+func (s *Server) idleExpired(now time.Time) bool {
+	if s.idleTimeout <= 0 {
+		return false
+	}
+	if s.inflight.Load() > 0 {
+		return false
+	}
+	return now.Sub(time.Unix(0, s.lastActive.Load())) >= s.idleTimeout
 }
 
 // IsLoopbackListen 判断监听地址是否仅绑定回环（localhost / 127.0.0.1 / ::1）。
@@ -220,263 +258,19 @@ func IsLoopbackListen(listen string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-type healthResp struct {
-	Ok       bool   `json:"ok"`
-	Version  string `json:"version"`
-	Hostname string `json:"hostname"`
-	Goos     string `json:"goos"`
-	Arch     string `json:"arch"`
-	Pid      int    `json:"pid"`
+// checkAuthSafety 拒绝不安全的启动配置：/exec、/file 提供的是 root 级
+// 远程命令执行与任意文件读写，对外监听必须配置 mTLS。
+// 回环监听视为仅本机可访问，允许无认证（便于本地调试）。
+func (s *Server) checkAuthSafety() error {
+	if s.material.Load() != nil || s.allowNoAuth || IsLoopbackListen(s.Listen) {
+		return nil
+	}
+	return fmt.Errorf("%s",
+		"refusing to start: listening on "+s.Listen+" without auth exposes remote code execution; "+
+			"configure mTLS (--ca/--cert/--key), or pass --allow-no-auth on a trusted network")
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	host, _ := os.Hostname()
-	writeJSON(w, http.StatusOK, healthResp{
-		Ok: true, Version: Version, Hostname: host,
-		Goos: runtime.GOOS, Arch: runtime.GOARCH, Pid: os.Getpid(),
-	})
-}
-
-type execReq struct {
-	Script         string            `json:"script"`
-	Stdin          string            `json:"stdin"`
-	Env            map[string]string `json:"env"`
-	TimeoutMs      int64             `json:"timeout_ms"`
-	Cwd            string            `json:"cwd"`
-	BecomeUser     string            `json:"become_user"`
-	BecomePassword string            `json:"become_password"`
-}
-
-type execResp struct {
-	Code      int    `json:"code"`
-	Stdout    string `json:"stdout"`
-	Stderr    string `json:"stderr"`
-	TimedOut  bool   `json:"timed_out"`
-	Cancelled bool   `json:"cancelled"` // 控制端取消/断开（区别于超时）
-}
-
-func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
-	var req execReq
-	if err := json.NewDecoder(io.LimitReader(r.Body, s.maxRequestBodyLimit())).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, execResp{Code: -1, Stderr: i18n.T("request body parse failed: ", "请求体解析失败: ") + err.Error()})
-		return
-	}
-	if req.Script == "" {
-		writeJSON(w, http.StatusBadRequest, execResp{Code: -1, Stderr: i18n.T("script is empty", "script 为空")})
-		return
-	}
-
-	// 提权：sudo -u（-n 免密；-S 密码经 stdin 传递，不进命令行，ps 不可见）
-	script, stdin := becomeScript(req.Script, req.BecomeUser, req.BecomePassword, req.Stdin)
-
-	ctx := r.Context()
-	var cancel context.CancelFunc
-	if req.TimeoutMs > 0 {
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
-		defer cancel()
-	}
-	// become 时环境变量写进脚本内部（sudo 默认 env_reset 会剥夺外层注入的
-	// 变量；脚本内 export 在 sudo 之后执行不受影响），非 become 走进程环境
-	env := os.Environ()
-	if req.BecomeUser != "" && len(req.Env) > 0 {
-		var sb strings.Builder
-		for k, v := range req.Env {
-			if envKeyRe.MatchString(k) {
-				fmt.Fprintf(&sb, "export %s=%s\n", k, shellquote.Quote(v))
-			}
-		}
-		script = sb.String() + script
-	} else {
-		for k, v := range req.Env {
-			env = append(env, k+"="+v)
-		}
-	}
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
-	setPgrp(cmd) // 独立进程组：超时整组击杀（sudo 提权的 root 子进程不残留）
-	cmd.Cancel = func() error { return killGroup(cmd) }
-	cmd.WaitDelay = 3 * time.Second
-	cmd.Dir = req.Cwd
-	if cmd.Dir == "" {
-		cmd.Dir = "/"
-	}
-	cmd.Env = env
-	if stdin != "" {
-		cmd.Stdin = strings.NewReader(stdin)
-	}
-	// 输出上限（每流 1MiB，与控制端截断对齐）：防高输出命令把常驻 agent 撑爆
-	var stdout, stderr capWriter
-	stdout.limit, stderr.limit = maxExecOutputBytes, maxExecOutputBytes
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-
-	resp := execResp{Stdout: stdout.String(), Stderr: stderr.String()}
-	if stdout.truncated {
-		resp.Stdout += "\n[wdp-agent] " + i18n.T("stdout exceeded 1MiB and was truncated", "stdout 超过 1MiB 已截断")
-	}
-	if stderr.truncated {
-		resp.Stderr += "\n[wdp-agent] " + i18n.T("stderr exceeded 1MiB and was truncated", "stderr 超过 1MiB 已截断")
-	}
-	if ctxErr := ctx.Err(); ctxErr != nil && err != nil {
-		resp.Code = -1
-		if errors.Is(ctxErr, context.DeadlineExceeded) {
-			resp.TimedOut = true
-			resp.Stderr += "\n[wdp-agent] " + i18n.T("execution timed out and was terminated", "执行超时被终止")
-		} else {
-			// 控制端主动取消/断开不是超时，错误归因不能混为一谈
-			resp.Cancelled = true
-			resp.Stderr += "\n[wdp-agent] " + i18n.T("client cancelled or disconnected", "客户端已取消/断开")
-		}
-	} else if err != nil {
-		resp.Code = 1
-		if ee, ok := err.(*exec.ExitError); ok {
-			resp.Code = ee.ExitCode()
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		http.Error(w, i18n.T("missing path parameter", "缺少 path 参数"), http.StatusBadRequest)
-		return
-	}
-	mode := fs.FileMode(0o644)
-	if m := r.URL.Query().Get("mode"); m != "" {
-		var n int64
-		if _, err := fmt.Sscanf(m, "%o", &n); err == nil {
-			mode = fs.FileMode(n).Perm()
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		http.Error(w, i18n.T("failed to create directory: ", "创建目录失败: ")+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".wdp-agent-*")
-	if err != nil {
-		http.Error(w, i18n.T("failed to create temp file: ", "创建临时文件失败: ")+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-
-	// 请求体上限（与 /exec 一致）：无上限 io.Copy 会被大 body 写满磁盘
-	limit := s.maxRequestBodyLimit()
-	n, err := io.Copy(tmp, io.LimitReader(r.Body, limit+1))
-	if err != nil {
-		_ = tmp.Close()
-		http.Error(w, i18n.T("write failed: ", "写入失败: ")+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if n > limit {
-		_ = tmp.Close()
-		http.Error(w, i18n.T("request body exceeds limit", "请求体超过上限"), http.StatusRequestEntityTooLarge)
-		return
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		http.Error(w, i18n.T("failed to set permissions: ", "设置权限失败: ")+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		http.Error(w, i18n.T("failed to close file: ", "关闭文件失败: ")+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		http.Error(w, i18n.T("failed to write to disk: ", "落盘失败: ")+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
-func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Query().Get("path")
-	if path == "" {
-		http.Error(w, i18n.T("missing path parameter", "缺少 path 参数"), http.StatusBadRequest)
-		return
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		http.Error(w, i18n.T("failed to open file: ", "打开文件失败: ")+err.Error(), http.StatusNotFound)
-		return
-	}
-	defer f.Close()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	_, _ = io.Copy(w, f)
-}
-
-// handleArchive 原生解压归档（Go 实现，不依赖目标机 tar/unzip/xz；
-// 旧版 agent 无此端点，控制端收到 404 后回退 shell 命令）。
-func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
-	src := r.URL.Query().Get("src")
-	dest := r.URL.Query().Get("dest")
-	if src == "" || dest == "" {
-		http.Error(w, i18n.T("missing src/dest parameter", "缺少 src/dest 参数"), http.StatusBadRequest)
-		return
-	}
-	files, err := ExtractArchive(src, dest)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "files": files})
-}
-
-// handleShutdown 优雅退出；cleanupOnShutdown 时删除自身二进制。
-func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	go func() {
-		time.Sleep(200 * time.Millisecond) // 等响应送达
-		if s.cleanupOnShutdown.Load() {
-			s.cleanupFiles()
-		}
-		if s.httpSrv != nil {
-			// 限时等待活动连接排空：无限期 Shutdown 会被长任务永远挂住，
-			// 超时后强制关停全部连接（自清理后进程退出，残留任务随之终结）
-			sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = s.httpSrv.Shutdown(sctx)
-			_ = s.httpSrv.Close()
-		}
-		// httpSrv 为 nil（Handler 被外部嵌入测试）时仅作罢，不退出进程
-	}()
-}
-
-// isPushArtifact 判断路径是否 push 临时 agent 的自举产物
-// （临时目录下 .wdp-agent-* 前缀）。cleanupFiles 只清理这类文件，
-// 防止常驻 agent 误传 --cleanup-on-shutdown 时删掉共享 CA / 安装的二进制。
-func isPushArtifact(p string) bool {
-	if p == "" {
-		return false
-	}
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return false
-	}
-	tmp, err := filepath.Abs(os.TempDir())
-	if err != nil {
-		return false
-	}
-	return strings.HasPrefix(abs, tmp+string(filepath.Separator)) &&
-		strings.HasPrefix(filepath.Base(abs), ".wdp-agent-")
-}
-
-// cleanupFiles 删除自身二进制与 mTLS 材料文件（cleanupOnShutdown 用；
-// 证书/私钥启动时已载入内存，删除不影响运行）。仅清理 push 自举产物
-// 路径（见 isPushArtifact），共享文件一律不动。
-func (s *Server) cleanupFiles() {
-	if len(os.Args) > 0 && isPushArtifact(os.Args[0]) {
-		_ = os.Remove(os.Args[0])
-	}
-	for _, f := range []string{s.tlsCAFile, s.tlsCertFile, s.tlsKeyFile} {
-		if isPushArtifact(f) {
-			_ = os.Remove(f)
-		}
-	}
-}
-
-// envKeyRe 是允许注入的环境变量键白名单（与 sshconn 一致）。
+// envKeyRe 是允许注入的环境变量键白名单（与 sshc 一致）。
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 // maxExecOutputBytes 是单条 exec 每个输出流的缓冲上限（与控制端

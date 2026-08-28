@@ -54,7 +54,7 @@ func TestGetURLDownloadAndIdempotent(t *testing.T) {
 	srv2 := newHTTPServer(t, "artifact-bytes-v2")
 	defer srv2.Close()
 	r3 := mod.Run(rc, map[string]any{"url": srv2.URL + "/app.tgz", "dest": "/opt/fresh.tgz", "sha256": sum}, "")
-	if !r3.Failed || !strings.Contains(r3.Msg, "校验失败") {
+	if !r3.Failed || !strings.Contains(r3.Msg, "checksum mismatch") {
 		t.Fatalf("内容漂移应校验失败: %+v", r3)
 	}
 	if _, exists := fake.File("/opt/fresh.tgz"); exists {

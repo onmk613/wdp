@@ -25,6 +25,9 @@ var (
 )
 
 // T 按当前语言返回对应内容。en/zh 两个文案必须在同一调用点成对给出。
+// 适用范围：帮助信息与命令参数介绍（cobra Short/Long/Example 与 flag
+// 注册的帮助文案）、内置模块介绍（modules 命令）。日志与执行输出等
+// 机器/运行时产物固定英文，不走本地化。
 func T(en, zh string) string {
 	mu.Lock()
 	cur := lang

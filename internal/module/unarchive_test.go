@@ -8,19 +8,20 @@ import (
 	"strings"
 	"testing"
 
-	"wdp/internal/connection"
+	"wdp/internal/conn"
+	"wdp/internal/conn/fake"
 )
 
 // arcShell 模拟 unarchive 模块用到的远端 sh 命令（存在性/解压/清理）。
 type arcShell struct {
-	fake  *connection.Fake
+	fake  *fake.Fake
 	files map[string]bool // exec 层可见的远端路径
 	dirs  map[string]bool
 	cmds  map[string]bool // 目标机可用命令（unzip 等）
 	runs  []string        // 变更类命令记录（解压/建目录/清理）
 }
 
-func newUnarchiveRC(t *testing.T) (*RunContext, *connection.Fake, *arcShell) {
+func newUnarchiveRC(t *testing.T) (*RunContext, *fake.Fake, *arcShell) {
 	t.Helper()
 	rc, fake := newTestRC(t)
 	sh := &arcShell{
@@ -29,43 +30,43 @@ func newUnarchiveRC(t *testing.T) (*RunContext, *connection.Fake, *arcShell) {
 		dirs:  map[string]bool{},
 		cmds:  map[string]bool{"tar": true},
 	}
-	fake.ExecFn = func(req connection.ExecRequest) (connection.ExecResult, error) {
+	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
 		case strings.Contains(s, "command -v unzip"):
 			if sh.cmds["unzip"] {
-				return connection.ExecResult{Code: 0}, nil
+				return conn.ExecResult{Code: 0}, nil
 			}
-			return connection.ExecResult{Code: 1}, nil
+			return conn.ExecResult{Code: 1}, nil
 		case strings.Contains(s, "[ -L"): // probePath
 			path := extractQuoted(s, "p=")
 			switch {
 			case sh.dirs[path]:
-				return connection.ExecResult{Code: 0, Stdout: "directory\n"}, nil
+				return conn.ExecResult{Code: 0, Stdout: "directory\n"}, nil
 			case sh.files[path]:
-				return connection.ExecResult{Code: 0, Stdout: "file\n"}, nil
+				return conn.ExecResult{Code: 0, Stdout: "file\n"}, nil
 			default:
-				return connection.ExecResult{Code: 0, Stdout: "missing\n"}, nil
+				return conn.ExecResult{Code: 0, Stdout: "missing\n"}, nil
 			}
 		case strings.Contains(s, "[ -e"):
 			path := firstQuoted(s)
 			if sh.files[path] || sh.dirs[path] {
-				return connection.ExecResult{Code: 0}, nil
+				return conn.ExecResult{Code: 0}, nil
 			}
-			return connection.ExecResult{Code: 1}, nil
+			return conn.ExecResult{Code: 1}, nil
 		case strings.Contains(s, "mkdir -p"):
 			sh.dirs[firstQuoted(s)] = true
 			sh.runs = append(sh.runs, s)
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "tar -x"), strings.Contains(s, "unzip -o"):
 			sh.runs = append(sh.runs, s)
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "rm -f"):
 			delete(sh.files, firstQuoted(s))
 			sh.runs = append(sh.runs, s)
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		default:
-			return connection.ExecResult{Code: 0}, nil
+			return conn.ExecResult{Code: 0}, nil
 		}
 	}
 	return rc, fake, sh
@@ -124,13 +125,13 @@ func TestUnarchiveLocalTar(t *testing.T) {
 	if r.Failed || r.Changed {
 		t.Fatalf("creates 已存在应跳过: %+v", r)
 	}
-	if !strings.Contains(r.Msg, "跳过") {
+	if !strings.Contains(r.Msg, "skipped") {
 		t.Fatalf("消息 %q", r.Msg)
 	}
 }
 
 // tempArcPath 取出上传的临时归档路径。
-func tempArcPath(fake *connection.Fake) string {
+func tempArcPath(fake *fake.Fake) string {
 	for p := range fake.Files {
 		if strings.HasPrefix(p, "/tmp/.wdp-arc-") {
 			return p
@@ -164,7 +165,7 @@ func TestUnarchiveRemoteSrcZip(t *testing.T) {
 
 	// 远端归档缺失应失败
 	r = mod.Run(rc, map[string]any{"src": "/tmp/none.zip", "dest": "/srv/x", "remote_src": true}, "")
-	if !r.Failed || !strings.Contains(r.Msg, "不存在") {
+	if !r.Failed || !strings.Contains(r.Msg, "not found") {
 		t.Fatalf("归档缺失应失败: %+v", r)
 	}
 }
@@ -208,7 +209,7 @@ func TestUnarchiveCheckMode(t *testing.T) {
 	if r.Failed {
 		t.Fatalf("check 失败: %s", r.Msg)
 	}
-	if !r.Changed || !strings.Contains(r.Msg, "[check] 将解压") {
+	if !r.Changed || !strings.Contains(r.Msg, "[check] would extract") {
 		t.Fatalf("check 预估: %+v", r)
 	}
 	if r.Diff == "" || !strings.Contains(r.Diff, "+ /opt/app") {
@@ -262,7 +263,7 @@ func TestUnarchiveValidation(t *testing.T) {
 	if r := mod.Run(rc, map[string]any{"dest": "/x"}, ""); !r.Failed {
 		t.Fatal("缺 src 应失败")
 	}
-	if r := mod.Run(rc, map[string]any{"src": "a.rar", "dest": "/x"}, ""); !r.Failed || !strings.Contains(r.Msg, "格式") {
+	if r := mod.Run(rc, map[string]any{"src": "a.rar", "dest": "/x"}, ""); !r.Failed || !strings.Contains(r.Msg, "unrecognized archive format") {
 		t.Fatalf("未知格式: %+v", r)
 	}
 	// dest 已存在但不是目录
@@ -270,14 +271,14 @@ func TestUnarchiveValidation(t *testing.T) {
 	sh2.files["/opt/app"] = true
 	dir := writeArchive(t, "a.tar", "x")
 	r := mod.Run(rc2, map[string]any{"src": dir + "/a.tar", "dest": "/opt/app"}, "")
-	if !r.Failed || !strings.Contains(r.Msg, "不是目录") {
+	if !r.Failed || !strings.Contains(r.Msg, "not a directory") {
 		t.Fatalf("dest 非目录: %+v", r)
 	}
 }
 
 // nativeConn 包装假连接并实现 NativeExtractor（模拟 agent/push 通道）。
 type nativeConn struct {
-	*connection.Fake
+	*fake.Fake
 	calls []string
 	err   error
 }
@@ -309,7 +310,7 @@ func TestUnarchiveNativePreferred(t *testing.T) {
 			t.Fatalf("不应触发 shell 解压: %v", sh.runs)
 		}
 	}
-	if !strings.Contains(r.Msg, "原生") {
+	if !strings.Contains(r.Msg, "(native)") {
 		t.Fatalf("消息应标注原生: %q", r.Msg)
 	}
 }
@@ -320,7 +321,7 @@ func TestUnarchiveNativeUnsupportedFallsBack(t *testing.T) {
 	rc, fake, sh := newUnarchiveRC(t)
 	sh.cmds["unzip"] = true
 	rc.BaseDir = dir
-	nc := &nativeConn{Fake: fake, err: connection.ErrNativeUnsupported}
+	nc := &nativeConn{Fake: fake, err: conn.ErrNativeUnsupported}
 	rc.Conn = nc
 
 	r := (&UnarchiveModule{}).Run(rc, map[string]any{"src": "app.zip", "dest": "/opt/app"}, "")
@@ -343,11 +344,11 @@ func TestUnarchiveNativeErrorFailsLoud(t *testing.T) {
 	dir := writeArchive(t, "app.tar.gz", "bytes")
 	rc, fake, sh := newUnarchiveRC(t)
 	rc.BaseDir = dir
-	nc := &nativeConn{Fake: fake, err: errors.New("归档损坏")}
+	nc := &nativeConn{Fake: fake, err: errors.New("corrupt archive")}
 	rc.Conn = nc
 
 	r := (&UnarchiveModule{}).Run(rc, map[string]any{"src": "app.tar.gz", "dest": "/opt/app"}, "")
-	if !r.Failed || !strings.Contains(r.Msg, "归档损坏") {
+	if !r.Failed || !strings.Contains(r.Msg, "corrupt archive") {
 		t.Fatalf("真实失败应上抛: %+v", r)
 	}
 	for _, s := range sh.runs {

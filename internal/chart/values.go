@@ -5,11 +5,12 @@ package chart
 import (
 	"errors"
 	"fmt"
+	"maps"
+	"os"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
-	"wdp/internal/i18n"
 )
 
 // Merge 按 Helm 语义深合并：override 写入 base 之上。
@@ -17,9 +18,7 @@ import (
 // 返回新 map，不修改入参。
 func Merge(base, override map[string]any) map[string]any {
 	out := make(map[string]any, len(base)+len(override))
-	for k, v := range base {
-		out[k] = v
-	}
+	maps.Copy(out, base)
 	for k, v := range override {
 		if v == nil {
 			delete(out, k)
@@ -106,7 +105,7 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 			next, ok := cur[s.key].(map[string]any)
 			if !ok {
 				if v, exists := cur[s.key]; exists && v != nil {
-					return nil, fmt.Errorf(i18n.T("--set %q: %q is already a non-map value (%T)", "--set %q: %q 已是非 map 值（%T）"), path, s.key, cur[s.key])
+					return nil, fmt.Errorf("--set %q: %q is already a non-map value (%T)", path, s.key, cur[s.key])
 				}
 				next = map[string]any{}
 				cur[s.key] = next
@@ -119,7 +118,7 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 		if v, ok := cur[s.key].([]any); ok {
 			list = v
 		} else if v, exists := cur[s.key]; exists && v != nil {
-			return nil, fmt.Errorf(i18n.T("--set %q: %q is already a non-list value (%T)", "--set %q: %q 已是非 list 值（%T）"), path, s.key, cur[s.key])
+			return nil, fmt.Errorf("--set %q: %q is already a non-list value (%T)", path, s.key, cur[s.key])
 		}
 		for len(list) <= s.idx {
 			list = append(list, nil)
@@ -132,7 +131,7 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 		next, ok := list[s.idx].(map[string]any)
 		if !ok {
 			if v := list[s.idx]; v != nil {
-				return nil, fmt.Errorf(i18n.T("--set %q: %s[%d] is already a non-map value (%T)", "--set %q: %s[%d] 已是非 map 值（%T）"), path, s.key, s.idx, v)
+				return nil, fmt.Errorf("--set %q: %s[%d] is already a non-map value (%T)", path, s.key, s.idx, v)
 			}
 			next = map[string]any{}
 			list[s.idx] = next
@@ -146,7 +145,7 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 // parsePath 解析 "a.b[0].c" 为段序列。
 func parsePath(path string) ([]pathSeg, error) {
 	if path == "" {
-		return nil, errors.New(i18n.T("empty path", "空路径"))
+		return nil, errors.New("empty path")
 	}
 	var segs []pathSeg
 	i, n := 0, len(path)
@@ -157,32 +156,32 @@ func parsePath(path string) ([]pathSeg, error) {
 		}
 		key := path[start:i]
 		if key == "" {
-			return nil, fmt.Errorf(i18n.T("invalid path %q (empty key segment)", "非法路径 %q（空键段）"), path)
+			return nil, fmt.Errorf("invalid path %q (empty key segment)", path)
 		}
 		s := pathSeg{key: key}
 		if i < n && path[i] == '[' {
 			j := strings.IndexByte(path[i:], ']')
 			if j < 0 {
-				return nil, fmt.Errorf(i18n.T("invalid path %q (missing ])", "非法路径 %q（缺 ]）"), path)
+				return nil, fmt.Errorf("invalid path %q (missing ])", path)
 			}
 			v, err := strconv.Atoi(path[i+1 : i+j])
 			if err != nil || v < 0 {
-				return nil, fmt.Errorf(i18n.T("invalid index %q", "非法下标 %q"), path[i+1:i+j])
+				return nil, fmt.Errorf("invalid index %q", path[i+1:i+j])
 			}
 			s.idx, s.hasID = v, true
 			i += j + 1
 			if i < n && path[i] == '[' {
-				return nil, fmt.Errorf(i18n.T("path %q contains multi-level indices, not supported yet", "路径 %q 含多级下标，暂不支持"), path)
+				return nil, fmt.Errorf("path %q contains multi-level indices, not supported yet", path)
 			}
 		}
 		segs = append(segs, s)
 		if i < n {
 			if path[i] != '.' {
-				return nil, fmt.Errorf(i18n.T("invalid path %q (expected . or [)", "非法路径 %q（期望 . 或 [）"), path)
+				return nil, fmt.Errorf("invalid path %q (expected . or [)", path)
 			}
 			i++
 			if i == n {
-				return nil, fmt.Errorf(i18n.T("invalid path %q (ends with .)", "非法路径 %q（以 . 结尾）"), path)
+				return nil, fmt.Errorf("invalid path %q (ends with .)", path)
 			}
 		}
 	}
@@ -194,11 +193,11 @@ func parsePath(path string) ([]pathSeg, error) {
 func ParseSet(pair string) (string, any, error) {
 	k, v, ok := strings.Cut(pair, "=")
 	if !ok {
-		return "", nil, fmt.Errorf(i18n.T("--set requires k=v form, got %q", "--set 需要 k=v 形式，实际 %q"), pair)
+		return "", nil, fmt.Errorf("--set requires k=v form, got %q", pair)
 	}
 	k = strings.TrimSpace(k)
 	if k == "" {
-		return "", nil, fmt.Errorf(i18n.T("--set key is empty: %q", "--set 键为空: %q"), pair)
+		return "", nil, fmt.Errorf("--set key is empty: %q", pair)
 	}
 	return k, inferType(v), nil
 }
@@ -246,4 +245,29 @@ func LoadValuesYAML(data []byte) (map[string]any, error) {
 		return map[string]any{}, nil
 	}
 	return m, nil
+}
+
+// BuildValues 构建最终 values：默认 values → 依序合并 -f 文件 → --set 参数。
+// 默认 values 先深拷贝：--set 的点路径写入是原地写，浅拷贝会让嵌套 map
+// 与 c.Values 共享引用而污染 chart 默认值。
+func (c *Chart) BuildValues(files []string, sets []string) (map[string]any, error) {
+	merged := deepCopyValues(c.Values)
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read values file: %w", err)
+		}
+		ov, err := LoadValuesYAML(data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse %s: %w", f, err)
+		}
+		merged = Merge(merged, ov)
+	}
+	for _, s := range sets {
+		var err error
+		if merged, err = ApplySet(merged, s); err != nil {
+			return nil, err
+		}
+	}
+	return merged, nil
 }

@@ -1,28 +1,3 @@
-// Package config 提供 wdp.cfg（TOML）全局默认配置。
-//
-// 优先级：CLI flag 显式值 > wdp.cfg > 内置默认值。
-// 查找顺序：--config 指定路径（不存在则报错）> 当前目录 wdp.cfg（不存在则静默跳过）。
-//
-// 示例 wdp.cfg：
-//
-//	[inventory]
-//	path = "inventory.yaml"
-//
-//	[run]
-//	forks = 20
-//	task_timeout = 300
-//
-//	[ssh]
-//	user = "root"
-//	connect_timeout = 10
-//	host_key_check = true
-//
-//	[agent]
-//	port = 7602
-//
-//	[transfer]
-//	max_download_mb = 2048   # get_url 下载响应体上限（MiB）
-//	max_extract_mb = 2048    # chart tgz 解包总量上限（MiB）
 package config
 
 import (
@@ -32,7 +7,18 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// Config 是全局配置（零值安全：零值即内置默认行为）。
+// DefaultPath 是默认配置文件路径
+const DefaultPath = "wdp.cfg"
+
+// current 声明一个配置存储器
+var current = Config{}
+
+// Current 返回当前生效的配置
+func Current() *Config { return &current }
+
+// Reset 恢复内置默认配置
+func Reset() { current = Config{} }
+
 type Config struct {
 	Inventory InventoryConfig
 	Run       RunConfig
@@ -42,23 +28,18 @@ type Config struct {
 	Transfer  TransferConfig
 }
 
-// TransferConfig 是文件传输相关上限。
-type TransferConfig struct {
-	MaxDownloadMB int `toml:"max_download_mb"` // get_url 下载响应体上限 MiB（0 = 默认 2048）
-	MaxExtractMB  int `toml:"max_extract_mb"`  // chart tgz 解包总量上限 MiB（0 = 默认 2048）
-}
-
 // InventoryConfig 是 inventory 相关默认值。
 type InventoryConfig struct {
-	Path string `toml:"path"` // 默认 inventory 文件路径
+	Path string `toml:"path"`
 }
 
 // RunConfig 是执行相关默认值。
 type RunConfig struct {
-	Forks       int  `toml:"forks"`        // 并发主机数（0 = 默认 5）
-	Timeout     int  `toml:"timeout"`      // 全局墙钟超时秒（0 = 不限）
-	TaskTimeout int  `toml:"task_timeout"` // 任务默认超时秒（0 = 不限）
-	Verbose     bool `toml:"verbose"`      // 逐主机全量输出
+	Forks       int    `toml:"forks"`        // 并发主机数（0 = 默认 5）
+	Timeout     int    `toml:"timeout"`      // 全局墙钟超时秒（0 = 不限）
+	TaskTimeout int    `toml:"task_timeout"` // 任务默认超时秒（0 = 不限）
+	Verbose     bool   `toml:"verbose"`      // 逐主机全量输出
+	Conn        string `toml:"conn"`         // 默认连接类型（空 = ssh；可选 push/agent/local，fleet 级默认）
 }
 
 // OutputConfig 是输出相关默认值。
@@ -76,18 +57,18 @@ type SSHConfig struct {
 
 // AgentConfig 是 agent 连接默认值。
 type AgentConfig struct {
-	Port          int `toml:"port"`            // 默认 agent 端口（0 = 7602）
-	CertRotateMin int `toml:"cert_rotate_min"` // push 临时证书轮换周期分钟（0 = 不轮换）
+	Port           int               `toml:"port"`             // 默认 agent 端口（0 = 7602）
+	CertRotateMin  int               `toml:"cert_rotate_min"`  // push 临时证书轮换周期分钟（0 = 不轮换）
+	PushCADir      string            `toml:"push_ca_dir"`      // push 会话 CA 落盘目录（空 = ~/.wdp/push-ca）
+	IdleTimeoutMin int               `toml:"idle_timeout_min"` // push 临时 agent 空闲自动退出分钟（0 = 默认 60；<0 = 禁用）
+	PushBinary     map[string]string `toml:"push_binary"`      // push 自举按目标平台的二进制表（键 linux_amd64/linux_arm64/…，值为本机预编译产物路径）
 }
 
-// DefaultPath 是默认配置文件路径（当前目录）。
-const DefaultPath = "wdp.cfg"
-
-// current 是已加载的配置（零值 = 未加载/全部内置默认）。
-var current = Config{}
-
-// Current 返回当前生效的配置。
-func Current() *Config { return &current }
+// TransferConfig 是文件传输相关上限。
+type TransferConfig struct {
+	MaxDownloadMB int `toml:"max_download_mb"` // get_url 下载响应体上限 MiB（0 = 默认 2048）
+	MaxExtractMB  int `toml:"max_extract_mb"`  // chart tgz 解包总量上限 MiB（0 = 默认 2048）
+}
 
 // Load 加载配置文件。path 不存在且 required=false 时静默返回（保持内置默认）。
 func Load(path string, required bool) error {
@@ -97,13 +78,13 @@ func Load(path string, required bool) error {
 			return nil
 		}
 		if os.IsNotExist(err) {
-			return fmt.Errorf("配置文件不存在: %s", path)
+			return fmt.Errorf("config file not found: %s", path)
 		}
 		return err
 	}
 	cfg := Config{}
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
-		return fmt.Errorf("解析配置 %s 失败: %w", path, err)
+		return fmt.Errorf("failed to parse config %s: %w", path, err)
 	}
 	current = cfg
 	return nil
@@ -125,6 +106,15 @@ func (c *Config) SSHUser() string {
 		return c.SSH.User
 	}
 	return "root"
+}
+
+// DefaultConn 归一化默认连接类型（[run].conn，空 = ssh）。未知值原样返回，
+// 由连接工厂报 unknown connection type（错误信息含合法选项）。
+func (c *Config) DefaultConn() string {
+	if c.Run.Conn != "" {
+		return c.Run.Conn
+	}
+	return "ssh"
 }
 
 // SSHConnectTimeout 归一化连接超时秒。
@@ -161,6 +151,13 @@ func (c *Config) AgentCertRotateMin() int {
 	return 0
 }
 
+// AgentIdleTimeoutMin 归一化 push 临时 agent 空闲自动退出周期（分钟）。
+// 原样透传给连接层归一化（0 = 内置默认 60；<0 = 禁用）——控制端崩溃/
+// 断网时 Close 不被调用，远端 agent 依赖该周期兜底自清理。
+func (c *Config) AgentIdleTimeoutMin() int {
+	return c.Agent.IdleTimeoutMin
+}
+
 // InventoryPath 归一化默认 inventory 路径。
 func (c *Config) InventoryPath() string {
 	if c.Inventory.Path != "" {
@@ -177,18 +174,11 @@ func (c *Config) Color() bool {
 	return true
 }
 
-// MaxDownloadBytes 归一化 get_url 下载响应体上限（字节；0 = 内置默认 2GiB）。
-func (c *Config) MaxDownloadBytes() int64 {
-	if c.Transfer.MaxDownloadMB > 0 {
-		return int64(c.Transfer.MaxDownloadMB) << 20
-	}
-	return 2 << 30
-}
-
-// MaxExtractBytes 归一化 chart tgz 解包总量上限（字节；0 = 内置默认 2GiB）。
+// MaxExtractBytes 归一化 chart tgz 解包总量上限（字节；0 = chart 包内置
+// 默认 2GiB——上限的内置默认只属于执行方 chart 包，config 只透传文件值）。
 func (c *Config) MaxExtractBytes() int64 {
 	if c.Transfer.MaxExtractMB > 0 {
 		return int64(c.Transfer.MaxExtractMB) << 20
 	}
-	return 2 << 30
+	return 0
 }

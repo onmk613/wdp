@@ -29,7 +29,7 @@ Helm 风格 chart 打包与多环境精准部署。
 go build -o wdp ./cmd/wdp
 
 # 生成的应用包开箱即用（最小骨架 / 全能力参考）
-wdp new myapp --full
+wdp template new myapp --full
 wdp run ./myapp --check --diff -i inventory.yaml
 
 # 本机演练（无需任何远端）
@@ -41,8 +41,7 @@ YAML
 ./wdp adhoc -m shell -a 'uname -a' -i inventory.yaml local
 ```
 
-输出语言默认按时区与 locale 自动检测（中国大陆环境为中文），`--lang en|zh` 或
-环境变量 `WDP_LANG` 可切换——CLI 帮助、`wdp modules` 模块文档与提示文案均为中英双语。
+输出统一为英文（v1 前不引入双语；internal/i18n 包保留，待 v1 后再评估启用）。
 
 ## 连接类型与认证
 
@@ -51,8 +50,8 @@ inventory 主机条目通过 `conn` 选择连接类型：
 | conn | 说明 | 认证 |
 |---|---|---|
 | `ssh`（默认） | 标准 SSH（base64 脚本传输，SFTP 优先/降级 exec 流式） | 认证链：私钥（`key_passphrase` 支持口令）→ ssh-agent → 默认密钥 → `password`/`password_env`（含 keyboard-interactive）；`host_key_check: true` 启用 known_hosts 校验；`become_password` 支持密码 sudo |
-| `agent` | 常驻 HTTP(S) agent 直连 | 无认证（默认仅回环）/ mTLS（`ca_file`+`cert_file`+`key_file`） |
-| `push` | SSH 自举临时 agent：上传自身二进制与会话级临时 mTLS 三件套（一次性 CA，全部主机共享，可配置轮换）→ 远端**真端口**启动（默认 7602，`agent_port` 可指定，占用自动换端口）→ 控制端 HTTPS 直连（不经 SSH 隧道，全程 TLS 加密）→ 结束自删二进制与证书（`keep_agent: true` 保留） | 临时 mTLS（客户端证书即凭证）；自举失败自动回退纯 SSH |
+| `agent` | 常驻 HTTP(S) agent 直连；`wdp agentctl` 运维：`status` 批量巡检证书到期、`logs` 拉取日志、`retire` 远程退役自清理（删二进制/证书材料含 CA、停用 systemd 单元，可指定单元名与额外路径） | 无认证（默认仅回环）/ mTLS（`ca_file`+`cert_file`+`key_file`） |
+| `push` | SSH 自举临时 agent：上传自身二进制与会话级 mTLS 三件套（会话 CA 落盘 `~/.wdp/push-ca` 与 wdp ca 同一套签发逻辑，全部主机共享，可配置轮换）→ 远端**真端口**启动（默认 7602，`agent_port` 可指定，占用自动换端口）→ 控制端 HTTPS 直连（不经 SSH 隧道，全程 TLS 加密）→ 结束自删二进制与证书（`keep_agent: true` 保留）；自举注入空闲超时（默认 60 分钟，`idle_timeout_min` 可调）兜底自清理——控制端崩溃/断网不再残留；agent 断连自动重自举自愈 | 临时 mTLS（客户端证书即凭证）；自举失败自动回退纯 SSH |
 | `local` | 本机执行（演练/CI） | 无（注意：local 通道忽略 become） |
 
 敏感值支持 `env:VAR` 引用或 `*_env` 独立键（`password_env`/`become_password_env`…），避免 inventory 明文。
@@ -64,23 +63,24 @@ inventory 主机条目通过 `conn` 选择连接类型：
 
 ```sh
 # mTLS 模式（自建 CA）
-export WDP_CA_PASSPHRASE=...                    # 可选：CA 私钥加密口令
-wdp ca init --dir ./ca --passphrase             # CA（10 年，PathLen=0，私钥加密落盘）
-wdp ca issue --dir ./ca --name 10.0.0.14        # 服务端证书（SAN=IP，默认 90 天）
+wdp ca init ./ca                                # CA（默认 1 天，PathLen=0；常驻机群 --days N 放宽；--name 自定义文件名）
+wdp ca issue --dir ./ca --name 10.0.0.14 --san 10.0.0.14  # 服务端证书（SAN 一律显式给）
                                                 # 多地址主机：--san 追加（可多次），renew 全量继承
-wdp ca issue --dir ./ca --name ctl --client     # 控制端客户端证书（输出 SHA256 指纹）
+wdp ca issue --dir ./ca --name ctl --profile client  # 控制端客户端证书（输出 SHA256 指纹）
 ssh target 'wdp agent --listen 0.0.0.0:7602 --ca ca.crt --cert 10.0.0.14.crt \
      --key 10.0.0.14.key --pin-client-fp sha256:<ctl指纹> &'
 ```
 
 **证书安全设计**：
 
-- **CA 私钥加密存储**：`--passphrase`（或 `WDP_CA_PASSPHRASE` 环境变量），
-  PBKDF2-SHA256 六十万轮 + AES-256-GCM；CA 设 `PathLen=0` 禁止签发中间 CA
-- **短周期 + 续期**：叶子证书默认 90 天（`--days` 可调），到期前
-  `wdp ca renew --name <n>` 原地续期（保留 SAN/EKU/私钥；`--new-key` 换钥即吊销旧证书）
+- **短有效期取代静态加密**：CA 默认 1 天（远程部署的短周期信任根，泄漏窗口极小），
+  私钥明文 0600 / 目录 0700，无口令加密负担；CA 设 `PathLen=0` 禁止签发中间 CA
+- **短周期 + 续期**：叶子证书默认 30 天（`--days` 可调，不超 CA 到期），到期前
+  `wdp ca renew <证书路径> --days N` 原地延期（增量语义、字段全继承、旧件自动备份）；`--new-key` 换钥即吊销旧证书；
+  现阶段常驻 agent 换证 = `ca issue` 重签 + scp + 重启（远程热换方案规划中），
+  `/health` 的 `cert_not_after` 字段可批量巡检剩余有效期
 - **指纹准许名单（精确吊销）**：agent `--pin-client-fp`（可多次）只接受名单内指纹的
-  客户端证书——撤权 = 删指纹重启 agent，无需换 CA 重发全部证书
+  客户端证书——撤权 = 删指纹重启 agent，无需换 CA 重发全部证书；
 - **信任系统证书池**：控制端不配 `ca_file` 时走 HTTPS + 系统池（agent 用公网 CA
   证书如 Let's Encrypt 的场景）；`insecure_skip_verify: true` 为明确声明的降级
 
@@ -104,10 +104,36 @@ production:
 - **主机选择语法**：`all` / 组名 / 主机名；逗号联合 `web1,web2`；`!` 排除
   `all,!web1`；`:&` 交集 `webservers:&production`（可链式）；通配 `web*`、`db?`
   （同时匹配主机名与组名）
+- **内联主机（免 inventory 文件）**：`wdp run ./myapp --hosts '10.8.2.101-104'`
+  直接以 IP 表达式为目标（`host`、`host:port`、IPv4 尾段区间
+  `10.8.2.101-104` / `10.8.2.101-10.8.2.104`，跨度上限 256；与显式 `-i`
+  互斥）。内联清单只有 `all` 组——**全部 play 一律作用于全部内联主机**
+  （play 的 `hosts: 组名` 被忽略；多组编排请用 inventory 文件）。首次连接
+  仍需 `wdp scan-ssh --from-hosts '10.8.2.101-104'` 采集指纹。生产环境建议
+  仍以 inventory 为唯一事实源（release 记录、drift、组变量的载体）。
 - **运行时动态分组**：`group_by` 模块按 facts 建组（见下文模块表），
   后续 play 用 `hosts: os_*` 通配引用——条件分组的正确位置是运行时而非 inventory 声明期
 
 同一主机在多个组定义时按组名字典序确定性合并（后者覆盖连接参数，变量深合并）。
+
+**inventory 变量覆盖 chart values 的约定（dig 模式）**：组级（`vars:`，含 `all` 组）
+与主机级变量都可用于覆盖 chart values 默认，优先级 `all.vars < 父组 < 子组 < 主机条目
+< chart values`。但键名必须用**独立键**（如 `node_exporter_port`），模板里
+`dig "node_exporter_port" .port .` 变量优先、values 兜底——**同名直碰时 values 恒赢**
+（刻意设计：chart 是产品、values 是参数面，若 inventory 可同名覆盖，
+`wdp template render` 预览（不加载 inventory）就会与实际执行漂移）。
+
+同名碰撞有**运行前预检**：被 values 遮蔽的 inventory 变量会告警并给出修复提示
+（run/drift 都会检查，只圈定本次选中的主机），不再静默失效。确需 ansible 式同名覆盖的
+chart 可在 chart.yaml 显式领取白名单：
+
+```yaml
+inventory_override: [tier]   # 这些 values 键允许 inventory 组/主机同名变量反超
+```
+
+边界：仅顶层 values 域生效（子 chart 作用域不适用，play vars 仍更高）；
+lint 会校验白名单键必须是 values 顶层键；release marker 与 `wdp drift` 的
+values 摘要**不包含**覆盖结果（drift 口径是 chart values 意图，inventory 覆盖是站点层）。
 
 ## Playbook
 
@@ -177,10 +203,50 @@ production:
 `ignore_errors`、`retries`/`delay`、`timeout`（任务超时秒）、`until`、
 `block`/`rescue`/`always`（支持嵌套）、`become`/`become_user`、
 `changed_when`/`failed_when`、`delegate_to`（委托，支持 localhost）、
-`run_once`、`output`/`no_log`（展示控制）、`hook`（生命周期钩子）。
+`run_once`、`output`/`no_log`（展示控制）、`hook`（生命周期钩子）、
+`include`（任务片段，见下）。
 play 级支持 `serial`（数/百分比/列表）与 `strategy` 部署策略。
 
 register 结果在批次间延续（第一批注册的变量第二批可用），loop 注册含 `results` 逐项数组。
+
+### 任务片段 include（文件级拆分，共享变量域）
+
+大 playbook 拆文件不需要子 chart（子 chart 是组件复用，有 Helm 作用域隔离）：
+
+```yaml
+tasks:
+  - include: tasks/smart.yaml        # Load 阶段静态展开（import 语义）
+    when: '{{ .smart }}'             # include 上的 when/tags/become 下沉到
+    tags: [smart]                    # 每个片段任务（when 与片段自身条件 AND）
+```
+
+- 片段相对路径以片段自身目录解析（嵌套 include 逐级相对），深度上限 32 防环
+- 静态展开：`lint`/`render`/`--check` 看到的就是完整任务树，坏路径加载期报错
+- `include` 不支持 `loop`（静态展开无运行期项；循环写在片段内任务上）
+
+### 跨主机事实：set_fact + hostvars（两段式编排）
+
+多主机同服务耦合（etcd 初始集群、主从复制）用"先收集、后配置"：
+
+```yaml
+- name: 收集（每台主机登记自己的事实）
+  hosts: etcd
+  tasks:
+    - set_fact:
+        node_id: '{{ .inventory_hostname | trunc 2 }}'
+
+- name: 配置（渲染时引用全集群事实）
+  hosts: etcd
+  tasks:
+    - template:
+        src: etcd.conf.tpl     # 模板内：{{ range .play_hosts }}{{ (index $.hostvars .).node_id }},{{ end }}
+        dest: /etc/etcd/etcd.conf
+```
+
+边界：`register` 结果只进本机变量域；`set_fact` 同时进控制端 fact store（跨主机可见）。
+`--fact-cache <path>` 可把 facts 持久化为 JSON 跨运行复用（启动加载、结束原子落盘）。
+运行期扩容用 `add_host` 模块注册新主机（可入组），后续 play 的 `hosts:` 与
+`groups`/`hosts`/`hostvars` 即刻可见。
 
 ### 部署策略：金丝雀 / 滚动 / 健康门 / 自动回滚
 
@@ -221,6 +287,8 @@ mychart/
 ├── status.yaml         # 只读状态探测（可选）
 ├── _helpers.tpl        # 命名模板 define/include（父子 chart 合并注册）
 ├── templates/          # 配置文件模板（template 模块 src 引用）
+├── tasks/              # include 任务片段（deploy.yaml 按需静态展开）
+├── files/              # 静态文件（copy src 直接分发，不经模板渲染）
 ├── envs/               # 第 2 层：环境覆盖文件
 │   ├── prod.yaml
 │   └── staging.yaml
@@ -289,13 +357,13 @@ wdp run ./myapp --phase uninstall                   # 卸载并清除 marker
 wdp run ./myapp --check --diff                      # 全相位支持零风险预演 + 内容级差异
 ```
 
-### 生成应用包：wdp new
+### 生成应用包：wdp template new
 
 ```sh
-wdp new myapp                     # 最小骨架：直接填写即可用
-wdp new myapp --full              # 全能力参考：策略/hook/委托/动态分组/子 chart/全部新模块均有示例
-wdp new --module user             # 输出任意内置模块的参数文档与示例任务片段
-wdp modules user                  # 同上（模块详情）
+wdp template new myapp                     # 最小骨架：直接填写即可用
+wdp template new myapp --full              # 全能力参考：策略/hook/委托/动态分组/子 chart/全部新模块均有示例
+wdp template module user             # 输出任意内置模块的参数文档与示例任务片段
+wdp template module user                  # 同上（模块详情）
 ```
 
 生成物是**质量门控**的：`wdp lint` 零错误、`--check` 本机演练通过
@@ -330,8 +398,9 @@ chart.yaml 显式声明 `check_mode: supported` 后才会执行并注入 `WDP_CH
 |---|---|
 | `inventory_hostname` / `group_names` | 自己是谁 / 自己所属组 |
 | `play_hosts` / `play_batch` | 本次 play 全部选中主机 / 当前批次主机（名字列表） |
-| `groups` | `map 组名→成员主机名[]`（含 children 展开，`all`=全部；group_by 动态组同样进入） |
+| `groups` | `map 组名→成员主机名[]`（含 children 展开，`all`=全部；group_by/add_host 动态组同样进入） |
 | `hosts` | `map 主机名→{name,address,port,conn}`：`{{ (index .hosts "web2").address }}` 拿同伴地址 |
+| `hostvars` | `map 主机名→该主机变量域`（inventory 变量 + fact store）：`{{ (index .hostvars "web2").node_id }}` 读同伴事实。可选键用 `dig`：`{{ dig "k" "" (index .hostvars "web2") }}` |
 
 ### 模板函数
 
@@ -348,8 +417,8 @@ labels: {{ to_yaml (dict "app" .app.name "env" .global.env) | nindent 2 }}
 ### 工具链
 
 ```sh
-wdp new <name> [--full|--module m]  # 生成应用包骨架 / 查看模块用法
-wdp template ./mychart -f envs/prod.yaml   # 预览合并 values + 模板渲染 + 任务树
+wdp template new <name> [--full|--module m]  # 生成应用包骨架 / 查看模块用法
+wdp template render ./mychart -f envs/prod.yaml   # 预览合并 values + 模板渲染 + 任务树
 wdp lint ./mychart                          # 结构/模块/引用/模板可渲染校验（含 block 递归、脚本模块）
 wdp package ./mychart -o .                  # 打包 <name>-<version>.tgz（可直接 run）
 wdp run ./mychart-0.1.0.tgz …               # tgz 直接部署
@@ -396,6 +465,8 @@ wdp release diff <id1> <id2>                # 对比两次部署的 values（升
 | `package` | 自动识别 apt/dnf/yum/apk/zypper（读 /etc/os-release） |
 | `service` | systemd 状态与自启管理 |
 | `setup` | 采集 facts（os/hostname/cpus/memory/disk/default_ipv4/euid），自动并入变量域 |
+| `set_fact` | 键值对写入本机变量域 + 控制端 fact store（跨主机经 `.hostvars` 可见） |
+| `add_host` | 运行期注册/更新主机（可入组），后续 play 的 hosts 选择即刻可用 |
 | `user` / `group` | 系统用户/组管理（探测漂移才变更，需 become） |
 | `systemd_unit` | 下发 .service 单元 + daemon-reload + enable/状态管理（复用幂等推送） |
 | `unarchive` | 本地/远端 tar(.gz/.xz)/zip 解包（`creates` 幂等守卫） |
@@ -406,7 +477,7 @@ wdp release diff <id1> <id2>                # 对比两次部署的 values（升
 | `group_by` | 按 facts/变量值动态建组（配合后续 play 的通配 hosts 选择） |
 | （脚本模块） | chart `modules/` 目录自带可执行模块，参数走 WDP_* 环境变量 |
 
-`wdp modules` 列出全部；`wdp modules <名>`（或 `wdp new --module <名>`）输出参数文档与示例
+`wdp template module` 列出全部；`wdp template module <名>`（或 `wdp template module <名>`）输出参数文档与示例
 ——文档来自模块自描述（`UsageProvider` 接口），与实现同源不会漂移。
 
 模块在**控制端**实现、仅依赖 exec/upload/download 三原语，
@@ -416,17 +487,23 @@ wdp release diff <id1> <id2>                # 对比两次部署的 values（升
 
 ```
 wdp run <playbook|chart目录|tgz> [-i inventory（可多次）] [-f values] [--set k=v]
+       [--hosts 内联主机（IP/区间，免 inventory 文件）]
        [--limit 模式] [-t tags] [--check] [--diff] [--list-hosts] [--start-at-task 任务]
-       [--phase deploy|uninstall|status] [-y]
+       [--phase deploy|uninstall|status] [--fact-cache facts.json] [-y]
 wdp adhoc -m shell -a 'uptime' [--format '{{.stdout}}'] [--check|--diff] <主机模式>
-wdp new <name> [--full] [--module m] [--dir d]
-wdp template / lint / package <chart>
+wdp drift <chart目录|tgz> [主机模式]    # 只读漂移巡检：marker values 摘要 vs 当前合并 values
+wdp template new <name> [--full] [--module m] [--dir d]
+wdp template render / lint / package <chart>
 wdp ca init / issue / renew  # mTLS 证书工具（加密 CA / 短周期 / 续期）
 wdp scan-ssh <主机模式>            # 采集 SSH 主机指纹到 known_hosts
 wdp release list / show / diff
 wdp agent [--ca/--cert/--key] [--pin-client-fp <指纹>]
-wdp modules [模块名]          # 模块列表/详情（版本信息：wdp --version）
+wdp template module [模块名]          # 模块列表/详情（版本信息：wdp --version）
 ```
+
+`wdp drift` 逐主机比对 release marker 与当前 values 摘要，状态为
+`OK / DRIFTED / OUTDATED / NOT-DEPLOYED / UNREACHABLE`；存在 DRIFTED/UNREACHABLE
+时退出非零（可直接进 CI）。只读不收敛——纠偏动作是 `wdp run` 幂等重部署。
 
 全局 flag（所有子命令继承）：`--config`、`--inventory/-i`（可多次）、`--forks`、
 `--timeout`（全局墙钟）、`--task-timeout`（任务默认超时）、
@@ -458,6 +535,8 @@ known_hosts = ""             # 空 = ~/.ssh/known_hosts
 
 [agent]
 port = 7602                  # agent/push 默认端口
+idle_timeout_min = 60        # push 临时 agent 空闲自清理分钟（0 = 默认 60；<0 禁用）；
+                             # 控制端崩溃/断网时远端 agent 依赖该周期兜底自删
 ```
 
 ## 超时与大规模主机
@@ -493,13 +572,13 @@ internal/
   connection/           Connection 接口 + Manager（建连限流）
     sshconn/            SSH（认证链/known_hosts/密码 sudo/SFTP）
     agentconn/          HTTP(S) agent 客户端（mTLS）
-    pushagent/          临时 agent 自举（临时 mTLS + 证书轮换 + 自清理 + 回退）
+    push/              临时 agent 自举（临时 mTLS + 证书轮换 + 自清理 + 回退）
     localconn/          本机执行
   agent/                agent 服务端（mTLS/shutdown/自清理）
   ca/                   自建 CA 与证书签发
   release/              部署记录
   report/               控制台输出（级别体系/展示控制/diff 着色）+ JSON + 格式化
-  skel/                 wdp new 应用包生成器（内嵌骨架 + 质量门测试）
+  skel/                 wdp template new 应用包生成器（内嵌骨架 + 质量门测试）
   cli/                  cobra 命令树
 ```
 
@@ -522,8 +601,13 @@ internal/
 - `wait_for` 的端口探测为控制端视角（目标机本地防火墙视角可能不同；需要目标机视角时用 shell + until）
 - `package` 的 `state: latest` 无法精确判定"是否真的升级"，视为 changed
 - `--set` 暂不支持多级下标（`a[0][1]`）
-- 规划：agent 常驻漂移检测（marker values 摘要对比已就绪）、内容寻址分发缓存、
-  远程 chart 仓库、stdout 流式回传、真机集成测试矩阵（SSH 认证链×sudo×mTLS×push 自举）
+- 漂移检测为"检测 + 报告 + 人工收敛"（`wdp drift` → `wdp run`），**刻意不做自动纠偏**：
+  SSH 推送模型上的自动 reconcile 是事故放大器，持续收敛属于 Salt/K8s 控制器范式
+- hostvars 快照按批次生成：同批次内先执行主机写入的 facts 对后执行主机不可见
+  （下一批次/play 可见）——跨主机共享请在独立收集 play 中 set_fact
+- 规划：agent 常驻定时漂移上报（复用 `wdp drift` 判定逻辑）、内容寻址分发缓存、
+  远程 chart 仓库 + chart 签名（复用 CA）、stdout 流式回传、
+  真机集成测试矩阵（SSH 认证链×sudo×mTLS×push 自举）
 
 ## 开发
 
@@ -532,7 +616,7 @@ go build ./... && go test -race ./...
 ```
 
 测试基于 `connection.Fake`（内存假连接，尊重 ctx 取消）与 httptest，不依赖真实主机；
-`internal/skel` 的生成物测试（lint + check 演练）构成 `wdp new` 的质量门。
+`internal/skel` 的生成物测试（lint + check 演练）构成 `wdp template new` 的质量门。
 
 CI（`.github/workflows/ci.yml`）门禁：build / vet / gofmt / `go mod tidy` 一致性 /
 `go test -race` / golangci-lint，另含 govulncheck 已知漏洞扫描；
