@@ -25,13 +25,13 @@ func NewFormatter(out io.Writer, format string) *Formatter {
 	return &Formatter{Out: out, Format: format, engine: render.DefaultEngine()}
 }
 
-func (_ *Formatter) PlayStart(_ string, _ []string) {}
-func (_ *Formatter) TaskStart(_, _ string)          {}
-func (f *Formatter) TaskDone()                      {}
-func (_ *Formatter) PlayMsg(_ string, _ ...any)     {}
+func (*Formatter) PlayStart(_ string, _ []string) {}
+func (*Formatter) TaskStart(_, _ string)          {}
+func (f *Formatter) TaskDone()                    {}
+func (*Formatter) PlayMsg(_ string, _ ...any)     {}
 
 // Recap 静默（脚本消费 stdout，统计走 stderr 由调用方按需重定向）。
-func (_ *Formatter) Recap(_ string, _ map[string]*model.Stats) {}
+func (*Formatter) Recap(_ string, _ map[string]*model.Stats) {}
 
 // HostResult 渲染单主机结果。
 func (f *Formatter) HostResult(host string, r *model.TaskResult) {

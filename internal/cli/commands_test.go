@@ -205,19 +205,6 @@ func TestHelpPathsDoNotExecute(t *testing.T) {
 	}
 }
 
-// strSlicesEqual 按序比较两个字符串切片（忽略 nil 与空切片差异）。
-func strSlicesEqual(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
 // TestParseAdhocArgs 覆盖 adhoc 参数解析：k=v 进入 args、其余拼接 free-form。
 func TestParseAdhocArgs(t *testing.T) {
 	free, args := parseAdhocArgs("echo hello")

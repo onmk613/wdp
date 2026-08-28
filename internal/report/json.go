@@ -107,7 +107,7 @@ func redact(res *model.TaskResult) *model.TaskResult {
 func (r *JSONReporter) TaskDone() {}
 
 // PlayMsg 忽略进度消息（JSON 仅含结构化结果）。
-func (_ *JSONReporter) PlayMsg(_ string, _ ...any) {}
+func (*JSONReporter) PlayMsg(_ string, _ ...any) {}
 
 // Recap 记录 play 汇总。
 func (r *JSONReporter) Recap(_ string, stats map[string]*model.Stats) {

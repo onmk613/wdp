@@ -60,7 +60,9 @@ func runInventoryList(inv *inventory.Inventory, pattern string, showVars bool, o
 			if err != nil {
 				return err
 			}
-			out.Write(b)
+			if _, err := out.Write(b); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
