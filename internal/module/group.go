@@ -143,11 +143,14 @@ func (m *GroupModule) Run(rc *RunContext, args map[string]any, _ string) *Result
 				return Fail("group %s GID drift (%s → %s), correcting requires become: true", name, cur, want)
 			}
 			if rc.CheckMode {
-				return &Result{
+				res := &Result{
 					Changed: true,
 					Msg:     fmt.Sprintf("[check] group %s: would adjust gid (%s -> %s)", name, cur, want),
-					Diff:    joinLines([]string{"- gid " + cur, "+ gid " + want}),
 				}
+				if rc.DiffMode { // 与其他模块一致：Diff 仅在 --diff 下填充
+					res.Diff = joinLines([]string{"- gid " + cur, "+ gid " + want})
+				}
+				return res
 			}
 			script := fmt.Sprintf("groupmod -g %d %s", gid, shellquote.Quote(name))
 			if out, bad := rc.exec(script); bad != nil {

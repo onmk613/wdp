@@ -22,11 +22,12 @@
 | 分组 | 命令 |
 |---|---|
 | 部署命令 | `run`、`adhoc` |
-| 应用包命令 | `template`（new/module/render）、`lint`、`package` |
-| 安全与信任命令 | `ca`、`key` |
+| 应用包命令 | `module`、`render`、`lint`、`package` |
+| 安全与信任命令 | `ca`、`scan-ssh` |
 | 代理命令 | `agent` |
-| 运维与记录命令 | `release`、`drift`、`modules` |
-| 其它命令 | `version`（另有框架自带的 `help`、`completion`） |
+| 运维与记录命令 | `release`、`drift`、`inventory` |
+
+版本信息用框架自带的 `wdp --version`。
 
 ## wdp run
 
@@ -72,7 +73,7 @@ wdp adhoc -m <模块名> -a '<参数>' [--become] [--format '模板'] [--check] 
 
 | flag | 说明 |
 |---|---|
-| `-m / --module` | 模块名（缺省 shell；`wdp template module` 查看列表） |
+| `-m / --module` | 模块名（缺省 shell；`wdp module` 查看列表） |
 | `-a / --args` | free-form 命令或 `k=v` 参数列表 |
 | `-b / --become` | 提权执行 |
 | `--format` | 逐主机模板化输出（`.host .stdout .rc …`），进 shell 管道 |
@@ -84,23 +85,21 @@ wdp adhoc -m package -a 'name=curl state=present' --become webservers
 wdp adhoc -m stat -a 'path=/etc/hosts' --format '{{.host}} {{.stdout}}' web*
 ```
 
-## wdp template
+## wdp module
 
-chart 静态工具集（原 `wdp new` / `wdp modules` / `wdp template` 三个命令合并于此）。
-执行侧预演用 `wdp run --check`（真实主机、真实连接的模块级预演），与本组互补分层。
-
-```sh
-wdp template new <应用名> [--full] [--dir 目录]     # 生成应用包骨架
-wdp template module [模块名]                        # 列出内置模块 / 带名输出参数文档与示例
-wdp template render <chart目录|tgz> [-f values] [--set k=v] [--hostname 名字]
-                                                    # 静态渲染预览（不执行）
+```
+wdp module [模块名]
 ```
 
-| 子命令 | 说明 |
-|---|---|
-| `new` | 生成应用包骨架。最小版含 values/deploy/uninstall/status/helpers/templates/envs；`--full` 生成全能力参考骨架（策略/钩子/委派/动态分组/子 chart，全部能力均有可运行示例）；`--dir` 指定输出目录（默认 `.`） |
-| `module` | 无参列出全部内置模块（名 + 描述）；带模块名输出与实现同源的参数文档与示例任务片段（永不漂移） |
-| `render` | **chart 静态渲染预览**：合并后的最终 values + 全部 templates/ 渲染结果 + 任务树（chart 引用展开一层）。`--hostname` 指定预览用 `inventory_hostname` 占位（缺省 preview-host）。不需要 inventory/主机——写包阶段离线自查渲染；上线前用 `run --check` 验证真实主机组合 |
+无参列出全部内置模块（名 + 描述）；带模块名输出与实现同源的参数文档与示例任务片段（永不漂移）。
+
+## wdp render
+
+```
+wdp render <chart目录|tgz> [-f values 文件（可多次）] [--set k=v（可多次）] [--hostname 名字]
+```
+
+**chart 静态渲染预览**：合并后的最终 values + 全部 templates/ 渲染结果 + 任务树（chart 引用展开一层）。`--hostname` 指定预览用 `inventory_hostname` 占位（缺省 preview-host）。不需要 inventory/主机——写包阶段离线自查渲染；执行侧预演用 `wdp run --check`（真实主机、真实连接的模块级预演），两者互补分层。
 
 ## wdp lint
 
@@ -113,18 +112,10 @@ wdp lint <chart目录|tgz|playbook.yaml> [-f values 文件] [--set k=v]
 ## wdp package
 
 ```
-wdp package <chart目录> [-o 输出目录]
+wdp package <chart目录> [-o/--out-dir 输出目录]
 ```
 
 先加载校验再打包为 `<name>-<version>.tgz`（包内顶层 `<name>/` 前缀，可直接 `wdp run`）。
-
-## wdp template module
-
-```
-wdp template module [模块名]
-```
-
-无参数列出全部模块名与说明；带模块名输出该模块的参数文档与示例任务（与实现同源）。
 
 ## wdp inventory
 
@@ -198,7 +189,7 @@ wdp ca show   <证书路径> [--key <私钥路径>]
 | `issue` | 签发证书（cfssl 风格，产物可直接交给 etcd/nginx 等任意服务）。`--name` 只决定产物文件名与 CN 缺省值（空 = 档案名 server/client/peer，`--cn` 可覆盖 CN）；**SAN 一律经 `--san`**，`--profile server\|client\|peer`（server=ServerAuth、client=ClientAuth、peer=双向，etcd mTLS 用；默认 server）；`--days` 缺省 0 = **自动档**（按签发 CA 剩余寿命分段：CA 剩余 ≤30 天 → 跟随 CA 一起到期；30~60 天 → 取剩余的 50%；>60 天 → 上限 30 天；显式给值时仍**一律钳制到 CA 到期时刻**）；`--key-algo/--key-size` 同 init；主题 flags 覆盖 O/OU/C/ST/L；输出 SHA256 指纹 |
 | `--san` | 追加额外 SAN（可多次）：裸值按 IP/DNS 自动识别；`uri:spiffe://…` 与 `email:a@b.c` 前缀签 URI/Email SAN——多地址/NAT/端口转发主机一张证书覆盖全部可达地址，`renew` 续期时全量继承（含 URI/Email） |
 | `renew` | **更新延期，全显式无命名约定**：`--cert` 旧证书必填；保留私钥模式 `--key` 必填（会校验与证书公钥配对，不配对拒绝），`--new-key` 换钥则无需旧钥；位置参数 = **新证书输出路径**（缺省当前目录，新私钥为同目录同名 `.key`）；身份字段（CN/SAN 四类/EKU/密钥算法）全部继承，`--days` 为在当前到期上**增加**的天数（默认 30，钳制到 CA 到期）。**新旧同目录时**旧证书/私钥先改名 `*.old.<时间戳>` 备份；输出到别处则旧件原地不动 |
-| `--ca-cert/--ca-key` | 指定**根 CA（签发者）**的证书与私钥——用它给新证书**签名**，不是要生成/续期的证书本身（新证书输出到 `--dir/<name>.crt\|.key`）。默认 `<dir>/ca.crt`/`<dir>/ca.key`；可指向任意**自制根 CA**（openssl 等，明文 SEC1 EC / PKCS8 私钥）——复用组织既有信任链就靠这对 flag，无需导入步骤。校验：必须是 CA 证书、未过期、与私钥匹配 |
+| `--ca-cert/--ca-key` | 指定**根 CA（签发者）**的证书与私钥——用它给新证书**签名**，不是要生成/续期的证书本身（新证书输出到 `<输出目录>/<name>.crt\|.key`，输出目录为位置参数）。默认 `<dir>/ca.crt`/`<dir>/ca.key`；可指向任意**自制根 CA**（openssl 等，明文 SEC1 EC / PKCS8 私钥）——复用组织既有信任链就靠这对 flag，无需导入步骤。校验：必须是 CA 证书、未过期、与私钥匹配 |
 | `show` | `<证书路径>` 为位置参数；`--key <私钥路径>` 校验证书与私钥是否配对（配对打印 verified，不配对错误退出非零——接手外部证书/排查错配时先验再用）。查看证书携带的信息：主题/签发者（自签标注）、序列号、有效期（剩余天数/已过期）、CA 角色与 PathLen、签名算法、公钥算法、密钥用途、扩展用途（ServerAuth/ClientAuth）、SAN（DNS/IP/URI/Email）、SHA256 指纹——接手外部根 CA、检视 push 会话证书或排查证书问题时先看清内容再信任 |
 
 证书角色：agent 在目标机上是 TLS **服务端**（默认的 server 档案，含 SAN）；
@@ -210,7 +201,7 @@ peer 证书（RSA 密钥 + IP SAN）：
 
 ```sh
 wdp ca init ./corp-ca --days 3650 --cn corp-root --o "My Corp" --key-algo rsa --key-size 4096
-wdp ca issue --dir ./etcd --ca-cert ./corp-ca/ca.crt --ca-key ./corp-ca/ca.key \
+wdp ca issue ./etcd --ca-cert ./corp-ca/ca.crt --ca-key ./corp-ca/ca.key \
   --name etcd1.corp --san etcd1.corp --san 10.0.0.21 --profile peer --days 365 --key-algo rsa
 ```
 
@@ -218,7 +209,7 @@ wdp ca issue --dir ./etcd --ca-cert ./corp-ca/ca.crt --ca-key ./corp-ca/ca.key \
 ## wdp scan-ssh
 
 ```
-wdp scan-ssh <主机模式> [--known-hosts 路径]
+wdp scan-ssh <主机模式> [--known-hosts 路径] [--allow-update]
 ```
 
 采集 SSH 主机公钥写入 known_hosts（`host_key_check` 默认开启，新主机首次连接前执行一次）。
@@ -286,10 +277,6 @@ wdp agentctl logs all --out ./agent-logs        # 拉取各 agent 近期日志�
 | `renew-cert` | **换证**：本地对 `<主机身份>.crt` 增量延期（`--days` 默认 +30，同目录自动备份 `*.old.<ts>`，`--new-key` 换钥）→ SSH 推送新证书 → `systemctl restart` 重启 agent → 可选验证。停机窗口 = 重启秒级；热换（CSR 模式）规划中 |
 | `retire` | 远程退役自清理：`POST /shutdown` 默认清理（二进制、证书材料含 CA、systemd 单元）；`--systemd-unit` 指定单元名，`--file`（可多次）指定额外删除的文件/目录；`--yes` 跳过确认 |
 | `logs` | 拉取各 agent 近期日志（`GET /logs` 内存缓冲）逐主机写入本地文件（`--out` 目录，默认 `./wdp-agent-logs/<host>.log`）；完整历史需目标机 `--log-file` 落盘 |
-
-## wdp version
-
-输出版本号。
 
 ## 退出码约定
 

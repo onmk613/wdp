@@ -83,6 +83,9 @@ func ExpandSpecRange(spec string) ([]string, error) {
 	if hi < lo {
 		return nil, fmt.Errorf("host range %q: right endpoint %d < left %d", spec, hi, lo)
 	}
+	if hi > 255 {
+		return nil, fmt.Errorf("host range %q: endpoint %d exceeds the 0-255 octet range (IP octet ranges do not wrap)", spec, hi)
+	}
 	if hi-lo+1 > maxRangeSpan {
 		return nil, fmt.Errorf("host range %q expands to %d hosts (max %d)", spec, hi-lo+1, maxRangeSpan)
 	}

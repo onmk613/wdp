@@ -10,7 +10,7 @@ Helm 风格 chart 打包与多环境精准部署。
 - **声明式 playbook**：条件/循环/block 容错/委托/hook，连接按主机复用免重复握手
 - **部署策略**：金丝雀/滚动分批、健康门、失败自动回滚
 - **chart 应用包**：三层 values 叠加、子 chart 组合、完整生命周期（install/uninstall/status）
-- **19 个内置模块** + chart 自带脚本模块（无需改源码即可扩展）
+- **22 个内置模块** + chart 自带脚本模块（无需改源码即可扩展）
 - **零风险预演**：全相位 `--check` / `--diff`，漂移巡检 `wdp drift`
 - **安全默认**：mTLS 自建 CA、短周期证书、指纹准许名单吊销
 
@@ -19,9 +19,8 @@ Helm 风格 chart 打包与多环境精准部署。
 ```sh
 go build -o wdp ./cmd/wdp
 
-# 生成的应用包开箱即用（最小骨架 / 全能力参考）
-wdp template new myapp --full
-wdp run ./myapp --check --diff -i inventory.yaml
+# 示例应用包开箱即用（node-exporter / docker）
+wdp run ./examples/node-exporter --check --diff -i examples/inventory.yaml
 ```
 
 ## 文档

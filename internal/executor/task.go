@@ -175,7 +175,12 @@ func (e *Executor) resolveDelegate(task *model.Task, vars map[string]any, origin
 	if s == "localhost" {
 		return e.localhost(), s, nil
 	}
-	if dh := e.Inv.HostByName(s); dh != nil {
+	// HostByName 裸遍历 inv.Hosts：与 add_host/group_by 的并发写（exec.go
+	// 持 invMu）可能在同一 fanOut 波内并发，读侧同样必须持锁
+	e.invMu.Lock()
+	dh := e.Inv.HostByName(s)
+	e.invMu.Unlock()
+	if dh != nil {
 		return dh, s, nil
 	}
 	return nil, "", fmt.Errorf("delegate_to target host %q not found in inventory", s)

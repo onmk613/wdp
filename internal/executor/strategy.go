@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"wdp/internal/conn"
 	"wdp/internal/model"
@@ -90,7 +91,12 @@ func (e *Executor) runGate(ctx context.Context, p *model.Play, gate *model.Task,
 // rollbackBatch 按变更日志逆序回滚一批主机（快照恢复/新建删除）。
 // 覆盖文件类变更（copy/template/file）；shell 等过程性变更无法自动回滚。
 // 每条动作打到其实际执行主机上（delegate_to 时快照在被委托主机）。
-func (e *Executor) rollbackBatch(ctx context.Context, runs []*hostRun, stats map[string]*model.Stats) {
+// 用独立的限时 Background ctx：自动回滚最常见的触发场景就是执行被
+// 取消（Ctrl+C）或批次失败——沿用已取消的父 ctx 会让回滚本身必然
+// 全部失败，恰与该功能承诺兜底的场景相反（同 finishPlay 的处理）。
+func (e *Executor) rollbackBatch(_ context.Context, runs []*hostRun, stats map[string]*model.Stats) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
 	rolled, rollFailed := 0, 0
 	for _, hr := range runs {
 		hr.mu.Lock()
@@ -159,6 +165,42 @@ func (e *Executor) rollbackBatch(ctx context.Context, runs []*hostRun, stats map
 		e.Rep.PlayMsg("auto rollback finished: %d hosts restored, %d hosts FAILED (manual check required); procedural changes like shell cannot be auto-rolled-back", rolled, rollFailed)
 	} else {
 		e.Rep.PlayMsg("auto rollback complete: %d hosts restored from snapshots (procedural changes like shell cannot be auto-rolled-back)", rolled)
+	}
+}
+
+// cleanupSnapshots 清除登记过回滚动作的主机上的快照目录（best-effort；
+// 未产生变更的主机不建连）。delegate_to 产生的变更快照在执行主机上，
+// 按动作的执行主机去重清理。
+func (e *Executor) cleanupSnapshots(ctx context.Context, runs []*hostRun) {
+	script := fmt.Sprintf("rm -rf -- %s", shellquote.Quote(e.rollbackDir))
+	done := 0
+	for _, hr := range runs {
+		hr.mu.Lock()
+		acts := append([]journalEntry{}, hr.journal...)
+		hr.mu.Unlock()
+		if len(acts) == 0 {
+			continue
+		}
+		targets := map[string]*model.Host{}
+		for _, je := range acts {
+			t := je.execOn
+			if t == nil {
+				t = hr.host
+			}
+			targets[t.Name] = t
+		}
+		for _, t := range targets {
+			cn, err := e.Conns.Get(ctx, t)
+			if err != nil {
+				continue
+			}
+			if out, bad := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30_000}); bad == nil && out.Code == 0 {
+				done++
+			}
+		}
+	}
+	if done > 0 {
+		e.Rep.PlayMsg("rollback snapshots cleaned from %d hosts", done)
 	}
 }
 

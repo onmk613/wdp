@@ -246,7 +246,7 @@ func fixFileAttrs(rc *RunContext, fr *fileReq, kind string, ch *fileChanges) *Re
 		if bad != nil {
 			return bad
 		}
-		if !ok || curOwner != fr.owner || curGroup != fr.group {
+		if !ok || (fr.owner != "" && curOwner != fr.owner) || (fr.group != "" && curGroup != fr.group) {
 			if rc.CheckMode {
 				ch.add(fmt.Sprintf("owner → %s:%s", fr.owner, fr.group),
 					fmt.Sprintf("- owner: %s:%s", curOwner, curGroup),

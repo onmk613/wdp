@@ -56,8 +56,8 @@ func TestExpandSpecRangeLimits(t *testing.T) {
 	if _, err := ExpandSpecRange("10.8.2.104-101"); err == nil || !strings.Contains(err.Error(), "<") {
 		t.Fatalf("右端小于左端应报错: %v", err)
 	}
-	if _, err := ExpandSpecRange("10.8.2.1-300"); err == nil || !strings.Contains(err.Error(), "max") {
-		t.Fatalf("跨度超限应报错: %v", err)
+	if _, err := ExpandSpecRange("10.8.2.1-300"); err == nil {
+		t.Fatalf("越界/超限应报错: %v", err)
 	}
 	// 恰好 256（合法上限）
 	got := expand(t, "10.8.2.0-255")

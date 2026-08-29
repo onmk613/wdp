@@ -15,7 +15,9 @@ package pushcerts
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -98,18 +100,36 @@ func LoadOrCreate(dir string) (*Session, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	if caCert, _, err := ca.LoadCAAt(filepath.Join(dir, ca.DefaultCAFile), filepath.Join(dir, ca.DefaultKeyFile)); err != nil || time.Now().After(caCert.NotAfter) {
-		for _, f := range []string{ca.DefaultCAFile, ca.DefaultKeyFile,
-			pushServerName + ".crt", pushServerName + ".key",
-			pushControlName + ".crt", pushControlName + ".key"} {
-			_ = os.Remove(filepath.Join(dir, f))
-		}
-		if _, _, _, err := ca.Init(ca.InitOptions{
-			Dir:     dir,
-			Subject: ca.Subject{CN: "wdp-push-ca"},
+	caCrt, caKey := filepath.Join(dir, ca.DefaultCAFile), filepath.Join(dir, ca.DefaultKeyFile)
+	cert, _, loadErr := ca.LoadCAAt(caCrt, caKey)
+	switch {
+	case loadErr == nil && time.Now().Before(cert.NotAfter):
+		// 有效 CA：直接复用
+	case loadErr == nil || errors.Is(loadErr, fs.ErrNotExist):
+		// 过期或缺失：锁内删旧建新。此前解析失败（损坏/证书私钥不配对）
+		// 也静默走删除重建——可疑材料应交人工检视而非自动销毁，且删旧
+		// 建新非原子，两个 wdp 进程并发重建会互删对方产物
+		if err := withCALock(dir, func() error {
+			// 锁内二次确认：竞争者可能已完成重建
+			c2, _, e2 := ca.LoadCAAt(caCrt, caKey)
+			if e2 == nil && time.Now().Before(c2.NotAfter) {
+				return nil
+			}
+			for _, f := range []string{ca.DefaultCAFile, ca.DefaultKeyFile,
+				pushServerName + ".crt", pushServerName + ".key",
+				pushControlName + ".crt", pushControlName + ".key"} {
+				_ = os.Remove(filepath.Join(dir, f))
+			}
+			_, _, _, err := ca.Init(ca.InitOptions{
+				Dir:     dir,
+				Subject: ca.Subject{CN: "wdp-push-ca"},
+			})
+			return err
 		}); err != nil {
 			return nil, err
 		}
+	default:
+		return nil, fmt.Errorf("push CA material in %s is unreadable (corrupt or mismatched cert/key): %v; inspect it, then remove the directory manually to rebuild", dir, loadErr)
 	}
 	if err := ensureLeaf(dir, pushServerName, ca.ProfileServer); err != nil {
 		return nil, err
@@ -119,7 +139,7 @@ func LoadOrCreate(dir string) (*Session, error) {
 	}
 	out := &Session{}
 	var err error
-	if out.CACertPEM, err = os.ReadFile(filepath.Join(dir, ca.DefaultCAFile)); err != nil {
+	if out.CACertPEM, err = os.ReadFile(caCrt); err != nil {
 		return nil, err
 	}
 	if out.ServerCertPEM, out.ServerKeyPEM, err = readPair(dir, pushServerName); err != nil {
@@ -129,6 +149,29 @@ func LoadOrCreate(dir string) (*Session, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// withCALock 用 O_EXCL 锁文件串行化多进程的 CA 重建；进程崩溃残留的
+// 陈旧锁（>1 分钟）自动抢占。
+func withCALock(dir string, fn func() error) error {
+	lock := filepath.Join(dir, ".wdp-ca.lock")
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err == nil {
+			defer os.Remove(lock)
+			_ = f.Close()
+			return fn()
+		}
+		if fi, statErr := os.Stat(lock); statErr == nil && time.Since(fi.ModTime()) > time.Minute {
+			_ = os.Remove(lock) // 陈旧锁：持锁进程已死
+			continue
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("push CA dir %s is locked by another wdp process", dir)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 // ensureLeaf 叶子证书存在且未过期则复用，否则补签（SAN = 同名 DNS）。

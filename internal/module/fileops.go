@@ -24,9 +24,13 @@ func uploadBytes(rc *RunContext, dest string, data []byte, mode int64, hasMode b
 }
 
 // remoteChecksum 返回远端文件的 sha256（不存在时 ok=false）。
+// rc=4：路径存在但不是普通文件（目录/设备等）——调用方必须失败而非
+// 当作"不存在"，否则回滚日志会登记 RecordRemove，自动回滚时 rm -rf
+// 掉既有目录。
 func remoteChecksum(rc *RunContext, path string) (string, bool, *Result) {
 	script := fmt.Sprintf(`p=%s
-[ -f "$p" ] || exit 3
+[ -e "$p" ] || exit 3
+[ -f "$p" ] || exit 4
 sha256sum "$p" 2>/dev/null || shasum -a 256 "$p" 2>/dev/null
 exit $?`, shellquote.Quote(path))
 	out, bad := rc.exec(script)
@@ -35,6 +39,9 @@ exit $?`, shellquote.Quote(path))
 	}
 	if out.Code == 3 {
 		return "", false, nil
+	}
+	if out.Code == 4 {
+		return "", false, Fail("remote path %s exists and is not a regular file (directory or device?)", path)
 	}
 	if out.Code != 0 {
 		return "", false, Fail("failed to read remote checksum rc=%d: %s", out.Code, firstLine(out.Stderr))
@@ -74,7 +81,7 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 		if obad != nil {
 			return false, obad
 		}
-		ownerDrift = !ok || curOwner != owner || curGroup != group
+		ownerDrift = !ok || (owner != "" && curOwner != owner) || (group != "" && curGroup != group)
 	}
 	if rc.CheckMode {
 		if !changed && hasMode {
@@ -123,7 +130,7 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 		return changed, nil
 	}
 	if exists && backup {
-		bak := fmt.Sprintf("%s.bak.%d", dest, time.Now().Unix())
+		bak := fmt.Sprintf("%s.bak.%d", dest, time.Now().UnixNano()) // 亚秒：同秒二次备份不再覆盖
 		script := fmt.Sprintf("cp -a -- %s %s", shellquote.Quote(dest), shellquote.Quote(bak))
 		if out, bad := rc.exec(script); bad != nil {
 			return false, bad

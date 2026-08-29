@@ -120,6 +120,9 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 		} else if v, exists := cur[s.key]; exists && v != nil {
 			return nil, fmt.Errorf("--set %q: %q is already a non-list value (%T)", path, s.key, cur[s.key])
 		}
+		if s.idx > 4096 {
+			return nil, fmt.Errorf("--set %q: list index %d exceeds the 4096 cap (typo? indices pre-allocate memory)", path, s.idx)
+		}
 		for len(list) <= s.idx {
 			list = append(list, nil)
 		}

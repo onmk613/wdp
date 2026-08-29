@@ -103,7 +103,8 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 }
 
 // effSubPlay 构建子 chart 的有效 play（hosts/become/strategy 继承父，
-// environment 合并且父级优先，serial 与 vars 不下沉）。
+// environment 合并且**子 play 覆盖父级**（更具体的作用域优先，与 values
+// 分层一致），serial 与 vars 不下沉）。
 func effSubPlay(p *model.Play, subPlay *model.Play) model.Play {
 	effPlay := *subPlay
 	effPlay.Hosts = p.Hosts
@@ -167,8 +168,11 @@ func (e *Executor) runChartItemTasks(ctx context.Context, effPlay *model.Play, s
 			return false
 		}
 		if r.Failed {
-			res.Failed = true
+			// 子任务 ignore_errors 只豁免主机存活与批次中止：聚合结果
+			// 不置 Failed（此前无条件置位会让 ignore_errors 在 chart
+			// 引用内完全失效——主机被标死、后续 play 全跳过）
 			if !t.IgnoreErrors {
+				res.Failed = true
 				itemFailed = true
 			}
 			*msgs = append(*msgs, fmt.Sprintf("%s: %s", t.Label(), r.Msg))

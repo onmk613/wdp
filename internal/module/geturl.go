@@ -135,7 +135,7 @@ func (m *GetURLModule) skipDownload(rc *RunContext, dest string, mode int64, own
 		if obad != nil {
 			return obad
 		}
-		ownerDrift = !ok || co != owner || cg != group
+		ownerDrift = !ok || (owner != "" && co != owner) || (group != "" && cg != group)
 	}
 	if rc.CheckMode {
 		would := ownerDrift

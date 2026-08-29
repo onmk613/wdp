@@ -115,21 +115,35 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, _ string) *R
 		after = r
 	}
 
-	// 读取远端内容（下载为只读探测，check 模式同样允许）
+	// 读取远端内容（下载为只读探测，check 模式同样允许）。
+	// 存在性判定用显式探测：下载失败的语义是错误（权限/断连），
+	// 不能与"文件不存在"混为一谈——absent 时混同会吞错报"无需变更"。
 	var oldContent string
-	exists := true
-	var buf bytes.Buffer
-	if err := rc.Conn.DownloadFile(rc.Ctx, path, &buf); err != nil {
-		exists = false
+	probe := fmt.Sprintf(`p=%s
+[ -e "$p" ] || exit 3
+[ -f "$p" ] || exit 4`, shellquote.Quote(path))
+	pout, pbad := rc.exec(probe)
+	if pbad != nil {
+		return pbad
+	}
+	switch pout.Code {
+	case 4:
+		return Fail("remote path %s exists and is not a regular file", path)
+	case 0:
+		var buf bytes.Buffer
+		if err := rc.Conn.DownloadFile(rc.Ctx, path, &buf); err != nil {
+			return Fail("failed to read %s: %v", path, err)
+		}
+		oldContent = buf.String()
+	default:
 		if state == "absent" {
 			return &Result{Msg: fmt.Sprintf("%s does not exist, no change needed for state=absent", path)}
 		}
 		if !create {
 			return Fail("file does not exist: %s (use create: true to create it)", path)
 		}
-	} else {
-		oldContent = buf.String()
 	}
+	exists := pout.Code == 0
 
 	newContent := lineTransform(oldContent, line, re, after, state == "absent")
 	changed := !exists || newContent != oldContent
@@ -145,7 +159,7 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, _ string) *R
 
 	if changed {
 		if exists && backup {
-			bak := fmt.Sprintf("%s.bak.%d", path, time.Now().Unix())
+			bak := fmt.Sprintf("%s.bak.%d", path, time.Now().UnixNano()) // 亚秒：同秒二次备份不再覆盖
 			if out, bad := rc.exec(fmt.Sprintf("cp -a -- %s %s", shellquote.Quote(path), shellquote.Quote(bak))); bad != nil {
 				return bad
 			} else if out.Code != 0 {
@@ -177,7 +191,7 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, _ string) *R
 	if owner != "" || group != "" {
 		if co, cg, ok, obad := remoteOwnerGroup(rc, path); obad != nil {
 			return obad
-		} else if !ok || co != owner || cg != group {
+		} else if !ok || (owner != "" && co != owner) || (group != "" && cg != group) {
 			if bad := chownPath(rc, path, owner, group); bad != nil {
 				return bad
 			}
@@ -251,7 +265,10 @@ func lineTransform(old, line string, re, after *regexp.Regexp, absent bool) stri
 		trailing = true // 插入的行补行尾换行
 	}
 	joined := strings.Join(out, "\n")
-	if len(out) > 0 && (trailing || idx >= 0) {
+	// 尾换行仅两种来源：原文件本就有，或本次插入了新行。替换命中行
+	// （idx>=0）不给原本无尾换行的文件追加换行——超出任务范围的字节
+	// 变更对 sudoers/cron 等固定格式下游有实际风险。
+	if len(out) > 0 && trailing {
 		joined += "\n"
 	}
 	return joined

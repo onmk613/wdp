@@ -135,8 +135,16 @@ func TestMarkerWriteAndRemove(t *testing.T) {
 	}
 
 	run("uninstall")
-	// uninstall 后 marker 目录被清除（rm -rf 脚本出现在执行记录）
-	if !strings.Contains(joinExecScripts(allFakes()), "rm -rf -- '/tmp/wdp-marker-test/markerapp'") {
-		t.Fatalf("uninstall 未清除 marker:\n%s", joinExecScripts(allFakes()))
+	// uninstall 后 marker 被清除：只删 marker 文件 + rmdir 收敛空目录，
+	// 不再 rm -rf 整个 <marker_dir>/<name>（防 chart 名/目录被污染时误删）
+	scripts := joinExecScripts(allFakes())
+	if !strings.Contains(scripts, "rm -f -- '/tmp/wdp-marker-test/markerapp/release.json'") {
+		t.Fatalf("uninstall 未删除 marker 文件:\n%s", scripts)
+	}
+	if !strings.Contains(scripts, "rmdir -- '/tmp/wdp-marker-test/markerapp'") {
+		t.Fatalf("uninstall 未收敛空目录:\n%s", scripts)
+	}
+	if strings.Contains(scripts, "rm -rf") {
+		t.Fatalf("uninstall 不应再使用 rm -rf:\n%s", scripts)
 	}
 }

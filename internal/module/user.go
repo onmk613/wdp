@@ -98,6 +98,12 @@ func parseUserArgs(args map[string]any) (*userReq, *Result) {
 	u.primaryGroup, _ = argStr(args, "group")
 	u.groups, u.hasGroups = argStrList(args, "groups")
 	u.appendGroups, _ = argBool(args, "append")
+	// groups: [] + 替换模式 = "清空附加组"：usermod -G 需要至少一个组名，
+	// 空列表会拼出非法的 -G ''（远端报 group '' does not exist）。
+	// fail-loud：要求显式写出保留组（通常为主组）。
+	if u.hasGroups && len(u.groups) == 0 && !u.appendGroups {
+		return nil, Fail("'groups: []' with append unset would clear all supplementary groups; list the groups to keep explicitly (usually the primary group), or use append: true")
+	}
 	u.shell, _ = argStr(args, "shell")
 	u.home, _ = argStr(args, "home")
 	u.system, _ = argBool(args, "system")
@@ -221,11 +227,14 @@ func userModify(rc *RunContext, u *userReq) *Result {
 		return Fail("user %s attribute drift (%s), correcting requires become: true", u.name, strings.Join(drift, ", "))
 	}
 	if rc.CheckMode {
-		return &Result{
+		res := &Result{
 			Changed: true,
 			Msg:     fmt.Sprintf("[check] user %s: would adjust %s", u.name, strings.Join(drift, "、")),
-			Diff:    joinLines(diffLines),
 		}
+		if rc.DiffMode { // 与其他模块一致：Diff 仅在 --diff 下填充
+			res.Diff = joinLines(diffLines)
+		}
+		return res
 	}
 	var flags []string
 	if u.hasUID && slices.Contains(drift, "uid") {

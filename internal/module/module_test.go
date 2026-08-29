@@ -23,8 +23,20 @@ func newTestRC(t *testing.T) (*RunContext, *fake.Fake) {
 	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
 		s := req.Script
 		switch {
+		case strings.Contains(s, `[ -f "$p" ] || exit 4`) && !strings.Contains(s, "sha256sum"): // 存在性探测（3=不存在 4=非普通文件）
+			path := extractQuoted(s, "p=")
+			switch {
+			case dirs[path]:
+				return conn.ExecResult{Code: 4}, nil
+			case fake.Files[path] == nil:
+				return conn.ExecResult{Code: 3}, nil
+			}
+			return conn.ExecResult{Code: 0}, nil
 		case strings.Contains(s, "sha256sum"):
 			path := extractQuoted(s, "p=")
+			if dirs[path] {
+				return conn.ExecResult{Code: 4}, nil // 既有目录：非普通文件
+			}
 			data, ok := fake.Files[path]
 			if !ok {
 				return conn.ExecResult{Code: 3}, nil

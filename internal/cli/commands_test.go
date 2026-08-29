@@ -34,7 +34,7 @@ func TestCommandTreeStructure(t *testing.T) {
 		top[c.Name()] = true
 	}
 	for _, name := range []string{
-		"run", "adhoc", "template", "lint", "package",
+		"run", "adhoc", "module", "render", "lint", "package",
 		"ca", "scan-ssh", "agent", "release",
 	} {
 		if !top[name] {
@@ -54,15 +54,14 @@ func TestCommandTreeStructure(t *testing.T) {
 		}
 	}
 
-	// template 子命令
-	tplCmd := findCmd(t, root, "template")
-	tplSub := map[string]bool{}
-	for _, c := range tplCmd.Commands() {
-		tplSub[c.Name()] = true
-	}
-	for _, name := range []string{"new", "module", "render"} {
-		if !tplSub[name] {
-			t.Fatalf("template 缺少子命令 %q", name)
+	// template 命令组已移除：module/render 为顶层命令，template/version 不复存在
+	_ = findCmd(t, root, "module")
+	_ = findCmd(t, root, "render")
+	for _, gone := range []string{"template", "version"} {
+		for _, c := range root.Commands() {
+			if c.Name() == gone {
+				t.Fatalf("命令 %q 应已删除", gone)
+			}
 		}
 	}
 
@@ -114,7 +113,7 @@ func TestForksDefaultFromConfig(t *testing.T) {
 	}
 	resetGlobals()
 	// modules 仅列内置模块，不触达 inventory/SSH，安全。
-	if err := execRoot(t, "--config", cfg, "template", "module"); err != nil {
+	if err := execRoot(t, "--config", cfg, "module"); err != nil {
 		t.Fatal(err)
 	}
 	if got := config.Current().Run.Forks; got != 12 {
@@ -188,11 +187,9 @@ func TestHelpPathsDoNotExecute(t *testing.T) {
 		{"--help"},
 		{"run", "--help"},
 		{"adhoc", "--help"},
-		{"template", "--help"},
-		{"template", "new", "--help"},
-		{"template", "module", "--help"},
-		{"template", "render", "--help"},
 		{"lint", "--help"},
+		{"module", "--help"},
+		{"render", "--help"},
 		{"package", "--help"},
 		{"ca", "--help"},
 		{"scan-ssh", "--help"},
@@ -277,14 +274,13 @@ func TestSampleDomain(t *testing.T) {
 	}
 }
 
-// TestTemplateModuleCompletion `template module` 补全：候选带模块描述、
-// 按前缀过滤、首个参数给出后不再补全（cobra __complete 协议）。
-func TestTemplateModuleCompletion(t *testing.T) {
+// TestModuleCompletion `wdp module` 补全：候选带模块描述、按前缀过滤、
+// 首个参数给出后不再补全（cobra __complete 协议）。
+func TestModuleCompletion(t *testing.T) {
 	root := NewRootCmd()
-	tpl := findCmd(t, root, "template")
-	mod := findCmd(t, tpl, "module")
+	mod := findCmd(t, root, "module")
 	if mod.ValidArgsFunction == nil {
-		t.Fatal("template module 未配置 ValidArgsFunction")
+		t.Fatal("module 未配置 ValidArgsFunction")
 	}
 
 	got, dir := mod.ValidArgsFunction(mod, nil, "")

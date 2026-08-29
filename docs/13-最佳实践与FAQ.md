@@ -2,9 +2,9 @@
 
 ## 推荐工作流
 
-1. **应用一律打包为 chart**：裸 playbook 适合临时操作；可复用的部署进 chart（`wdp template new` 起步，git 管理）
+1. **应用一律打包为 chart**：裸 playbook 适合临时操作；可复用的部署进 chart（参考 [examples/](../examples/) 起步，git 管理）
 2. **环境差异全部走 values**：`envs/prod.yaml` / `envs/staging.yaml`，任务模板只引用 values，不写死环境
-3. **上生产前四步**：`wdp lint` → `wdp template render` → `--check --diff` 评审 → 执行
+3. **上生产前四步**：`wdp lint` → `wdp render` → `--check --diff` 评审 → 执行
 4. **敏感值不落盘**：inventory/命令行只留 `*_env` 引用；输出敏感的任务加 `no_log: true`
 5. **升级前看参数漂移**：`wdp release diff <旧id> <新id>` 确认本次要改的参数
 
@@ -39,10 +39,10 @@
 ## FAQ
 
 **Q: 任务输出"未知模块"？**
-内置清单看 `wdp template module`。chart 场景可把可执行脚本放 chart 的 `modules/<名>` 目录（脚本模块机制，见模块手册）。lint 会帮你提前发现。
+内置清单看 `wdp module`。chart 场景可把可执行脚本放 chart 的 `modules/<名>` 目录（脚本模块机制，见模块手册）。lint 会帮你提前发现。
 
 **Q: 模板渲染报 `map has no entry for key "xxx"`？**
-引擎是严格模式（未定义变量报错）。可选键用 `{{ dig "key" "默认值" . }}`；确认拼写；`wdp template render` 可离线排查渲染。
+引擎是严格模式（未定义变量报错）。可选键用 `{{ dig "key" "默认值" . }}`；确认拼写；`wdp render` 可离线排查渲染。
 
 **Q: SSH 连接被拒（host key 校验失败）？**
 安全默认 `host_key_check: true`。新主机先 `wdp scan-ssh <模式>` 采集指纹；明确接受风险才用 `host_key_check: false`。
@@ -83,7 +83,7 @@ setup/stat 的 facts 不进 register——它们直接并入变量域顶层（`.
 
 ## 排错路线
 
-1. `wdp lint` / `wdp template`：结构、引用、渲染问题
+1. `wdp lint` / `wdp render`：结构、引用、渲染问题
 2. `--list-hosts`：主机选择是否符合预期（选择模式语法见 inventory 文档）
 3. `--check --diff`：变更内容是否符合预期
 4. `-vvv` 单任务排障：`--start-at-task <名>` + 完整 stderr

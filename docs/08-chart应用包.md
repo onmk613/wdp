@@ -204,17 +204,6 @@ deploy 成功后每台主机写入：
 - 父与全部子 chart 的 helpers 合并注册（子重名覆盖父）
 - 全部渲染场景可用：任务参数、配置模板、`include` 可参与管道
 
-## 生成器：wdp template new
-
-```sh
-wdp template new myapp                 # 最小骨架：values/deploy/uninstall/status/helpers/templates/envs
-wdp template new myapp --full          # 全能力参考（下表全部能力均有可运行示例）
-wdp template new myapp --dir /opt      # 指定生成目录（默认 .）
-wdp template module user         # 查看模块参数文档与示例片段（等价 wdp template module user）
-```
-
-生成物保证 `wdp lint` 通过且 `--check` 本机演练可跑通（质量门随 CI 回归）——直接填写即可使用。`--full` 覆盖：三层 values、required、helpers、子 chart 版本约束、strategy（金丝雀+门+回滚）、hook、delegate_to、run_once、loop_var、block/rescue、group_by 动态分组、8 个新模块、output 控制。
-
 ## 打包与分发
 
 ```sh

@@ -48,7 +48,7 @@ func TestConfigAppliesToFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	resetGlobals()
-	if err := execRoot(t, "--config", cfg, "template", "module"); err != nil {
+	if err := execRoot(t, "--config", cfg, "module"); err != nil {
 		t.Fatal(err)
 	}
 	c := config.Current()
@@ -66,7 +66,7 @@ func TestExplicitFlagBeatsConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	resetGlobals()
-	if err := execRoot(t, "--config", cfg, "--forks", "8", "-i", "other.yaml", "template", "module"); err != nil {
+	if err := execRoot(t, "--config", cfg, "--forks", "8", "-i", "other.yaml", "module"); err != nil {
 		t.Fatal(err)
 	}
 	if config.Current().Run.Forks != 8 || gInventories[0] != "other.yaml" {
@@ -81,14 +81,14 @@ func TestExplicitFlagBeatsConfig(t *testing.T) {
 func TestConfigMissingFile(t *testing.T) {
 	// 显式 --config 指向不存在的文件：报错
 	resetGlobals()
-	if err := execRoot(t, "--config", "/nonexistent/wdp.cfg", "template", "module"); err == nil {
+	if err := execRoot(t, "--config", "/nonexistent/wdp.cfg", "module"); err == nil {
 		t.Fatal("显式指定的配置文件不存在应报错")
 	}
 
 	// 默认路径不存在：静默跳过，保持内置默认
 	resetGlobals()
 	t.Chdir(t.TempDir()) // cwd 无 wdp.cfg
-	if err := execRoot(t, "template", "module"); err != nil {
+	if err := execRoot(t, "module"); err != nil {
 		t.Fatal(err)
 	}
 	if config.Current().Forks() != 5 || len(gInventories) != 1 || gInventories[0] != "inventory.yaml" || gVerbosity != 0 || !config.Current().Color() {
@@ -124,7 +124,7 @@ func TestRootHelpGrouped(t *testing.T) {
 	// 组 ↔ 命令归属断言（直接断言组 ID 字面量，与 root.go 的分组定义对账）
 	want := map[string]string{
 		"run": "deploy", "adhoc": "deploy",
-		"template": "chart", "lint": "chart", "package": "chart",
+		"module": "chart", "render": "chart", "lint": "chart", "package": "chart",
 		"ca":       "security",
 		"scan-ssh": "security",
 		"agent":    "agent",

@@ -162,10 +162,18 @@ func parseTaskReportKeys(m map[string]any, t *model.Task) error {
 		t.Register = fmt.Sprint(v)
 	}
 	if v, ok := m["notify"]; ok {
-		t.Notify, _ = strOrList(v)
+		list, ok2 := strOrList(v)
+		if !ok2 {
+			return fmt.Errorf("notify: expected a string or a list of strings, got %T", v) // 吞错会让 handler 永不触发
+		}
+		t.Notify = list
 	}
 	if v, ok := m["tags"]; ok {
-		t.Tags, _ = strOrList(v)
+		list, ok2 := strOrList(v)
+		if !ok2 {
+			return fmt.Errorf("tags: expected a string or a list of strings, got %T", v)
+		}
+		t.Tags = list
 	}
 	if v, ok := m["changed_when"]; ok {
 		t.ChangedWhen = fmt.Sprint(v)

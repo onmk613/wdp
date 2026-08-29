@@ -23,6 +23,6 @@ func newPackageCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&outDir, "output", "o", ".", "output directory")
+	cmd.Flags().StringVarP(&outDir, "out-dir", "o", ".", "output directory (name kept distinct from the global --output format flag)")
 	return cmd
 }

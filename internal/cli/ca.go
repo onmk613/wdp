@@ -110,7 +110,9 @@ func caKeyFlags(f *pflag.FlagSet, key *ca.KeySpec) {
 
 // newCARenewCmd 构造 `wdp ca renew`。
 func newCARenewCmd() *cobra.Command {
-	CARenewOptions := ca.RenewOptions{OutPath: "."}
+	// OutPath 留空 = ca.Renew 语义的 "./<旧证书文件名>"；置 "." 会被推导成
+	// 证书名 "."，产物落到 ..crt/.key 隐藏文件
+	CARenewOptions := ca.RenewOptions{}
 	cmd := &cobra.Command{
 		Use:   "renew [new-ca-path]",
 		Short: "extend a certificate's expiry",

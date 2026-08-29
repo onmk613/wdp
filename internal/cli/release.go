@@ -133,8 +133,6 @@ func newReleaseDiffCmd() *cobra.Command {
 	}
 }
 
-// newModulesCmd 构造 `wdp modules`。
-
 // printYAML 序列化输出 YAML（部署记录 values 快照用）。
 func printYAML(out io.Writer, v any) error {
 	b, err := yaml.Marshal(v)

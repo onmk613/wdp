@@ -76,6 +76,10 @@ func NewRootCmd() *cobra.Command {
 
 	// 子命令 RunE 前统一加载 wdp.cfg，再把显式指定的 flag 覆盖进当前配置
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
+		// --output 枚举校验：拼错（如 jons）静默按 console 处理曾让 CI 误读输出
+		if gOutput != "console" && gOutput != "json" {
+			return fmt.Errorf("invalid --output %q (options: console | json)", gOutput)
+		}
 		// --config 显式指定时文件必须存在；默认路径不存在则静默跳过（保持内置默认）
 		if err := config.Load(cfgPath, pf.Changed("config")); err != nil {
 			return err
@@ -114,7 +118,8 @@ func NewRootCmd() *cobra.Command {
 			newAdhocCmd(),
 		}},
 		commandGroup{"chart", "Package", []*cobra.Command{
-			newTemplateCmd(),
+			newModuleCmd(),
+			newRenderCmd(),
 			newLintCmd(),
 			newPackageCmd(),
 		}},

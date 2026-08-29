@@ -235,7 +235,7 @@ func (p *pkgManager) upgradable(rc *RunContext, name string) (bool, *Result) {
 	case "apt":
 		// 模拟升级输出 "N upgraded, M newly installed" 汇总行，
 		// "already the newest version" 时无该行
-		script = fmt.Sprintf("DEBIAN_FRONTEND=noninteractive apt-get -s install --only-upgrade %s", q)
+		script = fmt.Sprintf("LC_ALL=C DEBIAN_FRONTEND=noninteractive apt-get -s install --only-upgrade %s", q) // LC_ALL=C：汇总行解析依赖英文文案
 	case "dnf", "yum":
 		// check-update 语义：100 = 有可用更新，0 = 无，其它 = 错误
 		script = fmt.Sprintf("%s check-update %s", p.kind, q)

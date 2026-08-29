@@ -24,6 +24,7 @@ import (
 
 	"wdp/internal/model"
 	"wdp/internal/report"
+	"wdp/internal/shellquote"
 )
 
 // Capture 包裹真实 reporter：静默收集单任务逐主机结果（stdout/失败态），
@@ -86,7 +87,7 @@ func ReadMarkerPlay(chartName, markerPath, pattern string) *model.Play {
 		Tasks: []*model.Task{{
 			Name:        "read release marker",
 			Module:      "shell",
-			FreeForm:    fmt.Sprintf("cat %s 2>/dev/null || echo __MISSING__", markerPath),
+			FreeForm:    fmt.Sprintf("cat -- %s 2>/dev/null || echo __MISSING__", shellquote.Quote(markerPath)),
 			ChangedWhen: "{{ false }}",
 		}},
 	}

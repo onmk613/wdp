@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sync"
 
+	"strconv"
+	"strings"
 	"wdp/internal/config"
 	"wdp/internal/model"
 	"wdp/internal/sshcfg"
@@ -72,7 +74,13 @@ func buildHost(name string, vars, groupVars map[string]any, cfg *config.Config) 
 		case "host":
 			h.Address = fmt.Sprint(v)
 		case "port":
-			h.Port = toInt(v, 22)
+			// 严格解析 + 范围校验：toInt 的 Sscanf 部分解析（"80x"→80）与
+			// 越界值（70000/0）此前静默接受/回退，连接期才暴露
+			n, err := strictPort(v, 22, 1)
+			if err != nil {
+				return fmt.Errorf("port: %w", err)
+			}
+			h.Port = n
 			explicitPort = true
 		case "user":
 			h.User = fmt.Sprint(v)
@@ -93,7 +101,11 @@ func buildHost(name string, vars, groupVars map[string]any, cfg *config.Config) 
 		case "agent_url":
 			h.AgentURL = fmt.Sprint(v)
 		case "agent_port":
-			h.AgentPort = toInt(v, 0)
+			n, err := strictPort(v, 0, 0)
+			if err != nil {
+				return fmt.Errorf("agent_port: %w", err)
+			}
+			h.AgentPort = n
 		case "host_key_check":
 			// 严格解析：非布尔值直接报错（静默当 false 会关闭指纹校验）
 			b, err := model.ParseBool(v)
@@ -170,6 +182,36 @@ func buildHost(name string, vars, groupVars map[string]any, cfg *config.Config) 
 	// 优先），使交互 ssh 可达的主机 wdp 同样可达
 	sshcfg.FillFromSSHConfig(h, explicitUser, explicitPort, explicitKeyPath)
 	return h, nil
+}
+
+// strictPort 严格解析整数端口：类型不符/部分解析（"80x"）显式报错，
+// 范围校验 0..65535（min 给出下界：SSH port >=1，agent_port 0=未设置）。
+func strictPort(v any, def, min int) (int, error) {
+	var n int
+	switch x := v.(type) {
+	case int:
+		n = x
+	case float64:
+		if x != float64(int(x)) {
+			return 0, fmt.Errorf("expected an integer, got %v", x)
+		}
+		n = int(x)
+	case string:
+		parsed, err := strconv.Atoi(strings.TrimSpace(x))
+		if err != nil {
+			return 0, fmt.Errorf("expected an integer, got %q", x)
+		}
+		n = parsed
+	default:
+		return 0, fmt.Errorf("expected an integer, got %T", v)
+	}
+	if n == 0 && def != 0 {
+		return def, nil // 未设置语义交给调用方默认值
+	}
+	if n < min || n > 65535 {
+		return 0, fmt.Errorf("%d is out of range %d..65535", n, min)
+	}
+	return n, nil
 }
 
 func toInt(v any, def int) int {
