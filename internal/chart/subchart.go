@@ -11,19 +11,43 @@ import (
 	"github.com/Masterminds/semver/v3"
 )
 
-// FindSub 按名递归查找子 chart（支持嵌套引用）。
-// 遍历按子 chart 名排序：同名子 chart 分布在不同分支时结果确定，
-// 不随 map 迭代顺序漂移（同一份 chart 两次解析命中同一实例）。
-func (c *Chart) FindSub(name string) *Chart {
+// MaxChartDepth 是 chart 引用展开的深度上限：合法的组件组合远小于此值，
+// 超过即视为环引用并报错（而非栈溢出崩溃）。executor 展开与可逆性评估
+// 共用本上限。
+const MaxChartDepth = 32
+
+// FindSub 按名递归查找子 chart（支持嵌套引用）。词法作用域优先：先查
+// 自身 Subs（就近遮蔽，与 Go 变量遮蔽同语义），未命中再向下递归。
+// 跨分支出现同名子 chart 时报错并列出候选路径——此前按字典序静默选
+// 一个，会把版本约束校验到错误的实例上。
+func (c *Chart) FindSub(name string) (*Chart, error) {
 	if sub, ok := c.Subs[name]; ok {
-		return sub
+		return sub, nil
 	}
-	for _, n := range sortedSubNames(c.Subs) {
-		if found := c.Subs[n].FindSub(name); found != nil {
-			return found
+	var found *Chart
+	var paths []string
+	var walk func(n *Chart, path string)
+	walk = func(n *Chart, path string) {
+		for _, cn := range sortedSubNames(n.Subs) {
+			p := path + "." + cn
+			if cn == name {
+				if found == nil {
+					found = n.Subs[cn]
+				}
+				paths = append(paths, p)
+			}
+			walk(n.Subs[cn], p)
 		}
 	}
-	return nil
+	walk(c, c.Meta.Name)
+	if len(paths) > 1 {
+		return nil, fmt.Errorf("subchart %q is ambiguous across branches (candidates: %s); reference it from the branch that owns it or rename to disambiguate",
+			name, strings.Join(paths, ", "))
+	}
+	if found == nil {
+		return nil, fmt.Errorf("subchart %q not found", name)
+	}
+	return found, nil
 }
 
 // sortedSubNames 返回子 chart 名的有序列表（map 迭代随机，
@@ -42,9 +66,9 @@ func sortedSubNames(subs map[string]*Chart) []string {
 // 保证版本语义不分叉。
 func (c *Chart) ResolveSub(ref string) (*Chart, error) {
 	name, constraint, constrained := strings.Cut(ref, "@")
-	sub := c.FindSub(name)
-	if sub == nil {
-		return nil, fmt.Errorf("subchart %q not found", name)
+	sub, err := c.FindSub(name)
+	if err != nil {
+		return nil, err
 	}
 	if constrained && constraint != "" {
 		v, err := semver.NewVersion(sub.Meta.Version)

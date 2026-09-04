@@ -56,10 +56,10 @@ func TestLifecycleLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Uninstall == nil || len(c.Uninstall) != 1 {
+	if c.Phases["uninstall"] == nil || len(c.Phases["uninstall"]) != 1 {
 		t.Fatal("uninstall.yaml 未加载")
 	}
-	if c.Status == nil || len(c.Status) != 1 {
+	if c.Phases["status"] == nil || len(c.Phases["status"]) != 1 {
 		t.Fatal("status.yaml 未加载")
 	}
 	if len(c.Meta.Required) != 2 {
@@ -103,7 +103,7 @@ func TestAnalyze(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := c.Analyze()
+	r := c.Analyze("deploy")
 	// copy/file 2 可逆 + setup 1 只读 + shell/package 2 不可逆
 	if r.Reversible != 2 || r.ReadOnly != 1 || r.Irreversible != 2 {
 		t.Fatalf("统计异常: %+v", r)
@@ -132,7 +132,7 @@ func TestAnalyzePartialReversible(t *testing.T) {
 		{Module: "unarchive"},
 		{Module: "shell", FreeForm: "x"},
 	}}}}
-	r := c.Analyze()
+	r := c.Analyze("deploy")
 	if r.Partial != 1 || r.Irreversible != 1 {
 		t.Fatalf("unarchive 应计为部分可逆: %+v", r)
 	}
@@ -153,11 +153,15 @@ func TestMarkerContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := string(c.MarkerContent("0.3.0", map[string]any{"a": 1}))
-	for _, want := range []string{`"chart": "myapp"`, `"version": "1.0.0"`, `"phase": "deploy"`, `"wdp_version": "0.3.0"`} {
+	b := string(c.MarkerContent("0.3.0", map[string]any{"a": 1}, "update"))
+	for _, want := range []string{`"chart": "myapp"`, `"version": "1.0.0"`, `"phase": "update"`, `"wdp_version": "0.3.0"`} {
 		if !strings.Contains(b, want) {
 			t.Fatalf("marker 缺 %s: %s", want, b)
 		}
+	}
+	// 空相位归一化为 deploy
+	if b := string(c.MarkerContent("0.3.0", nil, "")); !strings.Contains(b, `"phase": "deploy"`) {
+		t.Fatalf("空相位应按 deploy: %s", b)
 	}
 	if len(ValuesDigest(map[string]any{"a": 1})) != 12 {
 		t.Fatal("摘要长度应 12")
@@ -174,7 +178,7 @@ func TestAutoRollbackDetection(t *testing.T) {
 	c := &Chart{Deploy: []*model.Play{{
 		Strategy: &model.Strategy{Type: "canary", AutoRollback: true},
 	}}}
-	if !c.Analyze().AutoRollback {
+	if !c.Analyze("deploy").AutoRollback {
 		t.Fatal("未识别 auto_rollback")
 	}
 }

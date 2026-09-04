@@ -160,10 +160,13 @@ func (e *Executor) finishPlay(ctx context.Context, name string, stats map[string
 		e.rollbackDir = ""
 	}
 	if e.Opts.Chart != nil && !failed && !e.Opts.CheckMode {
-		switch e.Opts.Phase {
-		case "uninstall":
+		// marker 处置按相位属性：uninstall 等清除；deploy 及声明 release 的
+		// 相位（如 update）写入；其余相位不动 marker
+		spec := e.Opts.Chart.PhaseSpecFor(e.Opts.Phase)
+		switch {
+		case spec.ClearsMarker:
 			e.removeMarkers(ctx, hosts, e.Opts.Chart)
-		case "", "deploy":
+		case spec.Release:
 			e.writeMarkers(ctx, hosts, e.Opts.Chart)
 		}
 	}

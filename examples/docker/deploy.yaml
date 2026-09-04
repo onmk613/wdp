@@ -1,17 +1,29 @@
 # docker 部署相位（独立 chart，主机组 docker）。
 #
 # 用法：
-#   wdp run test/docker -i test/inventory.yaml                    # 在线模式
+#   wdp run test/docker -i test/inventory.yaml                    # 部署（制品 cache-first：packages/ 已有则零联网，未命中下载一次落缓存）
 #   wdp run test/docker -i test/inventory.yaml --check --diff     # 零风险预演
-#   wdp run test/docker -i test/inventory.yaml --set online_install=false   # 离线模式
-#   打包：wdp package test/docker → docker-1.0.0.tgz（离线制品先放 packages/）
+#   wdp run test/docker -i test/inventory.yaml --phase download   # 仅准备离线制品（控制机 packages/，可离线执行）
+#   打包：wdp package test/docker → docker-1.0.0.tgz（制品先 --phase download 备好，包内自带即纯离线安装）
+
+- name: 采集节点 facts
+  hosts: docker
+  tasks:
+    - name: 采集 facts（架构判定；--tags download 时同样执行）
+      setup:
+      tags: [download]
 
 - name: 安装 docker（官方静态包）
   hosts: docker
   become: true
   tasks:
-    - name: 采集 facts（架构判定）
-      setup:
+    # 控制机侧：预下载官方静态包与 cli 插件到 packages/<arch>/（幂等，制品
+    # 齐全时零下载）——避免多主机并发时重复下载；--tags download 可单独触发
+    - name: 准备 packages 离线制品
+      include: tasks/download.yaml
+      tags: [download]
+      delegate_to: localhost
+      run_once: true
 
     - name: 不支持的架构直接失败（仅 x86_64 / aarch64）
       shell: 'echo "unsupported architecture: {{ .arch }}" >&2; exit 1'
@@ -24,56 +36,32 @@
         mode: "0755"
       loop: ['{{ .conf_dir }}', '{{ .cli_plugins_dir }}']
 
-    # ---------- 在线模式：下载官方静态包 → 解包暂存（按版本键控，升级可重解） → install 展开 ----------
-    - name: 下载 docker 静态包
-      get_url:
+    # ---------- 制品分发：artifact cache-first，单一任务统一在线/离线 ----------
+    # 控制机 packages/<arch>/ 已有制品（--phase download 预置 / tgz 离线包自带）
+    # 则零联网直接分发；未命中则控制端下载一次落缓存（全部主机复用）再分发。
+    # members 按文件名在官方静态包内检索二进制（kubernetes/etcd 发布包同理），
+    # 拍平落位 dest，权限沿用归档条目（此处显式 0755）。
+    - name: 分发 docker 二进制（含内嵌 containerd）
+      artifact:
         url: "{{ .download_base }}/{{ .arch }}/docker-{{ .version }}.tgz"
-        dest: /tmp/wdp-docker-{{ .version }}.tgz
-        mode: "0644"
-      when: '{{ .online_install }}'
+        cache: "packages/{{ .arch }}/docker-{{ .version }}.tgz"
+        members: [containerd, containerd-shim-runc-v2, ctr, docker, docker-init, docker-proxy, dockerd, runc]
+        dest: "{{ .bin_dir }}"
+        mode: "0755"
 
-    - name: 解包到暂存目录（tgz 内含 docker/ 前缀，wdp unarchive 无 strip）
-      unarchive:
-        src: /tmp/wdp-docker-{{ .version }}.tgz
-        dest: "{{ .staging_dir }}-{{ .version }}"
-        remote_src: true
-        creates: "{{ .staging_dir }}-{{ .version }}/docker/dockerd"
-      when: '{{ .online_install }}'
-
-    - name: 安装二进制到 bin_dir
-      shell: 'install -m 0755 {{ .staging_dir }}-{{ .version }}/docker/* {{ .bin_dir }}/'
-      when: '{{ .online_install }}'
-
-    - name: 下载 docker compose 插件（release 名用 x86_64 风格架构）
-      get_url:
+    - name: 分发 docker compose 插件（release 名用 x86_64 风格架构）
+      artifact:
         url: "https://github.com/docker/compose/releases/download/{{ .compose_version }}/docker-compose-linux-{{ .arch }}"
+        cache: "packages/{{ .arch }}/docker-compose"
         dest: "{{ .cli_plugins_dir }}/docker-compose"
         mode: "0755"
-      when: '{{ .online_install }}'
 
-    - name: 下载 docker buildx 插件（release 名用 Go 风格架构）
-      get_url:
+    - name: 分发 docker buildx 插件（release 名用 Go 风格架构）
+      artifact:
         url: 'https://github.com/docker/buildx/releases/download/{{ .buildx_version }}/buildx-{{ .buildx_version }}.linux-{{ include "docker.arch_alias" . }}'
+        cache: "packages/{{ .arch }}/docker-buildx"
         dest: "{{ .cli_plugins_dir }}/docker-buildx"
         mode: "0755"
-      when: '{{ .online_install }}'
-
-    # ---------- 离线模式：packages/<arch>/ 预置制品（copy 按 sha256 幂等） ----------
-    - name: 分发 docker/containerd 二进制
-      copy:
-        src: "packages/{{ .arch }}/{{ .item }}"
-        dest: "{{ .bin_dir }}/{{ .item }}"
-        mode: "0755"
-      loop: [containerd, containerd-shim-runc-v2, ctr, docker, docker-init, docker-proxy, dockerd, runc]
-      when: '{{ not .online_install }}'
-
-    - name: 分发 cli 插件（compose / buildx）
-      copy:
-        src: "packages/{{ .arch }}/{{ .item }}"
-        dest: "{{ .cli_plugins_dir }}/{{ .item }}"
-        mode: "0755"
-      loop: [docker-compose, docker-buildx]
-      when: '{{ not .online_install }}'
 
     # ---------- 配置与服务（变更 → notify 重启） ----------
     - name: 渲染 daemon.json

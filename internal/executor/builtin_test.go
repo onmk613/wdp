@@ -148,3 +148,47 @@ func TestMarkerWriteAndRemove(t *testing.T) {
 		t.Fatalf("uninstall 不应再使用 rm -rf:\n%s", scripts)
 	}
 }
+
+// TestMarkerCustomPhase 相位属性驱动 marker：声明 release 的自定义相位
+// （update）成功后写 marker 并记录真实相位；普通相位（stop）不写不清。
+func TestMarkerCustomPhase(t *testing.T) {
+	setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0}, nil
+	})
+	ch := &chart.Chart{}
+	ch.Meta.Name = "markerapp"
+	ch.Meta.MarkerDir = "/tmp/wdp-marker-test"
+	ch.Meta.Phases = map[string]chart.PhaseSpec{"update": {Release: true}}
+
+	run := func(phase string) {
+		inv := parseTestInv(t)
+		ex := New(inv, conn.NewManager(), &captureReporter{}, Options{
+			Forks: 2, Chart: ch, Phase: phase, WdpVersion: "test", Values: map[string]any{},
+		})
+		plays := []*model.Play{{Hosts: "h1", Tasks: []*model.Task{{Module: "shell", FreeForm: "true"}}}}
+		if ex.Run(context.Background(), plays) {
+			t.Fatalf("phase=%s 不应失败", phase)
+		}
+	}
+
+	run("update")
+	fs := allFakes()
+	markerPath := "/tmp/wdp-marker-test/markerapp/release.json"
+	content, ok := fs[0].File(markerPath)
+	if !ok {
+		t.Fatalf("release 相位应写 marker: %#v", fs[0].Files)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(content), &m); err != nil {
+		t.Fatalf("marker 非法 JSON: %v", err)
+	}
+	if m["phase"] != "update" {
+		t.Fatalf("marker 应记录实际相位 update: %s", content)
+	}
+
+	run("stop")
+	scripts := joinExecScripts(allFakes())
+	if strings.Contains(scripts, "rm -f -- '/tmp/wdp-marker-test/markerapp/release.json'") {
+		t.Fatalf("普通相位不应清 marker:\n%s", scripts)
+	}
+}

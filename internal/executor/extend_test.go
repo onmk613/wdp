@@ -136,6 +136,43 @@ func TestHookLifecycle(t *testing.T) {
 	}
 }
 
+// TestHookCustomPhase 自定义相位 hook：pre_stop/post_stop 在 stop 相位执行，
+// 其它相位的 hook 跳过（泛化匹配 pre_<phase>/post_<phase>）。
+func TestHookCustomPhase(t *testing.T) {
+	ex, rep := setup(t, okExec)
+	ex.Opts.Phase = "stop"
+	plays := []*model.Play{{
+		Hosts: "h1",
+		Tasks: []*model.Task{
+			{Name: "pre", Module: "shell", FreeForm: "echo pre-stop", Hook: "pre_stop"},
+			{Name: "main", Module: "shell", FreeForm: "echo main"},
+			{Name: "post", Module: "shell", FreeForm: "echo post-stop", Hook: "post_stop"},
+			{Name: "install-only", Module: "shell", FreeForm: "echo nope", Hook: "pre_install"},
+		},
+	}}
+	if ex.Run(context.Background(), plays) {
+		t.Fatalf("不应失败:\n%s", rep.joined())
+	}
+	var order []string
+	for _, f := range allFakes() {
+		for _, r := range f.ExecLog {
+			switch {
+			case strings.Contains(r.Script, "pre-stop"):
+				order = append(order, "pre")
+			case strings.Contains(r.Script, "echo main"):
+				order = append(order, "main")
+			case strings.Contains(r.Script, "post-stop"):
+				order = append(order, "post")
+			case strings.Contains(r.Script, "nope"):
+				order = append(order, "nope")
+			}
+		}
+	}
+	if got := strings.Join(order, ","); got != "pre,main,post" {
+		t.Fatalf("自定义相位 hook 顺序应为 pre,main,post，实际 %q", got)
+	}
+}
+
 // TestHookPostSkippedOnFailure 主任务失败时 post_install 不执行。
 func TestHookPostSkippedOnFailure(t *testing.T) {
 	script := func(host string, req conn.ExecRequest) (conn.ExecResult, error) {

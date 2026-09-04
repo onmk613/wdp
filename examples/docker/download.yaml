@@ -1,0 +1,19 @@
+# docker 离线制品准备相位：wdp run test/docker -i test/inventory.yaml --phase download
+#
+# 在控制机 packages/<arch>/ 落齐官方静态包与 cli 插件（幂等：制品齐全时零下载），
+# 供离线模式（--set online_install=false）分发与 wdp package 离线打包。
+# 与 deploy.yaml 内 --tags download 的随部署预下载同源（tasks/download.yaml）。
+# 相位语义用缺省零值即可：纯准备动作，不写 marker、不记部署记录。
+
+- name: 采集节点 facts（架构探测）
+  hosts: docker
+  tasks:
+    - name: 采集 facts（download_archs 未显式指定时按节点架构准备制品）
+      setup:
+
+- name: 准备 packages 离线制品（控制机）
+  hosts: docker
+  tasks:
+    - include: tasks/download.yaml
+      delegate_to: localhost
+      run_once: true

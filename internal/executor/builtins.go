@@ -26,6 +26,7 @@ var builtinVarNames = []string{
 	"groups",             // 组名→成员（含 children 展开、group_by/add_host 动态组）
 	"hosts",              // 主机名→{name,address,port,conn}
 	"hostvars",           // 主机名→该主机变量域（inventory 变量 + fact store）
+	"playbook_dir",       // playbook/chart 根目录绝对路径（Ansible 同名语义）
 }
 
 // injectBuiltins 在变量域组装完成后强制注入内置变量（最后写入，覆盖一切）。
@@ -39,6 +40,17 @@ func (e *Executor) injectBuiltins(vars map[string]any, h *model.Host, playHosts,
 	vars["groups"] = e.Inv.GroupsMap()
 	vars["hosts"] = e.Inv.HostsMeta()
 	vars["hostvars"] = e.hostvarsSnapshot()
+	vars["playbook_dir"] = e.Opts.BaseDir
+}
+
+// injectPlanBuiltins 是 plan 执行模式的内置变量注入：只覆盖执行期才能
+// 确定的 playbook_dir（物化目录路径）与批次事实；跨主机信息（groups/
+// hosts/hostvars/group_names/inventory_hostname）保留编译期冻结值——
+// 主机侧执行时拿不到其他主机的 facts（docs/15 §2.3）。
+func (e *Executor) injectPlanBuiltins(vars map[string]any, h *model.Host, playHosts, batchHosts []*model.Host) {
+	vars["play_hosts"] = hostNames(playHosts)
+	vars["play_batch"] = hostNames(batchHosts)
+	vars["playbook_dir"] = e.Opts.BaseDir
 }
 
 // hostvarsSnapshot 返回主机名→变量域快照：inventory 主机变量 + fact store

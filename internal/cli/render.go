@@ -17,6 +17,21 @@ import (
 	"wdp/internal/render"
 )
 
+const renderHelp = `
+chart 静态渲染预览（不执行、不连主机）
+
+输出三段：合并后的 values（defaults + -f/--set 深合并）、全部模板文件的渲染
+结果、deploy 任务清单（chart 引用展开一层，与执行侧同口径）
+渲染用样例域：合并 values + --hostname 占位主机名（默认 preview-host）
+预览不加载 inventory：声明了 inventory_override 的键实际值可能被 inventory
+同名变量覆盖，此处只反映 chart values 口径
+要看"真机现状下会改什么"用 wdp run --check（连主机、只读探测 + 变更预估）
+
+示例：
+wdp render ./myapp
+wdp render ./myapp -f envs/prod.yaml --hostname web1
+`
+
 // newRenderCmd 构造 `wdp render`：chart 静态渲染预览（不执行；执行侧
 // 预演用 wdp run --check）。
 func newRenderCmd() *cobra.Command {
@@ -27,8 +42,8 @@ func newRenderCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "render <chart-dir|tgz>",
 		Short: "preview merged values, rendered templates and the task list (no execution)",
-
-		Args: cobra.ExactArgs(1),
+		Long:  renderHelp,
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ch, values, eng, err := chart.OpenWithLimits(args[0], valuesFiles, setArgs, chart.Limits{MaxExtractBytes: config.Current().MaxExtractBytes()})
 			if err != nil {
@@ -93,11 +108,15 @@ func printTasks(out io.Writer, tasks []*model.Task, domain map[string]any, eng *
 				fmt.Fprintf(out, "%s    !! %s\n", indent, err.Error())
 				continue
 			}
+			// 入口 play 与执行侧一致：缺省 deploy，tasks_from 选其他相位
+			sp, perr := sub.EntryPlay(t.TasksFrom)
+			if perr != nil {
+				fmt.Fprintf(out, "%s    !! %s\n", indent, perr.Error())
+				continue
+			}
 			scope := chart.SubScope(sub, domain)
 			maps.Copy(scope, t.ChartVars)
-			for _, sp := range sub.Deploy {
-				printTasks(out, sp.Tasks, scope, eng, ch, indent+"    ")
-			}
+			printTasks(out, sp.Tasks, scope, eng, ch, indent+"    ")
 			continue
 		}
 		if t.FreeForm != "" {

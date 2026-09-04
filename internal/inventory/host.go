@@ -42,6 +42,111 @@ func isHostKey(k string) bool {
 	return hostKeys[k]
 }
 
+// hostKeyApplier 把单个主机条目键写进 Host——buildHost 的字段 switch
+// 提取为可直测单元（不经过 isHostKey 白名单门），对账测试对每个文档键
+// 直接 apply 哨兵值、反射断言字段被填充。
+type hostKeyApplier struct {
+	h *model.Host
+	// connect_timeout 解析失败时的兜底（buildHost 从 wdp.cfg 传入）
+	connectTimeoutDef int
+	// 连接参数是否由 inventory 显式给出（组级或条目均算；决定
+	// ~/.ssh/config 能否补全：显式键 > ssh config > wdp.cfg/内置默认）
+	explicitUser, explicitPort, explicitKeyPath bool
+}
+
+// apply 写入一个键；未识别的键静默跳过（buildHost 只对 isHostKey 命中的
+// 键调用）。
+func (a *hostKeyApplier) apply(k string, v any) error {
+	h := a.h
+	switch k {
+	case "host":
+		h.Address = fmt.Sprint(v)
+	case "port":
+		// 严格解析 + 范围校验：toInt 的 Sscanf 部分解析（"80x"→80）与
+		// 越界值（70000/0）此前静默接受/回退，连接期才暴露
+		n, err := strictPort(v, 22, 1)
+		if err != nil {
+			return fmt.Errorf("port: %w", err)
+		}
+		h.Port = n
+		a.explicitPort = true
+	case "user":
+		h.User = fmt.Sprint(v)
+		a.explicitUser = true
+	case "password":
+		h.Password = fmt.Sprint(v)
+	case "password_env":
+		h.PasswordEnv = fmt.Sprint(v)
+	case "key_path":
+		h.KeyPath = fmt.Sprint(v)
+		a.explicitKeyPath = true
+	case "key_passphrase":
+		h.KeyPassphrase = fmt.Sprint(v)
+	case "key_passphrase_env":
+		h.KeyPassphraseEnv = fmt.Sprint(v)
+	case "conn":
+		h.Conn = fmt.Sprint(v)
+	case "agent_url":
+		h.AgentURL = fmt.Sprint(v)
+	case "agent_port":
+		n, err := strictPort(v, 0, 0)
+		if err != nil {
+			return fmt.Errorf("agent_port: %w", err)
+		}
+		h.AgentPort = n
+	case "host_key_check":
+		// 严格解析：非布尔值直接报错（静默当 false 会关闭指纹校验）
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("host_key_check: %w", err)
+		}
+		h.HostKeyCheck = b
+	case "known_hosts":
+		h.KnownHosts = fmt.Sprint(v)
+	case "connect_timeout":
+		h.ConnectTimeoutSec = toInt(v, a.connectTimeoutDef)
+	case "ca_file":
+		h.CAFile = fmt.Sprint(v)
+	case "cert_file":
+		h.CertFile = fmt.Sprint(v)
+	case "key_file":
+		h.KeyFile = fmt.Sprint(v)
+	case "binary_path":
+		h.BinaryPath = fmt.Sprint(v)
+	case "keep_agent":
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("keep_agent: %w", err)
+		}
+		h.KeepAgent = b
+	case "become_password":
+		h.BecomePassword = fmt.Sprint(v)
+	case "become_password_env":
+		h.BecomePasswordEnv = fmt.Sprint(v)
+	case "tls":
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("tls: %w", err)
+		}
+		h.TLS = b
+	case "insecure_skip_verify":
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("insecure_skip_verify: %w", err)
+		}
+		h.InsecureSkipVerify = b
+	case "tls_skip_host_verify":
+		b, err := model.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("tls_skip_host_verify: %w", err)
+		}
+		h.TLSSkipHostVerify = b
+	case "tls_server_name":
+		h.TLSServerName = fmt.Sprint(v)
+	}
+	return nil
+}
+
 // buildHost 构建主机对象。连接参数三层合并（高→低）：
 //  1. 主机条目键（vars）
 //  2. 组级键（groupVars：all.vars < 组 vars 链，与变量域合并同序）
@@ -66,102 +171,11 @@ func buildHost(name string, vars, groupVars map[string]any, cfg *config.Config) 
 		KnownHosts:        cfg.SSH.KnownHosts,
 		ConnectTimeoutSec: cfg.SSHConnectTimeout(),
 	}
-	// 连接参数是否由 inventory 显式给出（组级或条目均算；决定 ~/.ssh/config
-	// 能否补全：显式键 > ssh config > wdp.cfg/内置默认，对齐 OpenSSH 优先级）
-	explicitUser, explicitPort, explicitKeyPath := false, false, false
-	applyKeys := func(k string, v any) error {
-		switch k {
-		case "host":
-			h.Address = fmt.Sprint(v)
-		case "port":
-			// 严格解析 + 范围校验：toInt 的 Sscanf 部分解析（"80x"→80）与
-			// 越界值（70000/0）此前静默接受/回退，连接期才暴露
-			n, err := strictPort(v, 22, 1)
-			if err != nil {
-				return fmt.Errorf("port: %w", err)
-			}
-			h.Port = n
-			explicitPort = true
-		case "user":
-			h.User = fmt.Sprint(v)
-			explicitUser = true
-		case "password":
-			h.Password = fmt.Sprint(v)
-		case "password_env":
-			h.PasswordEnv = fmt.Sprint(v)
-		case "key_path":
-			h.KeyPath = fmt.Sprint(v)
-			explicitKeyPath = true
-		case "key_passphrase":
-			h.KeyPassphrase = fmt.Sprint(v)
-		case "key_passphrase_env":
-			h.KeyPassphraseEnv = fmt.Sprint(v)
-		case "conn":
-			h.Conn = fmt.Sprint(v)
-		case "agent_url":
-			h.AgentURL = fmt.Sprint(v)
-		case "agent_port":
-			n, err := strictPort(v, 0, 0)
-			if err != nil {
-				return fmt.Errorf("agent_port: %w", err)
-			}
-			h.AgentPort = n
-		case "host_key_check":
-			// 严格解析：非布尔值直接报错（静默当 false 会关闭指纹校验）
-			b, err := model.ParseBool(v)
-			if err != nil {
-				return fmt.Errorf("host_key_check: %w", err)
-			}
-			h.HostKeyCheck = b
-		case "known_hosts":
-			h.KnownHosts = fmt.Sprint(v)
-		case "connect_timeout":
-			h.ConnectTimeoutSec = toInt(v, cfg.SSHConnectTimeout())
-		case "ca_file":
-			h.CAFile = fmt.Sprint(v)
-		case "cert_file":
-			h.CertFile = fmt.Sprint(v)
-		case "key_file":
-			h.KeyFile = fmt.Sprint(v)
-		case "binary_path":
-			h.BinaryPath = fmt.Sprint(v)
-		case "keep_agent":
-			b, err := model.ParseBool(v)
-			if err != nil {
-				return fmt.Errorf("keep_agent: %w", err)
-			}
-			h.KeepAgent = b
-		case "become_password":
-			h.BecomePassword = fmt.Sprint(v)
-		case "become_password_env":
-			h.BecomePasswordEnv = fmt.Sprint(v)
-		case "tls":
-			b, err := model.ParseBool(v)
-			if err != nil {
-				return fmt.Errorf("tls: %w", err)
-			}
-			h.TLS = b
-		case "insecure_skip_verify":
-			b, err := model.ParseBool(v)
-			if err != nil {
-				return fmt.Errorf("insecure_skip_verify: %w", err)
-			}
-			h.InsecureSkipVerify = b
-		case "tls_skip_host_verify":
-			b, err := model.ParseBool(v)
-			if err != nil {
-				return fmt.Errorf("tls_skip_host_verify: %w", err)
-			}
-			h.TLSSkipHostVerify = b
-		case "tls_server_name":
-			h.TLSServerName = fmt.Sprint(v)
-		}
-		return nil
-	}
+	ap := &hostKeyApplier{h: h, connectTimeoutDef: cfg.SSHConnectTimeout()}
 	// 组级连接键（低层）先应用，主机条目随后覆盖
 	for k, v := range groupVars {
 		if isHostKey(k) {
-			if err := applyKeys(k, v); err != nil {
+			if err := ap.apply(k, v); err != nil {
 				return nil, err
 			}
 		}
@@ -171,7 +185,7 @@ func buildHost(name string, vars, groupVars map[string]any, cfg *config.Config) 
 			h.Vars[k] = v
 			continue
 		}
-		if err := applyKeys(k, v); err != nil {
+		if err := ap.apply(k, v); err != nil {
 			return nil, err
 		}
 	}
@@ -180,7 +194,7 @@ func buildHost(name string, vars, groupVars map[string]any, cfg *config.Config) 
 	}
 	// ~/.ssh/config 补全未显式给出的 SSH 参数（仅 ssh/push 通道；显式键
 	// 优先），使交互 ssh 可达的主机 wdp 同样可达
-	sshcfg.FillFromSSHConfig(h, explicitUser, explicitPort, explicitKeyPath)
+	sshcfg.FillFromSSHConfig(h, ap.explicitUser, ap.explicitPort, ap.explicitKeyPath)
 	return h, nil
 }
 

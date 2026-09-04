@@ -11,15 +11,35 @@ import (
 	"github.com/spf13/pflag"
 )
 
+const caHelp = `
+自管 CA 与证书签发工具
+
+init 创建根 CA；issue 签发证书（server/client/peer 用途）；renew 延期；show 查看证书详情
+用于 agent mTLS、push 会话 CA 等场景
+`
+
 // newCACmd 构造 `wdp ca`（mTLS 证书工具）。
 func newCACmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ca",
 		Short: "self-managed CA and certificate issuing",
+		Long:  caHelp,
 	}
 	cmd.AddCommand(newCAInitCmd(), newCAIssueCmd(), newCARenewCmd(), newCAShowCmd())
 	return cmd
 }
+
+const caInitHelp = `
+创建全新根 CA
+
+生成 CA 证书与私钥（<name>.crt/.key），输出路径与证书指纹
+--name 文件名（默认 ca）；--days 有效期；--path-len 中间 CA 深度
+（0 = 默认，只签叶子不允许中间 CA；N>0 允许 N 层；-1 不限）
+主题（--cn/--o/--ou/--c/--st/--l）与密钥规格（--key-algo ed25519|ecdsa|rsa、--key-size）可定制
+
+示例：
+wdp ca init ./ca-dir --days 3650
+`
 
 // newCAInitCmd 生成全新根 CA
 func newCAInitCmd() *cobra.Command {
@@ -28,6 +48,7 @@ func newCAInitCmd() *cobra.Command {
 		Use:   "init [new-ca-path]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "create new root CA to dir",
+		Long:  caInitHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
 				CAInitOptions.Dir = args[0]
@@ -51,6 +72,21 @@ func newCAInitCmd() *cobra.Command {
 	return cmd
 }
 
+const caIssueHelp = `
+用 CA 签发证书
+
+--profile 选择用途：server（ServerAuth）/ client（ClientAuth）/ peer（两者）
+--san 可重复：裸值自动识别 IP 或 DNS，uri:/email: 前缀指定 URI/Email SAN——
+多宿主/NAT/端口转发的主机一张证书覆盖全部地址
+--days 有效期；0 = 自动跟随 CA 剩余有效期（短 CA 跟随、长 CA 封顶 30d，绝不超出 CA 到期）
+--ca-cert/--ca-key 指定签发 CA（默认 <dir>/ca.crt 与 <dir>/ca.key）
+--name 证书文件名与默认 CN（--cn 可覆盖 CN，不影响文件名）
+输出证书、私钥路径与指纹；agent --pin-client-fp <指纹> 可开启客户端精确吊销
+
+示例：
+wdp ca issue ./ca-dir --profile server --san 10.0.0.11 --san web1.example.com
+`
+
 // newCAIssueCmd 构造 `wdp ca issue`。
 func newCAIssueCmd() *cobra.Command {
 	CAIssueOptions := ca.IssueOptions{Dir: "."}
@@ -60,6 +96,7 @@ func newCAIssueCmd() *cobra.Command {
 		Use:   "issue [new-ca-path]",
 		Args:  cobra.MaximumNArgs(1),
 		Short: "issue a certificate",
+		Long:  caIssueHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
 				CAIssueOptions.Dir = args[0]
@@ -108,6 +145,18 @@ func caKeyFlags(f *pflag.FlagSet, key *ca.KeySpec) {
 	f.IntVar(&key.Size, "key-size", 0, "key size: rsa 2048/3072/4096, ecdsa 256/384/521, ed25519 n/a (0 = default per algo)")
 }
 
+const caRenewHelp = `
+延长证书有效期
+
+--cert 指定要延期的证书（必填）；--key 为其配对私钥（--new-key 时可省）
+--days 是在当前到期时间上增加的天数（默认 30），仍被 CA 到期时间封顶
+--new-key 轮换私钥（算法不变）；--ca-cert/--ca-key 指定重签名 CA（默认输出目录下的 ca.crt/ca.key）
+产物默认写到 ./<旧证书文件名>，位置参数可指定输出路径
+
+示例：
+wdp ca renew --cert server.crt --key server.key --days 60
+`
+
 // newCARenewCmd 构造 `wdp ca renew`。
 func newCARenewCmd() *cobra.Command {
 	// OutPath 留空 = ca.Renew 语义的 "./<旧证书文件名>"；置 "." 会被推导成
@@ -116,6 +165,7 @@ func newCARenewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "renew [new-ca-path]",
 		Short: "extend a certificate's expiry",
+		Long:  caRenewHelp,
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
@@ -142,12 +192,25 @@ func newCARenewCmd() *cobra.Command {
 	return cmd
 }
 
+const caShowHelp = `
+查看证书携带的信息
+
+输出主题/签发者（自签名标注）、序列号、有效期（剩余天数/过期标记）、
+CA 角色与 PathLen 深度、签名与公钥算法、密钥用途、SAN、SHA256 指纹
+--key 同时验证私钥与证书公钥配对（不匹配则非零退出）
+
+示例：
+wdp ca show ca.crt
+wdp ca show server.crt --key server.key
+`
+
 // newCAShowCmd 构造 `wdp ca show`（查看证书携带的信息）。
 func newCAShowCmd() *cobra.Command {
 	var keyPath string
 	cmd := &cobra.Command{
 		Use:   "show <CAFilePath>",
 		Short: "show certificate details",
+		Long:  caShowHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			info, err := ca.Inspect(args[0])

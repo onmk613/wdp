@@ -40,7 +40,7 @@ func addCommandGroups(root *cobra.Command, groups ...commandGroup) {
 
 var (
 	gInventories       []string // -i 可重复；未指定时 PersistentPreRunE 回填 config 默认
-	gInventoryExplicit bool     // -i 是否用户显式指定（--hosts 互斥判定用）
+	gInventoryExplicit bool     // -i 是否用户显式指定--inventory（和--hosts 互斥判定用）
 	gVerbosity         int      // -v 计数：0 聚合 / 1 逐主机 / 2 全量输出 / 3 调试
 	gQuiet             bool     // -q：仅异常与 RECAP
 	gOutput            string   // console | json
@@ -48,6 +48,9 @@ var (
 
 // NewRootCmd 构造根命令与子命令树
 func NewRootCmd() *cobra.Command {
+	// help 按注册序展示（每组内语义排序：如 schema 在 module 前——结构
+	// 骨架参考先于具体模块文档），而非字母序
+	cobra.EnableCommandSorting = false
 	root := &cobra.Command{
 		Use:           "wdp",
 		Short:         "wdp — an automation & deployment tool",
@@ -115,9 +118,12 @@ func NewRootCmd() *cobra.Command {
 	addCommandGroups(root,
 		commandGroup{"deploy", "Deployment", []*cobra.Command{
 			newRunCmd(),
+			newPlanCmd(),
+			newApplyCmd(),
 			newAdhocCmd(),
 		}},
 		commandGroup{"chart", "Package", []*cobra.Command{
+			newSchemaCmd(),
 			newModuleCmd(),
 			newRenderCmd(),
 			newLintCmd(),

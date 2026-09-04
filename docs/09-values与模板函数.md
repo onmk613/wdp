@@ -13,6 +13,10 @@ values.yaml（chart 默认） → -f 文件（按命令行顺序） → --set（
 | 列表 | 整体替换（不按下标合并） |
 | 显式 `null` / `~` | **删除**基础层对应的键 |
 
+> chart 可自带 `values.schema.json`（JSON Schema）对合并结果做类型/取值
+> 校验，在 lint 与部署相位拦截坏配置——详见
+> [08 · values schema 校验](08-chart应用包.md#values-schema-校验values-schemajson)。
+
 ```yaml
 # values.yaml（第 1 层）
 app:

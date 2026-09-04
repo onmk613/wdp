@@ -124,7 +124,7 @@ func TestRootHelpGrouped(t *testing.T) {
 	// 组 ↔ 命令归属断言（直接断言组 ID 字面量，与 root.go 的分组定义对账）
 	want := map[string]string{
 		"run": "deploy", "adhoc": "deploy",
-		"module": "chart", "render": "chart", "lint": "chart", "package": "chart",
+		"schema": "chart", "module": "chart", "render": "chart", "lint": "chart", "package": "chart",
 		"ca":       "security",
 		"scan-ssh": "security",
 		"agent":    "agent",

@@ -22,10 +22,11 @@
 | 分组 | 命令 |
 |---|---|
 | 部署命令 | `run`、`adhoc` |
-| 应用包命令 | `module`、`render`、`lint`、`package` |
+| 应用包命令 | `schema`、`module`、`render`、`lint`、`package` |
 | 安全与信任命令 | `ca`、`scan-ssh` |
 | 代理命令 | `agent` |
 | 运维与记录命令 | `release`、`drift`、`inventory` |
+| 计划与自治命令 | `plan`、`apply`（见 [15 自治执行](15-自治执行改造方案.md)） |
 
 版本信息用框架自带的 `wdp --version`。
 
@@ -36,7 +37,7 @@ wdp run <playbook.yaml | chart目录 | chart.tgz>
         [-i inventory（可多次）] [-f values 文件（可多次）] [--set k=v（可多次）]
         [--limit 模式] [-t/--tags 逗号分隔] [--skip-tags 逗号分隔]
         [--check] [--diff] [--list-hosts] [--start-at-task 任务名]
-        [--phase deploy|uninstall|status] [--fact-cache facts.json] [-y/--yes]
+        [--phase <相位>] [--fact-cache facts.json] [-y/--yes]
 ```
 
 | flag | 说明 |
@@ -51,7 +52,7 @@ wdp run <playbook.yaml | chart目录 | chart.tgz>
 | `--diff` | 内容级差异（自动启用 check） |
 | `--list-hosts` | 仅列出将执行的主机 |
 | `--start-at-task` | 从指定任务开始（调试） |
-| `--phase` | chart 生命周期相位（deploy 缺省 / uninstall / status） |
+| `--phase` | chart 生命周期相位（缺省 deploy）：根目录任意 `<phase>.yaml` 都是相位——内置 `uninstall` / `status`，自定义如 `update` / `download`（见 [08 生命周期](08-chart应用包.md#生命周期)）；未知相位报错并列出可用相位 |
 | `--fact-cache` | fact store 持久化 JSON：启动加载、结束原子落盘（setup/set_fact 跨运行复用；损坏自动忽略） |
 | `-y / --yes` | 跳过不可逆操作确认（CI 建议） |
 
@@ -61,14 +62,82 @@ wdp run <playbook.yaml | chart目录 | chart.tgz>
 wdp run site.yaml -i base.yaml -i prod.yaml --limit 'web*,!web1'
 wdp run ./myapp -f envs/prod.yaml --set app.port=9090 --check --diff
 wdp run ./myapp-0.1.0.tgz -i inv.yaml --phase uninstall -y
+wdp run ./myapp -i inv.yaml --phase download    # 自定义相位：准备离线制品
 ```
 
 退出码：0 成功；1 存在失败主机或错误。
+
+## wdp plan
+
+```
+wdp plan <chart目录|chart.tgz>
+        [-i inventory（可多次）] [-f values 文件] [--set k=v]
+        [--phase <相位>] [--limit 模式] [--fact-cache facts.json]
+        [-o plan.json]
+
+wdp plan show <plan.json> [--host 主机名]
+wdp plan diff <plan-a.json> <plan-b.json>
+```
+
+把 chart + inventory + values 离线编译为**完全解析的执行计划**（部署相位
+不连接任何主机）。plan 是一等产物：跨主机信息（groups/hosts/hostvars、
+values、play vars）在编译期固化为字面值；`when`/`loop`/模板渲染保留给
+执行侧（可能依赖运行时 register）。同一 chart + 同一 values 两次编译产出
+**逐字节相同**的 plan.json（PlanID 内容寻址）；文件被篡改后 `plan` 拒绝加载。
+
+| flag | 说明 |
+|---|---|
+| `-o / --output-file` | 写出 plan.json（缺省打印到 stdout；0600 落盘） |
+| `--phase` / `--limit` / `-f` / `--set` | 与 `wdp run` 同语义 |
+| `--fact-cache` | 把已有 facts 冻结进计划变量域 |
+
+非部署相位（uninstall/status 等）的 values 来自各主机 release marker
+（需连接读取，与 `run` 同语义）。
+
+```sh
+wdp plan ./myapp -i inv.yaml -f envs/prod.yaml -o plan.json   # 编译（离线）
+wdp plan show plan.json --host 10.20.0.11                     # 这台机器会发生什么
+wdp plan diff plan-a.json plan-b.json                         # 任务级 + values 级差异
+```
+
+plan 内嵌 chart 树快照（自包含）；`packages/` 制品目录与大文件只记录
+sha256 引用（`--chart-dir` 在 apply 时本地补齐，或由模块按 URL 分发）。
+
+## wdp apply
+
+```
+wdp apply <plan.json>
+        [--limit 模式] [-t/--tags] [--skip-tags] [--check] [--diff] [-y/--yes]
+        [--chart-dir chart目录] [--fact-cache facts.json]
+        [--autonomous] [--detach] [--resume] [--become-password-env VAR]
+
+wdp apply status <plan.json> <run-id前缀> [--limit 模式]
+```
+
+执行 `wdp plan` 产出的已批准计划。连接元数据来自计划本身，不依赖 chart
+目录或 inventory 在现场存在；与 `wdp run` 在同一 chart 上产生相同执行
+结果（`run` = `plan` + `apply` 的组合）。
+
+| flag | 说明 |
+|---|---|
+| `--chart-dir` | 为计划引用的大文件制品提供本地来源（离线分发） |
+| `--autonomous` | 把计划分片提交给目标 agent 自治执行：agent 收到分片后本地完成收敛并落 journal，控制端可随时断开（断连容忍）；按 `via` 中继根分组提交，跳板机 agent 即该网段本地控制端。仅支持 agent 通道（其他通道显式报错）；旧版 agent 无 `/plan` 端点时自动回退控制端直接执行 |
+| `--detach` | 配合 `--autonomous`：agent 接受即返回，事后用 `apply status` 回查 |
+| `--resume` | 配合 `--autonomous`：从各 agent 的 journal 断点续跑（已 ok/changed 的任务不重做；plan 变更则拒绝续跑） |
+| `--become-password-env` | become 密码的环境变量（随分片下发、仅驻留 agent 内存；推荐免密 sudo） |
+
+```sh
+wdp apply plan.json -y                          # 控制端直接执行
+wdp apply plan.json --autonomous -y             # 提交 agent 自治执行并等待终态
+wdp apply plan.json --autonomous --detach -y    # 提交即返回
+wdp apply status plan.json <run-id前缀>         # 回查自治执行进度（journal）
+```
 
 ## wdp adhoc
 
 ```
 wdp adhoc -m <模块名> -a '<参数>' [--become] [--format '模板'] [--check] [--diff] <主机模式>
+wdp adhoc -m <模块名> -a '<参数>' --hosts <内联主机表达式>...
 ```
 
 | flag | 说明 |
@@ -76,14 +145,30 @@ wdp adhoc -m <模块名> -a '<参数>' [--become] [--format '模板'] [--check] 
 | `-m / --module` | 模块名（缺省 shell；`wdp module` 查看列表） |
 | `-a / --args` | free-form 命令或 `k=v` 参数列表 |
 | `-b / --become` | 提权执行 |
+| `--hosts` | 内联主机表达式（IP/主机[:端口]，支持 `10.8.2.101-104` 区间），免 inventory 文件；此时主机模式可省略（默认 all），与显式 `-i` 互斥（同 `run --hosts` 口径） |
 | `--format` | 逐主机模板化输出（`.host .stdout .rc …`），进 shell 管道 |
 | `--check` / `--diff` | 预演 / 差异 |
 
 ```sh
 wdp adhoc -m shell -a 'uptime' all
+wdp adhoc -m shell -a 'uptime' --hosts 10.8.2.101-104        # 临时目标，免清单
 wdp adhoc -m package -a 'name=curl state=present' --become webservers
 wdp adhoc -m stat -a 'path=/etc/hosts' --format '{{.host}} {{.stdout}}' web*
 ```
+
+## wdp schema
+
+```
+wdp schema [host|task] [--json]
+```
+
+**YAML 结构字段速查**（写 inventory / playbook 前的骨架参考，区别于具体模块的参数文档）：
+
+- `wdp schema host` — 主机条目可用的全部连接参数键（地址/SSH 认证/TLS/提权口令/agent 与 push 专属），未列出的键一律视为主机变量
+- `wdp schema task` — 任务控制属性全表（条件/循环/重试/提权/委托/结果判定/容错块），按语义分组附可粘贴示例
+- `--json` 机器可读（编辑器插件/脚本）；无参打总览
+
+字段表与解析器同源（对账测试防漂移）；具体模块（shell/copy/...）的参数文档用 `wdp module <名>`。
 
 ## wdp module
 
@@ -159,6 +244,7 @@ wdp drift ./myapp 'web*' -f envs/prod.yaml       # 指定组与 values 口径
 wdp release list [chart名前缀]
 wdp release show <id> [--values]
 wdp release diff <id1> <id2>
+wdp release del <id> [<id>...] [--prefix | --regex] [--yes]
 ```
 
 | 子命令 | 说明 |
@@ -166,6 +252,7 @@ wdp release diff <id1> <id2>
 | `list` | 部署记录列表（新在前，可按 chart 名前缀过滤） |
 | `show` | 记录详情；`--values` 仅输出 values 快照 YAML（可直接 `-f` 重放） |
 | `diff` | 两次部署 values 逐路径对比 |
+| `del` | 删除记录（可多条）。默认按 ID 删、支持唯一前缀，歧义时报候选、先全解析后删；`--prefix`/`--regex` 批量删全部命中（正则非锚定），批量先列清单、`--yes` 确认执行 |
 
 记录存于 `~/.wdp/releases/<id>.json`。
 

@@ -1,0 +1,896 @@
+{
+  "schema": 1,
+  "plan_id": "171cc1f092aa3ee9b5158e3c1a79542d34ea13f523400f5f610da6bc9e3af5d9",
+  "chart": "docker",
+  "version": "1.0.0",
+  "phase": "deploy",
+  "wdp_version": "golden",
+  "values": {
+    "bin_dir": "/usr/bin",
+    "buildx_version": "v0.33.0",
+    "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+    "compose_version": "v5.1.1",
+    "conf_dir": "/etc/docker",
+    "data_dir": "/var/lib",
+    "download_archs": [],
+    "download_base": "https://download.docker.com/linux/static/stable",
+    "log": {
+      "driver": "json-file",
+      "level": "warn",
+      "max_file": 5,
+      "max_size": "50m"
+    },
+    "uninstall_remove_binaries": false,
+    "version": "29.3.0"
+  },
+  "meta": {
+    "Name": "docker",
+    "Version": "1.0.0",
+    "Description": "docker（官方静态包，dockerd 内嵌 containerd 单服务化，含 compose/buildx cli 插件）。 独立应用包：在线/离线双模式，完整生命周期（deploy / status / uninstall）， 可 wdp package 打成 tgz 离线分发。",
+    "Required": [],
+    "MarkerDir": "",
+    "NoMarker": false,
+    "CheckMode": false,
+    "InventoryOverride": null,
+    "SensitiveValues": null,
+    "Phases": null
+  },
+  "helpers": "{{/* docker chart 公共命名模板 */}}\n\n{{/* 架构别名：下载 URL 用 Go 风格（x86_64→amd64，aarch64→arm64）；不支持 → unsupported */}}\n{{ define \"docker.arch_alias\" -}}\n{{ index (dict \"x86_64\" \"amd64\" \"aarch64\" \"arm64\" \"amd64\" \"amd64\" \"arm64\" \"arm64\") .arch | default \"unsupported\" }}\n{{- end }}\n",
+  "files": {
+    "_helpers.tpl": "e3svKiBkb2NrZXIgY2hhcnQg5YWs5YWx5ZG95ZCN5qih5p2/ICovfX0KCnt7Lyog5p625p6E5Yir5ZCN77ya5LiL6L29IFVSTCDnlKggR28g6aOO5qC877yIeDg2XzY04oaSYW1kNjTvvIxhYXJjaDY04oaSYXJtNjTvvInvvJvkuI3mlK/mjIEg4oaSIHVuc3VwcG9ydGVkICovfX0Ke3sgZGVmaW5lICJkb2NrZXIuYXJjaF9hbGlhcyIgLX19Cnt7IGluZGV4IChkaWN0ICJ4ODZfNjQiICJhbWQ2NCIgImFhcmNoNjQiICJhcm02NCIgImFtZDY0IiAiYW1kNjQiICJhcm02NCIgImFybTY0IikgLmFyY2ggfCBkZWZhdWx0ICJ1bnN1cHBvcnRlZCIgfX0Ke3stIGVuZCB9fQo=",
+    "chart.yaml": "bmFtZTogZG9ja2VyCnZlcnNpb246IDEuMC4wCmRlc2NyaXB0aW9uOiA+LQogIGRvY2tlcu+8iOWumOaWuemdmeaAgeWMhe+8jGRvY2tlcmQg5YaF5bWMIGNvbnRhaW5lcmQg5Y2V5pyN5Yqh5YyW77yM5ZCrIGNvbXBvc2UvYnVpbGR4IGNsaSDmj5Lku7bvvInjgIIKICDni6znq4vlupTnlKjljIXvvJrlnKjnur8v56a757q/5Y+M5qih5byP77yM5a6M5pW055Sf5ZG95ZGo5pyf77yIZGVwbG95IC8gc3RhdHVzIC8gdW5pbnN0YWxs77yJ77yMCiAg5Y+vIHdkcCBwYWNrYWdlIOaJk+aIkCB0Z3og56a757q/5YiG5Y+R44CCCgpyZXF1aXJlZDogW10K",
+    "deploy.yaml": "IyBkb2NrZXIg6YOo572y55u45L2N77yI54us56uLIGNoYXJ077yM5Li75py657uEIGRvY2tlcu+8ieOAggojCiMg55So5rOV77yaCiMgICB3ZHAgcnVuIHRlc3QvZG9ja2VyIC1pIHRlc3QvaW52ZW50b3J5LnlhbWwgICAgICAgICAgICAgICAgICAgICMg6YOo572y77yI5Yi25ZOBIGNhY2hlLWZpcnN077yacGFja2FnZXMvIOW3suacieWImembtuiBlOe9ke+8jOacquWRveS4reS4i+i9veS4gOasoeiQvee8k+WtmO+8iQojICAgd2RwIHJ1biB0ZXN0L2RvY2tlciAtaSB0ZXN0L2ludmVudG9yeS55YW1sIC0tY2hlY2sgLS1kaWZmICAgICAjIOmbtumjjumZqemihOa8lAojICAgd2RwIHJ1biB0ZXN0L2RvY2tlciAtaSB0ZXN0L2ludmVudG9yeS55YW1sIC0tcGhhc2UgZG93bmxvYWQgICAjIOS7heWHhuWkh+emu+e6v+WItuWTge+8iOaOp+WItuacuiBwYWNrYWdlcy/vvIzlj6/nprvnur/miafooYzvvIkKIyAgIOaJk+WMhe+8mndkcCBwYWNrYWdlIHRlc3QvZG9ja2VyIOKGkiBkb2NrZXItMS4wLjAudGd677yI5Yi25ZOB5YWIIC0tcGhhc2UgZG93bmxvYWQg5aSH5aW977yM5YyF5YaF6Ieq5bim5Y2z57qv56a757q/5a6J6KOF77yJCgotIG5hbWU6IOmHh+mbhuiKgueCuSBmYWN0cwogIGhvc3RzOiBkb2NrZXIKICB0YXNrczoKICAgIC0gbmFtZTog6YeH6ZuGIGZhY3Rz77yI5p625p6E5Yik5a6a77ybLS10YWdzIGRvd25sb2FkIOaXtuWQjOagt+aJp+ihjO+8iQogICAgICBzZXR1cDoKICAgICAgdGFnczogW2Rvd25sb2FkXQoKLSBuYW1lOiDlronoo4UgZG9ja2Vy77yI5a6Y5pa56Z2Z5oCB5YyF77yJCiAgaG9zdHM6IGRvY2tlcgogIGJlY29tZTogdHJ1ZQogIHRhc2tzOgogICAgIyDmjqfliLbmnLrkvqfvvJrpooTkuIvovb3lrpjmlrnpnZnmgIHljIXkuI4gY2xpIOaPkuS7tuWIsCBwYWNrYWdlcy88YXJjaD4v77yI5bmC562J77yM5Yi25ZOBCiAgICAjIOm9kOWFqOaXtumbtuS4i+i9ve+8ieKAlOKAlOmBv+WFjeWkmuS4u+acuuW5tuWPkeaXtumHjeWkjeS4i+i9ve+8my0tdGFncyBkb3dubG9hZCDlj6/ljZXni6zop6blj5EKICAgIC0gbmFtZTog5YeG5aSHIHBhY2thZ2VzIOemu+e6v+WItuWTgQogICAgICBpbmNsdWRlOiB0YXNrcy9kb3dubG9hZC55YW1sCiAgICAgIHRhZ3M6IFtkb3dubG9hZF0KICAgICAgZGVsZWdhdGVfdG86IGxvY2FsaG9zdAogICAgICBydW5fb25jZTogdHJ1ZQoKICAgIC0gbmFtZTog5LiN5pSv5oyB55qE5p625p6E55u05o6l5aSx6LSl77yI5LuFIHg4Nl82NCAvIGFhcmNoNjTvvIkKICAgICAgc2hlbGw6ICdlY2hvICJ1bnN1cHBvcnRlZCBhcmNoaXRlY3R1cmU6IHt7IC5hcmNoIH19IiA+JjI7IGV4aXQgMScKICAgICAgd2hlbjogJ3t7IGlmIGVxIChpbmNsdWRlICJkb2NrZXIuYXJjaF9hbGlhcyIgLikgInVuc3VwcG9ydGVkIiB9fXllc3t7IGVsc2UgfX1ub3t7IGVuZCB9fScKCiAgICAtIG5hbWU6IOmFjee9ruebruW9le+8iGRhZW1vbi5qc29uIOS4jiBjbGkg5o+S5Lu277yJCiAgICAgIGZpbGU6CiAgICAgICAgcGF0aDogInt7IC5pdGVtIH19IgogICAgICAgIHN0YXRlOiBkaXJlY3RvcnkKICAgICAgICBtb2RlOiAiMDc1NSIKICAgICAgbG9vcDogWyd7eyAuY29uZl9kaXIgfX0nLCAne3sgLmNsaV9wbHVnaW5zX2RpciB9fSddCgogICAgIyAtLS0tLS0tLS0tIOWItuWTgeWIhuWPke+8mmFydGlmYWN0IGNhY2hlLWZpcnN077yM5Y2V5LiA5Lu75Yqh57uf5LiA5Zyo57q/L+emu+e6vyAtLS0tLS0tLS0tCiAgICAjIOaOp+WItuacuiBwYWNrYWdlcy88YXJjaD4vIOW3suacieWItuWTge+8iC0tcGhhc2UgZG93bmxvYWQg6aKE572uIC8gdGd6IOemu+e6v+WMheiHquW4pu+8iQogICAgIyDliJnpm7bogZTnvZHnm7TmjqXliIblj5HvvJvmnKrlkb3kuK3liJnmjqfliLbnq6/kuIvovb3kuIDmrKHokL3nvJPlrZjvvIjlhajpg6jkuLvmnLrlpI3nlKjvvInlho3liIblj5HjgIIKICAgICMgbWVtYmVycyDmjInmlofku7blkI3lnKjlrpjmlrnpnZnmgIHljIXlhoXmo4DntKLkuozov5vliLbvvIhrdWJlcm5ldGVzL2V0Y2Qg5Y+R5biD5YyF5ZCM55CG77yJ77yMCiAgICAjIOaLjeW5s+iQveS9jSBkZXN077yM5p2D6ZmQ5rK/55So5b2S5qGj5p2h55uu77yI5q2k5aSE5pi+5byPIDA3NTXvvInjgIIKICAgIC0gbmFtZTog5YiG5Y+RIGRvY2tlciDkuozov5vliLbvvIjlkKvlhoXltYwgY29udGFpbmVyZO+8iQogICAgICBhcnRpZmFjdDoKICAgICAgICB1cmw6ICJ7eyAuZG93bmxvYWRfYmFzZSB9fS97eyAuYXJjaCB9fS9kb2NrZXIte3sgLnZlcnNpb24gfX0udGd6IgogICAgICAgIGNhY2hlOiAicGFja2FnZXMve3sgLmFyY2ggfX0vZG9ja2VyLXt7IC52ZXJzaW9uIH19LnRneiIKICAgICAgICBtZW1iZXJzOiBbY29udGFpbmVyZCwgY29udGFpbmVyZC1zaGltLXJ1bmMtdjIsIGN0ciwgZG9ja2VyLCBkb2NrZXItaW5pdCwgZG9ja2VyLXByb3h5LCBkb2NrZXJkLCBydW5jXQogICAgICAgIGRlc3Q6ICJ7eyAuYmluX2RpciB9fSIKICAgICAgICBtb2RlOiAiMDc1NSIKCiAgICAtIG5hbWU6IOWIhuWPkSBkb2NrZXIgY29tcG9zZSDmj5Lku7bvvIhyZWxlYXNlIOWQjeeUqCB4ODZfNjQg6aOO5qC85p625p6E77yJCiAgICAgIGFydGlmYWN0OgogICAgICAgIHVybDogImh0dHBzOi8vZ2l0aHViLmNvbS9kb2NrZXIvY29tcG9zZS9yZWxlYXNlcy9kb3dubG9hZC97eyAuY29tcG9zZV92ZXJzaW9uIH19L2RvY2tlci1jb21wb3NlLWxpbnV4LXt7IC5hcmNoIH19IgogICAgICAgIGNhY2hlOiAicGFja2FnZXMve3sgLmFyY2ggfX0vZG9ja2VyLWNvbXBvc2UiCiAgICAgICAgZGVzdDogInt7IC5jbGlfcGx1Z2luc19kaXIgfX0vZG9ja2VyLWNvbXBvc2UiCiAgICAgICAgbW9kZTogIjA3NTUiCgogICAgLSBuYW1lOiDliIblj5EgZG9ja2VyIGJ1aWxkeCDmj5Lku7bvvIhyZWxlYXNlIOWQjeeUqCBHbyDpo47moLzmnrbmnoTvvIkKICAgICAgYXJ0aWZhY3Q6CiAgICAgICAgdXJsOiAnaHR0cHM6Ly9naXRodWIuY29tL2RvY2tlci9idWlsZHgvcmVsZWFzZXMvZG93bmxvYWQve3sgLmJ1aWxkeF92ZXJzaW9uIH19L2J1aWxkeC17eyAuYnVpbGR4X3ZlcnNpb24gfX0ubGludXgte3sgaW5jbHVkZSAiZG9ja2VyLmFyY2hfYWxpYXMiIC4gfX0nCiAgICAgICAgY2FjaGU6ICJwYWNrYWdlcy97eyAuYXJjaCB9fS9kb2NrZXItYnVpbGR4IgogICAgICAgIGRlc3Q6ICJ7eyAuY2xpX3BsdWdpbnNfZGlyIH19L2RvY2tlci1idWlsZHgiCiAgICAgICAgbW9kZTogIjA3NTUiCgogICAgIyAtLS0tLS0tLS0tIOmFjee9ruS4juacjeWKoe+8iOWPmOabtCDihpIgbm90aWZ5IOmHjeWQr++8iSAtLS0tLS0tLS0tCiAgICAtIG5hbWU6IOa4suafkyBkYWVtb24uanNvbgogICAgICB0ZW1wbGF0ZToKICAgICAgICBzcmM6IHRlbXBsYXRlcy9kYWVtb24uanNvbi50cGwKICAgICAgICBkZXN0OiAie3sgLmNvbmZfZGlyIH19L2RhZW1vbi5qc29uIgogICAgICAgIG1vZGU6ICIwNjQ0IgogICAgICBub3RpZnk6IOmHjeWQryBkb2NrZXIKCiAgICAtIG5hbWU6IOmDqOe9siBkb2NrZXIg5Y2V5YWD5bm25ZCv5YqoCiAgICAgIHN5c3RlbWRfdW5pdDoKICAgICAgICBuYW1lOiBkb2NrZXIuc2VydmljZQogICAgICAgIHNyYzogdGVtcGxhdGVzL2RvY2tlci5zZXJ2aWNlLnRwbAogICAgICAgIHN0YXRlOiBzdGFydGVkCiAgICAgICAgZW5hYmxlZDogdHJ1ZQogICAgICBub3RpZnk6IOmHjeWQryBkb2NrZXIKCiAgaGFuZGxlcnM6CiAgICAtIG5hbWU6IOmHjeWQryBkb2NrZXIKICAgICAgc2VydmljZToKICAgICAgICBuYW1lOiBkb2NrZXIKICAgICAgICBzdGF0ZTogcmVzdGFydGVkCg==",
+    "download.yaml": "IyBkb2NrZXIg56a757q/5Yi25ZOB5YeG5aSH55u45L2N77yad2RwIHJ1biB0ZXN0L2RvY2tlciAtaSB0ZXN0L2ludmVudG9yeS55YW1sIC0tcGhhc2UgZG93bmxvYWQKIwojIOWcqOaOp+WItuacuiBwYWNrYWdlcy88YXJjaD4vIOiQvem9kOWumOaWuemdmeaAgeWMheS4jiBjbGkg5o+S5Lu277yI5bmC562J77ya5Yi25ZOB6b2Q5YWo5pe26Zu25LiL6L2977yJ77yMCiMg5L6b56a757q/5qih5byP77yILS1zZXQgb25saW5lX2luc3RhbGw9ZmFsc2XvvInliIblj5HkuI4gd2RwIHBhY2thZ2Ug56a757q/5omT5YyF44CCCiMg5LiOIGRlcGxveS55YW1sIOWGhSAtLXRhZ3MgZG93bmxvYWQg55qE6ZqP6YOo572y6aKE5LiL6L295ZCM5rqQ77yIdGFza3MvZG93bmxvYWQueWFtbO+8ieOAggojIOebuOS9jeivreS5ieeUqOe8uuecgembtuWAvOWNs+WPr++8mue6r+WHhuWkh+WKqOS9nO+8jOS4jeWGmSBtYXJrZXLjgIHkuI3orrDpg6jnvbLorrDlvZXjgIIKCi0gbmFtZTog6YeH6ZuG6IqC54K5IGZhY3Rz77yI5p625p6E5o6i5rWL77yJCiAgaG9zdHM6IGRvY2tlcgogIHRhc2tzOgogICAgLSBuYW1lOiDph4fpm4YgZmFjdHPvvIhkb3dubG9hZF9hcmNocyDmnKrmmL7lvI/mjIflrprml7bmjInoioLngrnmnrbmnoTlh4blpIfliLblk4HvvIkKICAgICAgc2V0dXA6CgotIG5hbWU6IOWHhuWkhyBwYWNrYWdlcyDnprvnur/liLblk4HvvIjmjqfliLbmnLrvvIkKICBob3N0czogZG9ja2VyCiAgdGFza3M6CiAgICAtIGluY2x1ZGU6IHRhc2tzL2Rvd25sb2FkLnlhbWwKICAgICAgZGVsZWdhdGVfdG86IGxvY2FsaG9zdAogICAgICBydW5fb25jZTogdHJ1ZQo=",
+    "status.yaml": "IyBkb2NrZXIg54q25oCB5beh5qOA77ya5Y+q6K+777yM5oql5ZGK5pyN5Yqh54q25oCB5LiO54mI5pys44CCCgotIG5hbWU6IGRvY2tlciDlt6Hmo4AKICBob3N0czogZG9ja2VyCiAgYmVjb21lOiB0cnVlCiAgdGFza3M6CiAgICAtIG5hbWU6IOacjeWKoeeKtuaAge+8iGFjdGl2ZS9lbmFibGVkIOWNleihjO+8iQogICAgICBzaGVsbDogcHJpbnRmICclcy8lcycgIiQoc3lzdGVtY3RsIGlzLWFjdGl2ZSBkb2NrZXIpIiAiJChzeXN0ZW1jdGwgaXMtZW5hYmxlZCBkb2NrZXIpIgogICAgICByZWdpc3RlcjogZHN0CiAgICAgIGNoYW5nZWRfd2hlbjogJ3t7IGZhbHNlIH19JwoKICAgIC0gbmFtZTog54mI5pysCiAgICAgIHNoZWxsOiBkb2NrZXIgdmVyc2lvbiAtLWZvcm1hdCAne3tge3sgLlNlcnZlci5WZXJzaW9uIH19YH19JwogICAgICByZWdpc3RlcjogZHZlcgogICAgICBjaGFuZ2VkX3doZW46ICd7eyBmYWxzZSB9fScKCiAgICAtIG5hbWU6IGNvbXBvc2Ug5o+S5Lu254mI5pys77yI5pyq5a6J6KOF5oqlIGFic2VudO+8iQogICAgICBzaGVsbDogZG9ja2VyIGNvbXBvc2UgdmVyc2lvbiAtLXNob3J0IDI+L2Rldi9udWxsIHx8IGVjaG8gYWJzZW50CiAgICAgIHJlZ2lzdGVyOiBkY29tcG9zZQogICAgICBjaGFuZ2VkX3doZW46ICd7eyBmYWxzZSB9fScKCiAgICAtIG5hbWU6IOaxh+aKpQogICAgICBkZWJ1ZzoKICAgICAgICBtc2c6ICdob3N0PXt7IC5pbnZlbnRvcnlfaG9zdG5hbWUgfX0gZG9ja2VyPXt7IC5kdmVyLnN0ZG91dCB9fSBjb21wb3NlPXt7IC5kY29tcG9zZS5zdGRvdXQgfX0gc3RhdGU9e3sgLmRzdC5zdGRvdXQgfX0nCg==",
+    "tasks/download.yaml": "IyBkb2NrZXIg56a757q/5Yi25ZOB5YeG5aSH77yIZGVwbG95LnlhbWwg57uPIGluY2x1ZGUg5LiL5rKJIGRlbGVnYXRlX3RvOiBsb2NhbGhvc3QgKwojIHJ1bl9vbmNlOiB0cnVl77ybLS10YWdzIGRvd25sb2FkIOaIluaguSBkb3dubG9hZC55YW1sIOebuOS9jeinpuWPke+8ieOAguS4i+i9veWumOaWuQojIOmdmeaAgeWMheS4jiBjbGkg5o+S5Lu255qE5Y6f5aeL5Yi25ZOB5Yiw5o6n5Yi25py6IHBhY2thZ2VzLzxhcmNoPi/vvIzkuI3lgZrop6PljovigJTigJTliIblj5HkvqcKIyBhcnRpZmFjdCDmqKHlnZfmjIkgbWVtYmVycyDmlofku7blkI3lnKjljIXlhoXmo4DntKLjgILluYLnrYnvvJrnm67moIfmlofku7blrZjlnKjkuJTpnZ7nqbroh6rliqgKIyDot7Pov4fvvIjpooTnva7ov4fliLblk4HnmoTmjqfliLbmnLrph43lpI3miafooYzpm7bkuIvovb3vvJvljYfnuqfniYjmnKzmlLkgdmFsdWVzIOWQjuiHquWKqOmHjeS4i++8ieOAggoKLSBuYW1lOiDop6PmnpDnm67moIfmnrbmnoTliJfooajvvIh2YWx1ZXMg5LyY5YWI77yM5YW25qyh6IqC54K5IGZhY3Rz77yM5Zue6YCAIHg4Nl82NO+8iQogIHNldF9mYWN0OgogICAgZG93bmxvYWRfYXJjaF9saXN0OiA+LQogICAgICB7eyAkbGlzdCA6PSBsaXN0IH19e3sgaWYgLmRvd25sb2FkX2FyY2hzIH19e3sgJGxpc3QgPSAuZG93bmxvYWRfYXJjaHMgfX17eyBlbHNlIH19e3sgcmFuZ2UgJGggOj0gaW5kZXggJC5ncm91cHMgImRvY2tlciIgfX17eyAkYSA6PSBkaWcgImFyY2giICIiIChpbmRleCAkLmhvc3R2YXJzICRoKSB9fXt7IGlmICRhIH19e3sgJGxpc3QgPSBhcHBlbmQgJGxpc3QgJGEgfX17eyBlbmQgfX17eyBlbmQgfX17eyBlbmQgfX17eyBpZiBub3QgJGxpc3QgfX17eyAkbGlzdCA9IGxpc3QgIng4Nl82NCIgfX17eyBlbmQgfX17eyB0b19qc29uICh1bmlxICRsaXN0KSB9fQoKLSBuYW1lOiDovpPlh7rnm67moIfmnrbmnoQKICBkZWJ1ZzoKICAgIG1zZzogJ+ebruagh+aetuaehDoge3sgLmRvd25sb2FkX2FyY2hfbGlzdCB9fScKCi0gbmFtZTog5LiL6L29IGRvY2tlciDlrpjmlrnpnZnmgIHljIXvvIjljp/lp4sgdGd677yJCiAgc2hlbGw6IHwKICAgIHNldCAtZQogICAgcGtnPSJ7eyAucGxheWJvb2tfZGlyIH19L3BhY2thZ2VzL3t7IC5pdGVtIH19IgogICAgbWtkaXIgLXAgIiRwa2ciCiAgICB0Z3o9IiRwa2cvZG9ja2VyLXt7IC52ZXJzaW9uIH19LnRneiIKICAgIGlmIFsgLXMgIiR0Z3oiIF07IHRoZW4gZWNobyAiY2FjaGVkOiAkdGd6IjsgZXhpdCAwOyBmaQogICAgZWNobyAiZmV0Y2gge3sgLmRvd25sb2FkX2Jhc2UgfX0ve3sgLml0ZW0gfX0vZG9ja2VyLXt7IC52ZXJzaW9uIH19LnRneiIKICAgIGN1cmwgLWZTTCAtLXJldHJ5IDMgLS1yZXRyeS1kZWxheSAzIC0tcmV0cnktYWxsLWVycm9ycyAtQyAtIC0tbWF4LXRpbWUgOTAwIFwKICAgICAgLW8gIiR0Z3oudG1wIiAie3sgLmRvd25sb2FkX2Jhc2UgfX0ve3sgLml0ZW0gfX0vZG9ja2VyLXt7IC52ZXJzaW9uIH19LnRneiIKICAgIG12ICIkdGd6LnRtcCIgIiR0Z3oiCiAgbG9vcDogJ3t7IC5kb3dubG9hZF9hcmNoX2xpc3QgfX0nCgotIG5hbWU6IOS4i+i9vSBjb21wb3NlIC8gYnVpbGR4IGNsaSDmj5Lku7YKICBzaGVsbDogfAogICAgc2V0IC1lCiAgICBwa2c9Int7IC5wbGF5Ym9va19kaXIgfX0vcGFja2FnZXMve3sgLml0ZW0gfX0iCiAgICBta2RpciAtcCAiJHBrZyIKICAgICMgY29tcG9zZSDlj5HluIPlkI3nlKggeDg2XzY0IOmjjuagvOaetuaehO+8iOS4jiAuaXRlbSDkuIDoh7TvvInvvIxidWlsZHgg55SoIGFtZDY0L2FybTY0CiAgICBidWlsZHhfYXJjaD17eyBpZiBlcSAuaXRlbSAieDg2XzY0IiB9fWFtZDY0e3sgZWxzZSB9fWFybTY0e3sgZW5kIH19CiAgICBpZiBbICEgLXMgIiRwa2cvZG9ja2VyLWNvbXBvc2UiIF07IHRoZW4KICAgICAgZWNobyAiZmV0Y2ggZG9ja2VyLWNvbXBvc2Uge3sgLmNvbXBvc2VfdmVyc2lvbiB9fSAoe3sgLml0ZW0gfX0pIgogICAgICBjdXJsIC1mU0wgLS1yZXRyeSAzIC0tcmV0cnktZGVsYXkgMyAtLXJldHJ5LWFsbC1lcnJvcnMgLUMgLSAtLW1heC10aW1lIDkwMCBcCiAgICAgICAgLW8gIiRwa2cvZG9ja2VyLWNvbXBvc2UudG1wIiBcCiAgICAgICAgImh0dHBzOi8vZ2l0aHViLmNvbS9kb2NrZXIvY29tcG9zZS9yZWxlYXNlcy9kb3dubG9hZC97eyAuY29tcG9zZV92ZXJzaW9uIH19L2RvY2tlci1jb21wb3NlLWxpbnV4LXt7IC5pdGVtIH19IgogICAgICBtdiAiJHBrZy9kb2NrZXItY29tcG9zZS50bXAiICIkcGtnL2RvY2tlci1jb21wb3NlIgogICAgZmkKICAgIGlmIFsgISAtcyAiJHBrZy9kb2NrZXItYnVpbGR4IiBdOyB0aGVuCiAgICAgIGVjaG8gImZldGNoIGRvY2tlci1idWlsZHgge3sgLmJ1aWxkeF92ZXJzaW9uIH19ICh7eyAuaXRlbSB9fSkiCiAgICAgIGN1cmwgLWZTTCAtLXJldHJ5IDMgLS1yZXRyeS1kZWxheSAzIC0tcmV0cnktYWxsLWVycm9ycyAtQyAtIC0tbWF4LXRpbWUgOTAwIFwKICAgICAgICAtbyAiJHBrZy9kb2NrZXItYnVpbGR4LnRtcCIgXAogICAgICAgICJodHRwczovL2dpdGh1Yi5jb20vZG9ja2VyL2J1aWxkeC9yZWxlYXNlcy9kb3dubG9hZC97eyAuYnVpbGR4X3ZlcnNpb24gfX0vYnVpbGR4LXt7IC5idWlsZHhfdmVyc2lvbiB9fS5saW51eC0kYnVpbGR4X2FyY2giCiAgICAgIG12ICIkcGtnL2RvY2tlci1idWlsZHgudG1wIiAiJHBrZy9kb2NrZXItYnVpbGR4IgogICAgZmkKICAgIGNobW9kIDA3NTUgIiRwa2cvZG9ja2VyLWNvbXBvc2UiICIkcGtnL2RvY2tlci1idWlsZHgiCiAgbG9vcDogJ3t7IC5kb3dubG9hZF9hcmNoX2xpc3QgfX0nCg==",
+    "templates/config.toml.tpl": "dmVyc2lvbiA9IDIKcm9vdCA9ICJ7eyBkaWcgImRvY2tlcl9kYXRhX2RpciIgKHByaW50ZiAiJXMvY29udGFpbmVyZCIgLmRhdGFfZGlyKSAuIH19IgpzdGF0ZSA9ICIvcnVuL2NvbnRhaW5lcmQiCg==",
+    "templates/containerd.service.tpl": "W1VuaXRdCkRlc2NyaXB0aW9uPWNvbnRhaW5lcmQgY29udGFpbmVyIHJ1bnRpbWUKRG9jdW1lbnRhdGlvbj1odHRwczovL2NvbnRhaW5lcmQuaW8KQWZ0ZXI9bmV0d29yay50YXJnZXQKCltTZXJ2aWNlXQpVc2VyPXJvb3QKRXhlY1N0YXJ0UHJlPS9zYmluL21vZHByb2JlIG92ZXJsYXkKRXhlY1N0YXJ0PXt7IC5iaW5fZGlyIH19L2NvbnRhaW5lcmQKClR5cGU9bm90aWZ5ClJlc3RhcnQ9YWx3YXlzClJlc3RhcnRTZWM9NQpEZWxlZ2F0ZT15ZXMKS2lsbE1vZGU9cHJvY2VzcwoKTGltaXROT0ZJTEU9MTA0ODU3NgpMaW1pdE5QUk9DPWluZmluaXR5CkxpbWl0Q09SRT1pbmZpbml0eQoKVGFza3NNYXg9aW5maW5pdHkKT09NU2NvcmVBZGp1c3Q9LTk5OQoKW0luc3RhbGxdCldhbnRlZEJ5PW11bHRpLXVzZXIudGFyZ2V0",
+    "templates/daemon.json.tpl": "ewogICJkYXRhLXJvb3QiOiAie3sgZGlnICJkb2NrZXJfZGF0YV9kaXIiIC5kYXRhX2RpciAuIH19L2RvY2tlciIsCiAgImxvZy1kcml2ZXIiOiAie3sgLmxvZy5kcml2ZXIgfX0iLAogICJsb2ctbGV2ZWwiOiAie3sgLmxvZy5sZXZlbCB9fSIsCiAgImxvZy1vcHRzIjogewogICAgIm1heC1zaXplIjogInt7IC5sb2cubWF4X3NpemUgfX0iLAogICAgIm1heC1maWxlIjogInt7IC5sb2cubWF4X2ZpbGUgfCB0b1N0cmluZyB9fSIKICB9LAogICJpcHRhYmxlcyI6IHRydWUsCiAgInVzZXJsYW5kLXByb3h5IjogZmFsc2UKfQo=",
+    "templates/docker.service.tpl": "W1VuaXRdCkRlc2NyaXB0aW9uPURvY2tlciBBcHBsaWNhdGlvbiBDb250YWluZXIgRW5naW5lCkRvY3VtZW50YXRpb249aHR0cHM6Ly9kb2NzLmRvY2tlci5jb20KQWZ0ZXI9bmV0d29yay1vbmxpbmUudGFyZ2V0IHRpbWUtc2V0LnRhcmdldApXYW50cz1uZXR3b3JrLW9ubGluZS50YXJnZXQKU3RhcnRMaW1pdEJ1cnN0PTMKU3RhcnRMaW1pdEludGVydmFsU2VjPTYwCgpbU2VydmljZV0KVHlwZT1ub3RpZnkKRXhlY1N0YXJ0PXt7IC5iaW5fZGlyIH19L2RvY2tlcmQgLUggdW5peDovLy92YXIvcnVuL2RvY2tlci5zb2NrCkV4ZWNSZWxvYWQ9L2Jpbi9raWxsIC1zIEhVUCAkTUFJTlBJRApUaW1lb3V0U3RhcnRTZWM9MApSZXN0YXJ0PWFsd2F5cwpSZXN0YXJ0U2VjPTIKCiMg5LiOIGFuc2libGUg5Y+C6ICD5Y2V5YWD5a+56b2Q55qE6LWE5rqQL+i/m+eoi+ayu+eQhu+8mkRlbGVnYXRlIOS6pOe7mSBkb2NrZXJkIOiHqueuoeWuueWZqCBjZ3JvdXDvvIwKIyBLaWxsTW9kZT1wcm9jZXNzIOmBv+WFjSBzeXN0ZW1kIOmHjeWQryBkb2NrZXJkIOaXtui/nuW4puadgOaOieWuueWZqOOAggpMaW1pdE5PRklMRT0xMDQ4NTc2CkxpbWl0TlBST0M9aW5maW5pdHkKTGltaXRDT1JFPWluZmluaXR5ClRhc2tzTWF4PWluZmluaXR5CkRlbGVnYXRlPXllcwpLaWxsTW9kZT1wcm9jZXNzCk9PTVNjb3JlQWRqdXN0PS01MDAKCltJbnN0YWxsXQpXYW50ZWRCeT1tdWx0aS11c2VyLnRhcmdldAo=",
+    "uninstall.yaml": "IyBkb2NrZXIg5Y246L2955u45L2N77ya5YGc5pyNIOKGkiDliKDljZXlhYPkuI7phY3nva7vvJvkuozov5vliLbkuI7mlbDmja7nm67lvZXpu5jorqTkv53nlZkKI++8iHVuaW5zdGFsbF9yZW1vdmVfYmluYXJpZXM6IHRydWUg5pe25b275bqV5riF55CG77yM5LiN5Y+v6YCG77yJ44CCCgotIG5hbWU6IOWNuOi9vSBkb2NrZXIKICBob3N0czogZG9ja2VyCiAgYmVjb21lOiB0cnVlCiAgdGFza3M6CiAgICAtIG5hbWU6IOWBnOatouW5tuemgeeUqCBkb2NrZXIKICAgICAgc3lzdGVtZF91bml0OgogICAgICAgIG5hbWU6IGRvY2tlci5zZXJ2aWNlCiAgICAgICAgc3RhdGU6IHN0b3BwZWQKICAgICAgICBlbmFibGVkOiBmYWxzZQoKICAgIC0gbmFtZTog56e76Zmk5Y2V5YWD5paH5Lu2CiAgICAgIGZpbGU6CiAgICAgICAgcGF0aDogL2V0Yy9zeXN0ZW1kL3N5c3RlbS9kb2NrZXIuc2VydmljZQogICAgICAgIHN0YXRlOiBhYnNlbnQKCiAgICAtIG5hbWU6IOenu+mZpCBkYWVtb24uanNvbgogICAgICBmaWxlOgogICAgICAgIHBhdGg6ICJ7eyAuY29uZl9kaXIgfX0vZGFlbW9uLmpzb24iCiAgICAgICAgc3RhdGU6IGFic2VudAoKICAgIC0gbmFtZTogZGFlbW9uLXJlbG9hZO+8iHVuaXQg56e76Zmk5ZCO5Yi35paw77yJCiAgICAgIHNoZWxsOiBzeXN0ZW1jdGwgZGFlbW9uLXJlbG9hZAogICAgICBjaGFuZ2VkX3doZW46ICd7eyBmYWxzZSB9fScKCiAgICAtIG5hbWU6IOenu+mZpOS6jOi/m+WItuOAgWNsaSDmj5Lku7bkuI7mlbDmja7nm67lvZXvvIjlj6/pgInvvIzkuI3lj6/pgIbvvIkKICAgICAgc2hlbGw6ICdybSAtcmYgLS0ge3sgLmJpbl9kaXIgfX0ve2NvbnRhaW5lcmQsY29udGFpbmVyZC1zaGltLXJ1bmMtdjIsY3RyLGRvY2tlcixkb2NrZXItaW5pdCxkb2NrZXItcHJveHksZG9ja2VyZCxydW5jfSB7eyAuY2xpX3BsdWdpbnNfZGlyIH19IHt7IC5kYXRhX2RpciB9fS9kb2NrZXInCiAgICAgIHdoZW46ICd7eyBpZiAudW5pbnN0YWxsX3JlbW92ZV9iaW5hcmllcyB9fXllc3t7IGVuZCB9fScK",
+    "values.schema.json": "ewogICIkc2NoZW1hIjogImh0dHBzOi8vanNvbi1zY2hlbWEub3JnL2RyYWZ0LzIwMjAtMTIvc2NoZW1hIiwKICAidGl0bGUiOiAiZG9ja2VyIGNoYXJ0IHZhbHVlcyIsCiAgInR5cGUiOiAib2JqZWN0IiwKICAiYWRkaXRpb25hbFByb3BlcnRpZXMiOiBmYWxzZSwKICAicHJvcGVydGllcyI6IHsKICAgICJ2ZXJzaW9uIjogeyJ0eXBlIjogInN0cmluZyIsICJwYXR0ZXJuIjogIl5bMC05XStcXC5bMC05XStcXC5bMC05XSskIn0sCiAgICAiY29tcG9zZV92ZXJzaW9uIjogeyJ0eXBlIjogInN0cmluZyIsICJwYXR0ZXJuIjogIl52WzAtOV0rXFwuWzAtOV0rXFwuWzAtOV0rJCJ9LAogICAgImJ1aWxkeF92ZXJzaW9uIjogeyJ0eXBlIjogInN0cmluZyIsICJwYXR0ZXJuIjogIl52WzAtOV0rXFwuWzAtOV0rXFwuWzAtOV0rJCJ9LAogICAgImRvd25sb2FkX2FyY2hzIjogewogICAgICAidHlwZSI6ICJhcnJheSIsCiAgICAgICJpdGVtcyI6IHsiZW51bSI6IFsieDg2XzY0IiwgImFhcmNoNjQiXX0sCiAgICAgICJ1bmlxdWVJdGVtcyI6IHRydWUKICAgIH0sCiAgICAiZG93bmxvYWRfYmFzZSI6IHsidHlwZSI6ICJzdHJpbmciLCAicGF0dGVybiI6ICJeaHR0cHM/Oi8vIn0sCiAgICAiY2xpX3BsdWdpbnNfZGlyIjogeyJ0eXBlIjogInN0cmluZyIsICJtaW5MZW5ndGgiOiAxfSwKICAgICJkYXRhX2RpciI6IHsidHlwZSI6ICJzdHJpbmciLCAibWluTGVuZ3RoIjogMX0sCiAgICAiYmluX2RpciI6IHsidHlwZSI6ICJzdHJpbmciLCAibWluTGVuZ3RoIjogMX0sCiAgICAiY29uZl9kaXIiOiB7InR5cGUiOiAic3RyaW5nIiwgIm1pbkxlbmd0aCI6IDF9LAogICAgImxvZyI6IHsKICAgICAgInR5cGUiOiAib2JqZWN0IiwKICAgICAgInByb3BlcnRpZXMiOiB7CiAgICAgICAgImRyaXZlciI6IHsidHlwZSI6ICJzdHJpbmcifSwKICAgICAgICAibGV2ZWwiOiB7ImVudW0iOiBbImRlYnVnIiwgImluZm8iLCAid2FybiIsICJlcnJvciIsICJmYXRhbCJdfSwKICAgICAgICAibWF4X3NpemUiOiB7InR5cGUiOiAic3RyaW5nIiwgInBhdHRlcm4iOiAiXlswLTldK1trbWd0XT8kIn0sCiAgICAgICAgIm1heF9maWxlIjogeyJ0eXBlIjogImludGVnZXIiLCAibWluaW11bSI6IDF9CiAgICAgIH0sCiAgICAgICJhZGRpdGlvbmFsUHJvcGVydGllcyI6IGZhbHNlCiAgICB9LAogICAgInVuaW5zdGFsbF9yZW1vdmVfYmluYXJpZXMiOiB7InR5cGUiOiAiYm9vbGVhbiJ9CiAgfQp9Cg==",
+    "values.yaml": "IyBkb2NrZXIgY2hhcnQg6buY6K6k5YC844CC6KaG55uW6YCU5b6E77yaLWYgZW52cy8qLnlhbWwg4oaSIC0tc2V044CCCiMg5Yi25ZOB562W55WlIGNhY2hlLWZpcnN077yacGFja2FnZXMvPGFyY2g+LyDlt7LmnInliLblk4HljbPpm7bogZTnvZHvvIjnprvnur/lronoo4XvvInvvIwKIyDmnKrlkb3kuK3liJnmjIkgdXJsIOWcqOaOp+WItuerr+S4i+i9veS4gOasoeiQvee8k+WtmO+8iOWcqOe6v+Wuieijhe+8ieKAlOKAlOaXoOmcgOaooeW8j+W8gOWFs+OAggp2ZXJzaW9uOiAiMjkuMy4wIiAgICAgICAgICAgIyBkb2NrZXIg6Z2Z5oCB5YyF54mI5pysCmNvbXBvc2VfdmVyc2lvbjogInY1LjEuMSIgICAjIGRvY2tlciBjb21wb3NlIOaPkuS7tueJiOacrApidWlsZHhfdmVyc2lvbjogInYwLjMzLjAiICAgIyBkb2NrZXIgYnVpbGR4IOaPkuS7tueJiOacrApkb3dubG9hZF9hcmNoczogW10gICAgICAgICAgIyAtLXBoYXNlIGRvd25sb2FkIOmihOS4i+i9veebruagh+aetuaehO+8iHg4Nl82NC9hYXJjaDY077yJ77yb56m6ID0g5LuO6IqC54K5IGZhY3RzIOaOoua1i++8jOWbnumAgCB4ODZfNjQKCmRvd25sb2FkX2Jhc2U6ICJodHRwczovL2Rvd25sb2FkLmRvY2tlci5jb20vbGludXgvc3RhdGljL3N0YWJsZSIKY2xpX3BsdWdpbnNfZGlyOiAvdXNyL2xvY2FsL2xpYi9kb2NrZXIvY2xpLXBsdWdpbnMKCmRhdGFfZGlyOiAvdmFyL2xpYiAgICAgICAgICAjIGRhdGEtcm9vdCA9IDxkYXRhX2Rpcj4vZG9ja2Vy77yIaW52ZW50b3J5IOS4u+acuuWPmOmHjyBkb2NrZXJfZGF0YV9kaXIg5LyY5YWI55Sf5pWI77yJCmJpbl9kaXI6IC91c3IvYmluCmNvbmZfZGlyOiAvZXRjL2RvY2tlcgoKIyBkYWVtb24uanNvbiDlhoXlrrnvvIjmqKHmnb/muLLmn5PvvIzmlLnliqjop6blj5EgZG9ja2VyIOmHjeWQr++8iQpsb2c6CiAgZHJpdmVyOiBqc29uLWZpbGUKICBsZXZlbDogd2FybgogIG1heF9zaXplOiA1MG0KICBtYXhfZmlsZTogNQoKdW5pbnN0YWxsX3JlbW92ZV9iaW5hcmllczogZmFsc2UgICAjIOWNuOi9veaXtuaYr+WQpuWIoOS6jOi/m+WItuS4juaVsOaNruebruW9le+8iOS4jeWPr+mAhu+8iQo="
+  },
+  "payloads": [
+    {
+      "path": "packages/x86_64/containerd",
+      "size": 42963128,
+      "sha256": "25a55a216e31789e7a4375c4c9fe1131dcea501db5c0291134f85922ec917941"
+    },
+    {
+      "path": "packages/x86_64/containerd-shim-runc-v2",
+      "size": 8339640,
+      "sha256": "7988c7c5d386ea873564316a072b551c9335f984c3a37336a8d8fc199c7d0bc6"
+    },
+    {
+      "path": "packages/x86_64/ctr",
+      "size": 22184120,
+      "sha256": "e29c6471de6d89ce36202dfcd35a79396584968e5c5e5f9ad6565e0a91ae2384"
+    },
+    {
+      "path": "packages/x86_64/docker",
+      "size": 41461288,
+      "sha256": "b803740c076b46942159eab6ab7a5678ec6e4e3beec330487f5984fa02c06e10"
+    },
+    {
+      "path": "packages/x86_64/docker-buildx",
+      "size": 64045240,
+      "sha256": "9426a15411f35f635afef3f5d3bae53155c3e30d26dee430cc968e13d34be49f"
+    },
+    {
+      "path": "packages/x86_64/docker-compose",
+      "size": 31557130,
+      "sha256": "2ac954c9d506b912a12477d72f01601dc72ec918c429c7bae48fd707bdf0f3e5"
+    },
+    {
+      "path": "packages/x86_64/docker-init",
+      "size": 708456,
+      "sha256": "b831fc949adfbf8afa5c8ccef4db0dacfc92f2cc884d9fcb50382eae17c60626"
+    },
+    {
+      "path": "packages/x86_64/docker-proxy",
+      "size": 2531660,
+      "sha256": "614e2ea8eead93f1b6bdc1b7987e8bcd2a60a2ac2c1c897f6c9d8262e481d26a"
+    },
+    {
+      "path": "packages/x86_64/dockerd",
+      "size": 93641496,
+      "sha256": "37b33a6b1318d22902b11d7ea98c488deae99d02b27a86989129075459a66dc6"
+    },
+    {
+      "path": "packages/x86_64/runc",
+      "size": 17825688,
+      "sha256": "068731a5e917a0a65752f7954f1ecc4a2492c35b58f78519e556c1e17aaa47db"
+    }
+  ],
+  "hosts": [
+    {
+      "play_idx": 0,
+      "host": "d1",
+      "conn": {
+        "address": "d1",
+        "port": 22,
+        "user": "root",
+        "conn": "push",
+        "host_key_check": true,
+        "connect_timeout_sec": 10
+      },
+      "values": {
+        "bin_dir": "/usr/bin",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_version": "v5.1.1",
+        "conf_dir": "/etc/docker",
+        "data_dir": "/var/lib",
+        "download_archs": [],
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "uninstall_remove_binaries": false,
+        "version": "29.3.0"
+      },
+      "vars": {
+        "ansible_host": "10.20.0.11",
+        "bin_dir": "/usr/bin",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_version": "v5.1.1",
+        "conf_dir": "/etc/docker",
+        "data_dir": "/var/lib",
+        "download_archs": [],
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "group_names": [
+          "docker"
+        ],
+        "groups": {
+          "all": [
+            "d1",
+            "d2"
+          ],
+          "docker": [
+            "d1",
+            "d2"
+          ]
+        },
+        "hosts": {
+          "d1": {
+            "address": "d1",
+            "conn": "push",
+            "name": "d1",
+            "port": 22
+          },
+          "d2": {
+            "address": "d2",
+            "conn": "push",
+            "name": "d2",
+            "port": 22
+          }
+        },
+        "hostvars": {
+          "d1": {
+            "ansible_host": "10.20.0.11",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d1"
+          },
+          "d2": {
+            "ansible_host": "10.20.0.12",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d2"
+          }
+        },
+        "inventory_hostname": "d1",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "play_batch": [
+          "d1",
+          "d2"
+        ],
+        "play_hosts": [
+          "d1",
+          "d2"
+        ],
+        "uninstall_remove_binaries": false,
+        "version": "29.3.0"
+      },
+      "play": {
+        "name": "采集节点 facts",
+        "hosts": "docker"
+      },
+      "tasks": [
+        {
+          "idx": 1,
+          "label": "采集 facts（架构判定；--tags download 时同样执行）",
+          "module": "setup",
+          "rollback": "readonly",
+          "tags": [
+            "download"
+          ]
+        }
+      ]
+    },
+    {
+      "play_idx": 0,
+      "host": "d2",
+      "conn": {
+        "address": "d2",
+        "port": 22,
+        "user": "root",
+        "conn": "push",
+        "host_key_check": true,
+        "connect_timeout_sec": 10
+      },
+      "values": {
+        "bin_dir": "/usr/bin",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_version": "v5.1.1",
+        "conf_dir": "/etc/docker",
+        "data_dir": "/var/lib",
+        "download_archs": [],
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "uninstall_remove_binaries": false,
+        "version": "29.3.0"
+      },
+      "vars": {
+        "ansible_host": "10.20.0.12",
+        "bin_dir": "/usr/bin",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_version": "v5.1.1",
+        "conf_dir": "/etc/docker",
+        "data_dir": "/var/lib",
+        "download_archs": [],
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "group_names": [
+          "docker"
+        ],
+        "groups": {
+          "all": [
+            "d1",
+            "d2"
+          ],
+          "docker": [
+            "d1",
+            "d2"
+          ]
+        },
+        "hosts": {
+          "d1": {
+            "address": "d1",
+            "conn": "push",
+            "name": "d1",
+            "port": 22
+          },
+          "d2": {
+            "address": "d2",
+            "conn": "push",
+            "name": "d2",
+            "port": 22
+          }
+        },
+        "hostvars": {
+          "d1": {
+            "ansible_host": "10.20.0.11",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d1"
+          },
+          "d2": {
+            "ansible_host": "10.20.0.12",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d2"
+          }
+        },
+        "inventory_hostname": "d2",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "play_batch": [
+          "d1",
+          "d2"
+        ],
+        "play_hosts": [
+          "d1",
+          "d2"
+        ],
+        "uninstall_remove_binaries": false,
+        "version": "29.3.0"
+      },
+      "play": {
+        "name": "采集节点 facts",
+        "hosts": "docker"
+      },
+      "tasks": [
+        {
+          "idx": 1,
+          "label": "采集 facts（架构判定；--tags download 时同样执行）",
+          "module": "setup",
+          "rollback": "readonly",
+          "tags": [
+            "download"
+          ]
+        }
+      ]
+    },
+    {
+      "play_idx": 1,
+      "host": "d1",
+      "conn": {
+        "address": "d1",
+        "port": 22,
+        "user": "root",
+        "conn": "push",
+        "host_key_check": true,
+        "connect_timeout_sec": 10
+      },
+      "values": {
+        "bin_dir": "/usr/bin",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_version": "v5.1.1",
+        "conf_dir": "/etc/docker",
+        "data_dir": "/var/lib",
+        "download_archs": [],
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "uninstall_remove_binaries": false,
+        "version": "29.3.0"
+      },
+      "vars": {
+        "ansible_host": "10.20.0.11",
+        "bin_dir": "/usr/bin",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_version": "v5.1.1",
+        "conf_dir": "/etc/docker",
+        "data_dir": "/var/lib",
+        "download_archs": [],
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "group_names": [
+          "docker"
+        ],
+        "groups": {
+          "all": [
+            "d1",
+            "d2"
+          ],
+          "docker": [
+            "d1",
+            "d2"
+          ]
+        },
+        "hosts": {
+          "d1": {
+            "address": "d1",
+            "conn": "push",
+            "name": "d1",
+            "port": 22
+          },
+          "d2": {
+            "address": "d2",
+            "conn": "push",
+            "name": "d2",
+            "port": 22
+          }
+        },
+        "hostvars": {
+          "d1": {
+            "ansible_host": "10.20.0.11",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d1"
+          },
+          "d2": {
+            "ansible_host": "10.20.0.12",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d2"
+          }
+        },
+        "inventory_hostname": "d1",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "play_batch": [
+          "d1",
+          "d2"
+        ],
+        "play_hosts": [
+          "d1",
+          "d2"
+        ],
+        "uninstall_remove_binaries": false,
+        "version": "29.3.0"
+      },
+      "play": {
+        "name": "安装 docker（官方静态包）",
+        "hosts": "docker",
+        "become": true
+      },
+      "tasks": [
+        {
+          "idx": 2,
+          "label": "解析目标架构列表（values 优先，其次节点 facts，回退 x86_64）",
+          "module": "set_fact",
+          "rollback": "readonly",
+          "args": {
+            "download_arch_list": "{{ $list := list }}{{ if .download_archs }}{{ $list = .download_archs }}{{ else }}{{ range $h := index $.groups \"docker\" }}{{ $a := dig \"arch\" \"\" (index $.hostvars $h) }}{{ if $a }}{{ $list = append $list $a }}{{ end }}{{ end }}{{ end }}{{ if not $list }}{{ $list = list \"x86_64\" }}{{ end }}{{ to_json (uniq $list) }}"
+          },
+          "tags": [
+            "download"
+          ],
+          "delegate_to": "localhost",
+          "run_once": true
+        },
+        {
+          "idx": 3,
+          "label": "输出目标架构",
+          "module": "debug",
+          "rollback": "none",
+          "args": {
+            "msg": "目标架构: {{ .download_arch_list }}"
+          },
+          "tags": [
+            "download"
+          ],
+          "delegate_to": "localhost",
+          "run_once": true
+        },
+        {
+          "idx": 4,
+          "label": "下载 docker 官方静态包（原始 tgz）",
+          "module": "shell",
+          "rollback": "none",
+          "free_form": "set -e\npkg=\"{{ .playbook_dir }}/packages/{{ .item }}\"\nmkdir -p \"$pkg\"\ntgz=\"$pkg/docker-{{ .version }}.tgz\"\nif [ -s \"$tgz\" ]; then echo \"cached: $tgz\"; exit 0; fi\necho \"fetch {{ .download_base }}/{{ .item }}/docker-{{ .version }}.tgz\"\ncurl -fSL --retry 3 --retry-delay 3 --retry-all-errors -C - --max-time 900 \\\n  -o \"$tgz.tmp\" \"{{ .download_base }}/{{ .item }}/docker-{{ .version }}.tgz\"\nmv \"$tgz.tmp\" \"$tgz\"\n",
+          "loop": [
+            "{{ .download_arch_list }}"
+          ],
+          "tags": [
+            "download"
+          ],
+          "delegate_to": "localhost",
+          "run_once": true
+        },
+        {
+          "idx": 5,
+          "label": "下载 compose / buildx cli 插件",
+          "module": "shell",
+          "rollback": "none",
+          "free_form": "set -e\npkg=\"{{ .playbook_dir }}/packages/{{ .item }}\"\nmkdir -p \"$pkg\"\n# compose 发布名用 x86_64 风格架构（与 .item 一致），buildx 用 amd64/arm64\nbuildx_arch={{ if eq .item \"x86_64\" }}amd64{{ else }}arm64{{ end }}\nif [ ! -s \"$pkg/docker-compose\" ]; then\n  echo \"fetch docker-compose {{ .compose_version }} ({{ .item }})\"\n  curl -fSL --retry 3 --retry-delay 3 --retry-all-errors -C - --max-time 900 \\\n    -o \"$pkg/docker-compose.tmp\" \\\n    \"https://github.com/docker/compose/releases/download/{{ .compose_version }}/docker-compose-linux-{{ .item }}\"\n  mv \"$pkg/docker-compose.tmp\" \"$pkg/docker-compose\"\nfi\nif [ ! -s \"$pkg/docker-buildx\" ]; then\n  echo \"fetch docker-buildx {{ .buildx_version }} ({{ .item }})\"\n  curl -fSL --retry 3 --retry-delay 3 --retry-all-errors -C - --max-time 900 \\\n    -o \"$pkg/docker-buildx.tmp\" \\\n    \"https://github.com/docker/buildx/releases/download/{{ .buildx_version }}/buildx-{{ .buildx_version }}.linux-$buildx_arch\"\n  mv \"$pkg/docker-buildx.tmp\" \"$pkg/docker-buildx\"\nfi\nchmod 0755 \"$pkg/docker-compose\" \"$pkg/docker-buildx\"\n",
+          "loop": [
+            "{{ .download_arch_list }}"
+          ],
+          "tags": [
+            "download"
+          ],
+          "delegate_to": "localhost",
+          "run_once": true
+        },
+        {
+          "idx": 6,
+          "label": "不支持的架构直接失败（仅 x86_64 / aarch64）",
+          "module": "shell",
+          "rollback": "none",
+          "free_form": "echo \"unsupported architecture: {{ .arch }}\" \u003e\u00262; exit 1",
+          "when": [
+            "{{ if eq (include \"docker.arch_alias\" .) \"unsupported\" }}yes{{ else }}no{{ end }}"
+          ]
+        },
+        {
+          "idx": 7,
+          "label": "配置目录（daemon.json 与 cli 插件）",
+          "module": "file",
+          "rollback": "full",
+          "args": {
+            "mode": "0755",
+            "path": "{{ .item }}",
+            "state": "directory"
+          },
+          "loop": [
+            "{{ .conf_dir }}",
+            "{{ .cli_plugins_dir }}"
+          ]
+        },
+        {
+          "idx": 8,
+          "label": "分发 docker 二进制（含内嵌 containerd）",
+          "module": "artifact",
+          "rollback": "full",
+          "args": {
+            "cache": "packages/{{ .arch }}/docker-{{ .version }}.tgz",
+            "dest": "{{ .bin_dir }}",
+            "members": [
+              "containerd",
+              "containerd-shim-runc-v2",
+              "ctr",
+              "docker",
+              "docker-init",
+              "docker-proxy",
+              "dockerd",
+              "runc"
+            ],
+            "mode": "0755",
+            "url": "{{ .download_base }}/{{ .arch }}/docker-{{ .version }}.tgz"
+          }
+        },
+        {
+          "idx": 9,
+          "label": "分发 docker compose 插件（release 名用 x86_64 风格架构）",
+          "module": "artifact",
+          "rollback": "full",
+          "args": {
+            "cache": "packages/{{ .arch }}/docker-compose",
+            "dest": "{{ .cli_plugins_dir }}/docker-compose",
+            "mode": "0755",
+            "url": "https://github.com/docker/compose/releases/download/{{ .compose_version }}/docker-compose-linux-{{ .arch }}"
+          }
+        },
+        {
+          "idx": 10,
+          "label": "分发 docker buildx 插件（release 名用 Go 风格架构）",
+          "module": "artifact",
+          "rollback": "full",
+          "args": {
+            "cache": "packages/{{ .arch }}/docker-buildx",
+            "dest": "{{ .cli_plugins_dir }}/docker-buildx",
+            "mode": "0755",
+            "url": "https://github.com/docker/buildx/releases/download/{{ .buildx_version }}/buildx-{{ .buildx_version }}.linux-{{ include \"docker.arch_alias\" . }}"
+          }
+        },
+        {
+          "idx": 11,
+          "label": "渲染 daemon.json",
+          "module": "template",
+          "rollback": "full",
+          "args": {
+            "dest": "{{ .conf_dir }}/daemon.json",
+            "mode": "0644",
+            "src": "templates/daemon.json.tpl"
+          },
+          "notify": [
+            "重启 docker"
+          ]
+        },
+        {
+          "idx": 12,
+          "label": "部署 docker 单元并启动",
+          "module": "systemd_unit",
+          "rollback": "none",
+          "args": {
+            "enabled": true,
+            "name": "docker.service",
+            "src": "templates/docker.service.tpl",
+            "state": "started"
+          },
+          "notify": [
+            "重启 docker"
+          ]
+        }
+      ],
+      "handlers": [
+        {
+          "idx": 13,
+          "label": "重启 docker",
+          "module": "service",
+          "rollback": "none",
+          "args": {
+            "name": "docker",
+            "state": "restarted"
+          }
+        }
+      ]
+    },
+    {
+      "play_idx": 1,
+      "host": "d2",
+      "conn": {
+        "address": "d2",
+        "port": 22,
+        "user": "root",
+        "conn": "push",
+        "host_key_check": true,
+        "connect_timeout_sec": 10
+      },
+      "values": {
+        "bin_dir": "/usr/bin",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_version": "v5.1.1",
+        "conf_dir": "/etc/docker",
+        "data_dir": "/var/lib",
+        "download_archs": [],
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "uninstall_remove_binaries": false,
+        "version": "29.3.0"
+      },
+      "vars": {
+        "ansible_host": "10.20.0.12",
+        "bin_dir": "/usr/bin",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_version": "v5.1.1",
+        "conf_dir": "/etc/docker",
+        "data_dir": "/var/lib",
+        "download_archs": [],
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "group_names": [
+          "docker"
+        ],
+        "groups": {
+          "all": [
+            "d1",
+            "d2"
+          ],
+          "docker": [
+            "d1",
+            "d2"
+          ]
+        },
+        "hosts": {
+          "d1": {
+            "address": "d1",
+            "conn": "push",
+            "name": "d1",
+            "port": 22
+          },
+          "d2": {
+            "address": "d2",
+            "conn": "push",
+            "name": "d2",
+            "port": 22
+          }
+        },
+        "hostvars": {
+          "d1": {
+            "ansible_host": "10.20.0.11",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d1"
+          },
+          "d2": {
+            "ansible_host": "10.20.0.12",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d2"
+          }
+        },
+        "inventory_hostname": "d2",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "play_batch": [
+          "d1",
+          "d2"
+        ],
+        "play_hosts": [
+          "d1",
+          "d2"
+        ],
+        "uninstall_remove_binaries": false,
+        "version": "29.3.0"
+      },
+      "play": {
+        "name": "安装 docker（官方静态包）",
+        "hosts": "docker",
+        "become": true
+      },
+      "tasks": [
+        {
+          "idx": 2,
+          "label": "解析目标架构列表（values 优先，其次节点 facts，回退 x86_64）",
+          "module": "set_fact",
+          "rollback": "readonly",
+          "args": {
+            "download_arch_list": "{{ $list := list }}{{ if .download_archs }}{{ $list = .download_archs }}{{ else }}{{ range $h := index $.groups \"docker\" }}{{ $a := dig \"arch\" \"\" (index $.hostvars $h) }}{{ if $a }}{{ $list = append $list $a }}{{ end }}{{ end }}{{ end }}{{ if not $list }}{{ $list = list \"x86_64\" }}{{ end }}{{ to_json (uniq $list) }}"
+          },
+          "tags": [
+            "download"
+          ],
+          "delegate_to": "localhost",
+          "run_once": true
+        },
+        {
+          "idx": 3,
+          "label": "输出目标架构",
+          "module": "debug",
+          "rollback": "none",
+          "args": {
+            "msg": "目标架构: {{ .download_arch_list }}"
+          },
+          "tags": [
+            "download"
+          ],
+          "delegate_to": "localhost",
+          "run_once": true
+        },
+        {
+          "idx": 4,
+          "label": "下载 docker 官方静态包（原始 tgz）",
+          "module": "shell",
+          "rollback": "none",
+          "free_form": "set -e\npkg=\"{{ .playbook_dir }}/packages/{{ .item }}\"\nmkdir -p \"$pkg\"\ntgz=\"$pkg/docker-{{ .version }}.tgz\"\nif [ -s \"$tgz\" ]; then echo \"cached: $tgz\"; exit 0; fi\necho \"fetch {{ .download_base }}/{{ .item }}/docker-{{ .version }}.tgz\"\ncurl -fSL --retry 3 --retry-delay 3 --retry-all-errors -C - --max-time 900 \\\n  -o \"$tgz.tmp\" \"{{ .download_base }}/{{ .item }}/docker-{{ .version }}.tgz\"\nmv \"$tgz.tmp\" \"$tgz\"\n",
+          "loop": [
+            "{{ .download_arch_list }}"
+          ],
+          "tags": [
+            "download"
+          ],
+          "delegate_to": "localhost",
+          "run_once": true
+        },
+        {
+          "idx": 5,
+          "label": "下载 compose / buildx cli 插件",
+          "module": "shell",
+          "rollback": "none",
+          "free_form": "set -e\npkg=\"{{ .playbook_dir }}/packages/{{ .item }}\"\nmkdir -p \"$pkg\"\n# compose 发布名用 x86_64 风格架构（与 .item 一致），buildx 用 amd64/arm64\nbuildx_arch={{ if eq .item \"x86_64\" }}amd64{{ else }}arm64{{ end }}\nif [ ! -s \"$pkg/docker-compose\" ]; then\n  echo \"fetch docker-compose {{ .compose_version }} ({{ .item }})\"\n  curl -fSL --retry 3 --retry-delay 3 --retry-all-errors -C - --max-time 900 \\\n    -o \"$pkg/docker-compose.tmp\" \\\n    \"https://github.com/docker/compose/releases/download/{{ .compose_version }}/docker-compose-linux-{{ .item }}\"\n  mv \"$pkg/docker-compose.tmp\" \"$pkg/docker-compose\"\nfi\nif [ ! -s \"$pkg/docker-buildx\" ]; then\n  echo \"fetch docker-buildx {{ .buildx_version }} ({{ .item }})\"\n  curl -fSL --retry 3 --retry-delay 3 --retry-all-errors -C - --max-time 900 \\\n    -o \"$pkg/docker-buildx.tmp\" \\\n    \"https://github.com/docker/buildx/releases/download/{{ .buildx_version }}/buildx-{{ .buildx_version }}.linux-$buildx_arch\"\n  mv \"$pkg/docker-buildx.tmp\" \"$pkg/docker-buildx\"\nfi\nchmod 0755 \"$pkg/docker-compose\" \"$pkg/docker-buildx\"\n",
+          "loop": [
+            "{{ .download_arch_list }}"
+          ],
+          "tags": [
+            "download"
+          ],
+          "delegate_to": "localhost",
+          "run_once": true
+        },
+        {
+          "idx": 6,
+          "label": "不支持的架构直接失败（仅 x86_64 / aarch64）",
+          "module": "shell",
+          "rollback": "none",
+          "free_form": "echo \"unsupported architecture: {{ .arch }}\" \u003e\u00262; exit 1",
+          "when": [
+            "{{ if eq (include \"docker.arch_alias\" .) \"unsupported\" }}yes{{ else }}no{{ end }}"
+          ]
+        },
+        {
+          "idx": 7,
+          "label": "配置目录（daemon.json 与 cli 插件）",
+          "module": "file",
+          "rollback": "full",
+          "args": {
+            "mode": "0755",
+            "path": "{{ .item }}",
+            "state": "directory"
+          },
+          "loop": [
+            "{{ .conf_dir }}",
+            "{{ .cli_plugins_dir }}"
+          ]
+        },
+        {
+          "idx": 8,
+          "label": "分发 docker 二进制（含内嵌 containerd）",
+          "module": "artifact",
+          "rollback": "full",
+          "args": {
+            "cache": "packages/{{ .arch }}/docker-{{ .version }}.tgz",
+            "dest": "{{ .bin_dir }}",
+            "members": [
+              "containerd",
+              "containerd-shim-runc-v2",
+              "ctr",
+              "docker",
+              "docker-init",
+              "docker-proxy",
+              "dockerd",
+              "runc"
+            ],
+            "mode": "0755",
+            "url": "{{ .download_base }}/{{ .arch }}/docker-{{ .version }}.tgz"
+          }
+        },
+        {
+          "idx": 9,
+          "label": "分发 docker compose 插件（release 名用 x86_64 风格架构）",
+          "module": "artifact",
+          "rollback": "full",
+          "args": {
+            "cache": "packages/{{ .arch }}/docker-compose",
+            "dest": "{{ .cli_plugins_dir }}/docker-compose",
+            "mode": "0755",
+            "url": "https://github.com/docker/compose/releases/download/{{ .compose_version }}/docker-compose-linux-{{ .arch }}"
+          }
+        },
+        {
+          "idx": 10,
+          "label": "分发 docker buildx 插件（release 名用 Go 风格架构）",
+          "module": "artifact",
+          "rollback": "full",
+          "args": {
+            "cache": "packages/{{ .arch }}/docker-buildx",
+            "dest": "{{ .cli_plugins_dir }}/docker-buildx",
+            "mode": "0755",
+            "url": "https://github.com/docker/buildx/releases/download/{{ .buildx_version }}/buildx-{{ .buildx_version }}.linux-{{ include \"docker.arch_alias\" . }}"
+          }
+        },
+        {
+          "idx": 11,
+          "label": "渲染 daemon.json",
+          "module": "template",
+          "rollback": "full",
+          "args": {
+            "dest": "{{ .conf_dir }}/daemon.json",
+            "mode": "0644",
+            "src": "templates/daemon.json.tpl"
+          },
+          "notify": [
+            "重启 docker"
+          ]
+        },
+        {
+          "idx": 12,
+          "label": "部署 docker 单元并启动",
+          "module": "systemd_unit",
+          "rollback": "none",
+          "args": {
+            "enabled": true,
+            "name": "docker.service",
+            "src": "templates/docker.service.tpl",
+            "state": "started"
+          },
+          "notify": [
+            "重启 docker"
+          ]
+        }
+      ],
+      "handlers": [
+        {
+          "idx": 13,
+          "label": "重启 docker",
+          "module": "service",
+          "rollback": "none",
+          "args": {
+            "name": "docker",
+            "state": "restarted"
+          }
+        }
+      ]
+    }
+  ]
+}

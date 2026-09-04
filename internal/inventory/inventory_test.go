@@ -54,7 +54,7 @@ func TestParseHosts(t *testing.T) {
 	for _, h := range inv.Hosts {
 		switch h.Name {
 		case "web1":
-			if h.Address != "10.0.0.11" || h.Port != 2222 || h.User != "admin" || h.Conn != "ssh" {
+			if h.Address != "10.0.0.11" || h.Port != 2222 || h.User != "admin" || h.Conn != "push" {
 				t.Fatalf("web1: %+v", h)
 			}
 		case "web2":

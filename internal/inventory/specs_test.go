@@ -110,7 +110,7 @@ func TestParseHostSpec(t *testing.T) {
 			t.Errorf("%q: %v", c.spec, err)
 			continue
 		}
-		if h.Address != c.address || h.Port != c.port || h.Conn != "ssh" || h.Name != c.spec {
+		if h.Address != c.address || h.Port != c.port || h.Conn != "push" || h.Name != c.spec {
 			t.Errorf("%q: got %+v", c.spec, h)
 		}
 	}

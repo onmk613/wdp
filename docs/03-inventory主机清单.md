@@ -38,7 +38,7 @@ production:                   # 组的嵌套：children 引用其它组
 
 | 键 | 类型 | 说明 |
 |---|---|---|
-| `conn` | string | 连接类型：`ssh`（默认）/ `agent` / `push` / `local` |
+| `conn` | string | 连接类型：`push`（默认）/ `ssh` / `agent` / `local` |
 | `host` | string | 实际地址（缺省等于主机名）；支持 IPv6 字面量，裸写即可（如 `fd00::5`，无需方括号）；不支持 zone ID（`fe80::1%eth0`） |
 | `port` | int | SSH 端口，缺省 22 |
 | `user` | string | SSH 用户（缺省取 wdp.cfg `[ssh].user`） |

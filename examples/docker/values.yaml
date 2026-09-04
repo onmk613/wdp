@@ -1,8 +1,10 @@
 # docker chart 默认值。覆盖途径：-f envs/*.yaml → --set。
-online_install: true        # true 在线下载官方静态包；false 用 packages/<arch>/ 离线制品
-version: "29.3.0"           # docker 静态包版本（在线模式）
-compose_version: "v5.1.1"   # docker compose 插件版本（在线模式）
-buildx_version: "v0.33.0"   # docker buildx 插件版本（在线模式）
+# 制品策略 cache-first：packages/<arch>/ 已有制品即零联网（离线安装），
+# 未命中则按 url 在控制端下载一次落缓存（在线安装）——无需模式开关。
+version: "29.3.0"           # docker 静态包版本
+compose_version: "v5.1.1"   # docker compose 插件版本
+buildx_version: "v0.33.0"   # docker buildx 插件版本
+download_archs: []          # --phase download 预下载目标架构（x86_64/aarch64）；空 = 从节点 facts 探测，回退 x86_64
 
 download_base: "https://download.docker.com/linux/static/stable"
 cli_plugins_dir: /usr/local/lib/docker/cli-plugins
@@ -10,7 +12,6 @@ cli_plugins_dir: /usr/local/lib/docker/cli-plugins
 data_dir: /var/lib          # data-root = <data_dir>/docker（inventory 主机变量 docker_data_dir 优先生效）
 bin_dir: /usr/bin
 conf_dir: /etc/docker
-staging_dir: /tmp/wdp-docker-dist   # 在线模式解包暂存（tgz 内含 docker/ 前缀目录）
 
 # daemon.json 内容（模板渲染，改动触发 docker 重启）
 log:

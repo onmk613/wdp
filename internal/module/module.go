@@ -1,8 +1,3 @@
-// Package module 实现内置模块。模块只依赖 connection 原语，
-// 在控制端编排（exec/upload/download），因此 SSH 与 agent 行为完全一致。
-//
-// 本文件是模块框架的契约与注册表；执行上下文（runctx.go）、自动回滚
-// （rollback.go）、参数解析与校验（args.go）与各模块实现分文件存放。
 package module
 
 import (
@@ -124,12 +119,12 @@ func IsReadOnlyModule(name string) bool {
 
 var registry = map[string]Module{}
 
-// Register 注册模块（各实现文件 init 调用）。
+// Register 注册模块
 func Register(m Module) {
 	registry[m.Name()] = m
 }
 
-// Get 按名查找模块。
+// Get 按名查找模块
 func Get(name string) (Module, bool) {
 	m, ok := registry[name]
 	return m, ok
@@ -148,7 +143,7 @@ func Resolve(name string, scriptDirs []string) (mod Module, scriptPath string, o
 	return nil, "", false
 }
 
-// Names 返回全部模块名（有序）。
+// Names 返回全部模块名（有序）
 func Names() []string {
 	out := make([]string, 0, len(registry))
 	for n := range registry {

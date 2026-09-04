@@ -77,6 +77,7 @@ type Conn interface {
 type Defaults struct {
 	// SSH 用户/连接超时的归一化在 config 取值器完成（inventory 烘焙 host
 	// 字段时也要用），组合根注入的是已归一化值，conn 层不再重复兜底。
+	Conn                string            // 默认连接类型（wdp run --hosts 内联主机的 conn 初值；空 = ConnOrDefault）
 	SSHUser             string            // 默认 SSH 用户（组合根注入 config.SSHUser() 归一化值）
 	SSHConnectTimeout   int               // 连接超时秒（组合根注入 config.SSHConnectTimeout() 归一化值）
 	AgentPort           int               // 默认 agent 端口（0 = 7602）
@@ -84,6 +85,15 @@ type Defaults struct {
 	AgentIdleTimeoutMin int               // push 临时 agent 空闲自动退出分钟（0 = 默认 60；<0 = 禁用）
 	PushCADir           string            // push 会话 CA 落盘目录（空 = ~/.wdp/push-ca）
 	PushBinary          map[string]string // push 自举按目标平台的二进制表（键 linux_amd64 等；控制端同平台时无需配置）
+}
+
+// ConnOrDefault 归一化默认连接类型（空 = push：push 自举复用 SSH 认证，
+// 对既有可达性零变化，且免每任务握手；ssh/agent 需 inventory 显式指定）。
+func (d *Defaults) ConnOrDefault() string {
+	if d != nil && d.Conn != "" {
+		return d.Conn
+	}
+	return "push"
 }
 
 // AgentPortOrDefault 归一化默认 agent 端口。

@@ -1,12 +1,12 @@
 package chart
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/santhosh-tekuri/jsonschema/v6"
 	"gopkg.in/yaml.v3"
 
 	"wdp/internal/model"
@@ -16,16 +16,18 @@ import (
 
 // Chart 是加载后的部署包。
 type Chart struct {
-	Meta      Meta
-	Dir       string            // chart 根目录（tgz 时为解包目录）
-	Values    map[string]any    // 默认 values（未合并覆盖文件）
-	Helpers   string            // _helpers.tpl 内容
-	Deploy    []*model.Play     // deploy.yaml 解析结果
-	Uninstall []*model.Play     // uninstall.yaml（可选）：逆操作清单
-	Status    []*model.Play     // status.yaml（可选）：只读探测
-	Subs      map[string]*Chart // charts/<name> → 子 chart
+	Meta    Meta
+	Dir     string         // chart 根目录（tgz 时为解包目录）
+	Values  map[string]any // 默认 values（未合并覆盖文件）
+	Helpers string         // _helpers.tpl 内容
+	Deploy  []*model.Play  // deploy.yaml 解析结果（必需）
+	// Phases 是 deploy 之外的生命周期相位：uninstall/status/自定义（如
+	// update/stop/download），按根目录 <phase>.yaml 文件名发现。
+	Phases map[string][]*model.Play
+	Subs   map[string]*Chart // charts/<name> → 子 chart
 
-	tmpDir string // tgz 解包临时目录（Close 时清理）
+	schema *jsonschema.Schema // values.schema.json 编译结果（可选）
+	tmpDir string             // tgz 解包临时目录（Close 时清理）
 }
 
 // IsChartPath 判断路径是否按 chart 目标处理（目录或 .tgz 包；不存在时按后缀判断）。
@@ -105,6 +107,11 @@ func (c *Chart) Close() error {
 }
 
 func loadDir(dir string) (*Chart, error) {
+	// 绝对化：BaseDir/playbook_dir 不随执行 cwd 漂移（相对路径在
+	// delegate_to: localhost 场景曾落到只读位置）。
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
 	metaData, err := os.ReadFile(filepath.Join(dir, "chart.yaml"))
 	if err != nil {
 		return nil, fmt.Errorf("missing chart.yaml: %w", err)
@@ -130,6 +137,10 @@ func loadDir(dir string) (*Chart, error) {
 		c.Values = map[string]any{}
 	}
 
+	if c.schema, err = loadSchema(dir); err != nil {
+		return nil, err
+	}
+
 	if data, err := os.ReadFile(filepath.Join(dir, "_helpers.tpl")); err == nil {
 		c.Helpers = string(data)
 	} else if !os.IsNotExist(err) {
@@ -142,18 +153,12 @@ func loadDir(dir string) (*Chart, error) {
 	}
 	c.Deploy = plays
 
-	// 生命周期 play（可选）：uninstall.yaml 逆操作 / status.yaml 只读探测
-	for name, field := range map[string]*[]*model.Play{
-		"uninstall.yaml": &c.Uninstall, "status.yaml": &c.Status,
-	} {
-		p, err := playbook.Load(filepath.Join(dir, name))
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return nil, fmt.Errorf("failed to parse %s: %w", name, err)
-		}
-		*field = p
+	// 生命周期相位发现：根目录除保留名外的每个 <phase>.yaml 都是一个相位
+	//（uninstall/status 亦循此发现，更新/停止等自定义相位同样成立）。
+	// 保留名是结构文件或随包样例，不是 playbook，误当相位加载必然解析失败。
+	c.Phases, err = loadPhaseFiles(dir)
+	if err != nil {
+		return nil, err
 	}
 
 	// charts/ 子 chart（可选，递归加载）
@@ -179,4 +184,38 @@ func loadDir(dir string) (*Chart, error) {
 		}
 	}
 	return c, nil
+}
+
+// reservedRootYAML 是根目录不作为相位处理的 yaml 文件：结构文件与随包
+// inventory 样例（inventory.yaml 是清单不是 playbook，误当相位会在解析期炸掉）。
+var reservedRootYAML = map[string]bool{
+	"chart.yaml":     true,
+	"values.yaml":    true,
+	"inventory.yaml": true,
+}
+
+// loadPhaseFiles 扫描 chart 根目录发现生命周期相位文件：<phase>.yaml（仅
+// .yaml 后缀；deploy.yaml 由调用方单独加载）。文件名不符合相位名规则的
+// 杂项 yaml（如带点号的 notes.extra.yaml）静默跳过，不当相位也不报错。
+func loadPhaseFiles(dir string) (map[string][]*model.Play, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	phases := map[string][]*model.Play{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		name := strings.TrimSuffix(e.Name(), ".yaml")
+		if name == "deploy" || reservedRootYAML[e.Name()] || !phaseNameRe.MatchString(name) {
+			continue
+		}
+		plays, err := playbook.Load(filepath.Join(dir, e.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse %s: %w", e.Name(), err)
+		}
+		phases[name] = plays
+	}
+	return phases, nil
 }

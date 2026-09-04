@@ -41,6 +41,7 @@ type Task struct {
 	Module    string         // 模块名，如 shell / copy；chart 引用时为 "chart"
 	ChartRef  string         // 子 chart 引用名（`chart: jdk`），非空时展开为子 chart 任务序列
 	ChartVars map[string]any // chart 引用处附加注入的变量（优先级高于子树值）
+	TasksFrom string         // chart 引用的入口相位名（`tasks_from: validate`），缺省/空 = deploy；仅 chart 引用任务
 	Args      map[string]any // 模块参数
 	FreeForm  string         // 简写形式的模块参数，如 `shell: uptime` 中的 "uptime"
 
@@ -68,7 +69,7 @@ type Task struct {
 	DelegateTo string // 委托执行：任务在指定主机（或 localhost）上执行，结果归属当前主机
 	RunOnce    bool   // 整批只在一台主机执行，结果复制到全部主机
 	LoopVar    string // 自定义循环变量名（loop_control.loop_var，缺省 item；嵌套 loop 必需）
-	Hook       string // 生命周期钩子：pre_install|post_install|pre_uninstall|post_uninstall
+	Hook       string // 生命周期钩子：pre_<phase>/post_<phase>，在该相位 play 的 pre/post 时机执行（deploy 相位命名沿用 pre_install/post_install）
 
 	Block  []*Task // block 组：顺序执行，失败转 rescue
 	Rescue []*Task // rescue 组：block 失败时执行
@@ -77,6 +78,10 @@ type Task struct {
 	Include string // include 片段路径（`include: tasks/x.yaml`）：Load 阶段静态展开为任务序列
 
 	IsHandler bool // 标记该 Task 是 handler（解析时使用）
+
+	// PlanIdx 是 plan 执行模式的任务序号（journal 的 (主机, 任务) 键）。
+	// 非 plan 路径恒为 0；由 executor 的计划重建写入，YAML 解析不涉及。
+	PlanIdx int `yaml:"-"`
 }
 
 // Label 返回任务展示名。

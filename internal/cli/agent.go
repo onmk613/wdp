@@ -12,6 +12,23 @@ import (
 	"wdp/internal/config"
 )
 
+const agentHelp = `
+在目标主机上启动常驻 agent（agent 通道的服务端）
+
+默认监听 127.0.0.1:<wdp.cfg [agent].port>；--listen 0.0.0.0:PORT 对外暴露
+认证：--ca/--cert/--key 启用 mTLS（客户端证书须由该 CA 签发）；
+--pin-client-fp 钉住允许的客户端指纹——精确吊销：删一个指纹重启即生效
+仅回环监听可不认证（多用户主机上本机任意用户均可调用 /exec 与 /file，建议 mTLS）；
+非回环无认证需显式 --allow-no-auth（仅可信内网）
+生命周期：--idle-timeout 无认证请求达此时长即退出（/health 探测不计入；0 = 永不）；
+--cleanup-on-shutdown 退出时自清理（push 临时 agent 场景；/shutdown 信号总是自清理）；
+--systemd-unit 匹配单元名，避免 Restart=always 循环拉起已删除的二进制
+日志：--log-level trace|debug|info|warn|error；--log-file 追加落盘（自清理不删，供审计，
+可经 wdp agentctl logs 拉取）；--max-request-mib 请求体上限（默认 64）
+
+通常由 wdp agentctl install 经 SSH 安装为 systemd 服务，无需手工运行
+`
+
 func newAgentCmd() *cobra.Command {
 	var (
 		listen        string
@@ -29,6 +46,7 @@ func newAgentCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
 		Short: "start the resident agent (on target hosts)",
+		Long:  agentHelp,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 默认值在 RunE 内求值：命令树构造早于 wdp.cfg 加载，
 			// 构造期取 config.Current() 会拿到内置默认端口而非配置值

@@ -106,15 +106,15 @@ func TestTransferLimits(t *testing.T) {
 	current = Config{}
 }
 
-// TestDefaultConn [run].conn 默认连接类型：空 = ssh，配置值原样透传
+// TestDefaultConn [run].conn 默认连接类型：空 = push，配置值原样透传
 // （未知值由连接工厂报错，不在此静默吞掉）。
 func TestSSHConnDefault(t *testing.T) {
 	var c Config
-	if c.DefaultConn() != "ssh" {
-		t.Fatalf("空配置应为 ssh: %q", c.DefaultConn())
-	}
-	c.Run.Conn = "push"
 	if c.DefaultConn() != "push" {
+		t.Fatalf("空配置应为 push: %q", c.DefaultConn())
+	}
+	c.Run.Conn = "ssh"
+	if c.DefaultConn() != "ssh" {
 		t.Fatalf("配置值应透传: %q", c.DefaultConn())
 	}
 }

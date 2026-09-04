@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strings"
 
 	"wdp/internal/chart"
 	"wdp/internal/model"
@@ -20,14 +21,14 @@ func reportValueCollisions(w io.Writer, values map[string]any, hosts []*model.Ho
 		fmt.Fprintf(w, "==> warning: inventory variable(s) shadowed by chart values (values always win by design):\n")
 		for _, k := range sortedKeys(shadowed) {
 			fmt.Fprintf(w, "    %s (hosts: %s) — use a distinct name + dig in templates, or add %q to chart.yaml inventory_override\n",
-				k, joinHosts(shadowed[k]), k)
+				k, strings.Join(shadowed[k], ","), k)
 		}
 	}
 	if len(overridden) > 0 {
 		fmt.Fprintf(w, "==> inventory override active (chart.yaml inventory_override):\n")
 		for _, k := range sortedKeys(overridden) {
 			fmt.Fprintf(w, "    %s (hosts: %s) — inventory value beats chart values for this key\n",
-				k, joinHosts(overridden[k]))
+				k, strings.Join(overridden[k], ","))
 		}
 	}
 }
@@ -39,15 +40,4 @@ func sortedKeys(m map[string][]string) []string {
 	}
 	slices.Sort(keys)
 	return keys
-}
-
-func joinHosts(hosts []string) string {
-	out := ""
-	for i, h := range hosts {
-		if i > 0 {
-			out += ","
-		}
-		out += h
-	}
-	return out
 }

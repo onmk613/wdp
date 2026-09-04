@@ -190,3 +190,31 @@ func TestParsePlayEmptyAndBadDocs(t *testing.T) {
 		t.Fatal("hosts 列表形态应报错（不支持，旧版会静默产生垃圾串）")
 	}
 }
+
+// TestParseTasksFrom tasks_from 是 chart 引用任务的入口相位选择属性：
+// 仅 chart 引用可用，值必须是非空字符串。
+func TestParseTasksFrom(t *testing.T) {
+	plays, err := Parse([]byte(`
+- hosts: all
+  tasks:
+    - chart: jdk
+      tasks_from: validate
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if t0 := plays[0].Tasks[0]; t0.TasksFrom != "validate" || t0.Module != "chart" {
+		t.Fatalf("tasks_from 解析: %+v", t0)
+	}
+	// 普通模块任务上使用应报错
+	if _, err := Parse([]byte("- hosts: all\n  tasks:\n    - shell: x\n      tasks_from: validate\n")); err == nil {
+		t.Fatal("shell 任务不应允许 tasks_from")
+	}
+	// 空串 / 非字符串
+	if _, err := Parse([]byte("- hosts: all\n  tasks:\n    - chart: jdk\n      tasks_from: ''\n")); err == nil {
+		t.Fatal("tasks_from 空串应报错")
+	}
+	if _, err := Parse([]byte("- hosts: all\n  tasks:\n    - chart: jdk\n      tasks_from: [a]\n")); err == nil {
+		t.Fatal("tasks_from 非字符串应报错")
+	}
+}

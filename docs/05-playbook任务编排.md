@@ -59,6 +59,8 @@ playbook 是 play 列表；每个 play 选一批主机、按顺序执行任务�
   args: {…}                    # 显式参数 map：与 map 形式模块参数合并；
                                # 注意不可与简写（free-form）参数同用，需要控制属性时改用 map 形式
   vars: {…}                    # 仅 chart 引用任务（chart: xxx）可用
+  tasks_from: validate         # 仅 chart 引用任务：入口相位名（缺省 deploy，
+                               #   执行子 chart 的 <phase>.yaml，见 08 文档）
 ```
 
 ### 条件 when
@@ -177,11 +179,13 @@ register 变量**跨批次、跨 play 延续**（serial 分批时第一批注册
 ```yaml
 - name: 仅首次安装需要的数据初始化
   shell: './init-data.sh'
-  hook: pre_install        # pre_install | post_install | pre_uninstall | post_uninstall
+  hook: pre_install        # pre_<相位> | post_<相位>（deploy 相位沿用 install 命名）
 ```
 
 - `pre_*` 在主任务序列前执行；`post_*` 在 play 全部成功（含 handlers flush）后执行
-- 相位自动过滤：`--phase uninstall` 时 install hook 跳过
+- 任意相位可用：`--phase update` 匹配 `pre_update`/`post_update`（deploy →
+  `pre_install`/`post_install`，uninstall → `pre_uninstall`/`post_uninstall`）
+- 相位自动过滤：其它相位的 hook 跳过；拼写错误 lint 告警
 - 主任务失败时 `post_*` 不执行
 - hook 内 register / 回滚日志与主流程贯通
 
@@ -213,6 +217,7 @@ register 变量**跨批次、跨 play 延续**（serial 分批时第一批注册
 | `groups` | 组名 → 成员列表（含动态组） | `{{ index .groups "webservers" }}` |
 | `hosts` | 主机名 → {name,address,port,conn} | `{{ (index .hosts "web2").address }}` |
 | `hostvars` | 主机名 → 该主机变量域（inventory 变量 + fact store） | `{{ (index .hostvars "web2").node_id }}` |
+| `playbook_dir` | playbook/chart 根目录绝对路径（Ansible 同名语义；控制机本地暂存目录定位） | `{{ .playbook_dir }}/packages/ssl` |
 
 facts 类变量（setup/stat 采集）直接进入变量域顶层（如 `.os.family`、`.cpus`、`.stat.exists`），且跨批次、跨 play、跨子 chart 作用域延续。
 

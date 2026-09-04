@@ -250,3 +250,89 @@ func TestChartUnknownRef(t *testing.T) {
 }
 
 var _ = fmt.Sprintf // 保留 fmt 引用（如删除请一并移除 import）
+
+// TestChartTasksFromPhase tasks_from 选择子 chart 的自定义相位作为入口：
+// 只执行该相位的任务序列，deploy.yaml 的任务不执行。
+func TestChartTasksFromPhase(t *testing.T) {
+	ex, rep, getScripts := setupChartWith(t, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "deploy.yaml"), []byte(`
+- name: 主部署
+  hosts: webservers
+  tasks:
+    - name: 只跑 jdk 校验
+      chart: jdk
+      tasks_from: validate
+      register: val_res
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "charts", "jdk", "validate.yaml"), []byte(`
+- hosts: all
+  vars:
+    check: strict
+  tasks:
+    - name: 校验任务
+      shell: 'echo validating jdk={{ .version }} check={{ .check }}'
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}, nil, nil)
+	if ex.Run(context.Background(), ex.Opts.Chart.Deploy) {
+		t.Fatalf("不应失败:\n%s", rep.joined())
+	}
+	scripts := strings.Join(getScripts(), "\n")
+	// 入口相位任务执行，作用域语义与 deploy 相同（父子树覆盖子默认：17）
+	if !strings.Contains(scripts, "echo validating jdk=17 check=strict") {
+		t.Fatalf("tasks_from 相位任务未按预期执行:\n%s", scripts)
+	}
+	// deploy.yaml 的子任务不应执行
+	if strings.Contains(scripts, "opt=") || strings.Contains(scripts, "home=/opt/jdk") {
+		t.Fatalf("deploy 入口任务不应执行:\n%s", scripts)
+	}
+}
+
+// TestChartTasksFromUnknown 未知入口相位应失败并列出可用相位。
+func TestChartTasksFromUnknown(t *testing.T) {
+	ex, rep, _ := setupChartWith(t, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "deploy.yaml"), []byte(`
+- hosts: webservers
+  tasks:
+    - chart: jdk
+      tasks_from: nonsense
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}, nil, nil)
+	if !ex.Run(context.Background(), ex.Opts.Chart.Deploy) {
+		t.Fatal("未知入口相位应失败")
+	}
+	if msg := rep.joined(); !strings.Contains(msg, "unknown tasks_from phase") {
+		t.Fatalf("应报未知相位: %s", msg)
+	}
+}
+
+// TestChartSchemaAtExpansion 展开期 schema 校验：引用 vars 注入的非法值
+// （静态走查看不到的层）在实际展开时拦截。
+func TestChartSchemaAtExpansion(t *testing.T) {
+	ex, rep, _ := setupChartWith(t, func(dir string) {
+		if err := os.WriteFile(filepath.Join(dir, "deploy.yaml"), []byte(`
+- hosts: webservers
+  tasks:
+    - chart: jdk
+      vars:
+        version: 21   # schema 要求 string，注入 int 违约
+`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "charts", "jdk", "values.schema.json"), []byte(
+			`{"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object", "properties": {"version": {"type": "string"}}}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}, nil, nil)
+	if !ex.Run(context.Background(), ex.Opts.Chart.Deploy) {
+		t.Fatal("引用 vars 违反 schema 应失败")
+	}
+	if msg := rep.joined(); !strings.Contains(msg, "values do not match") || !strings.Contains(msg, "version") {
+		t.Fatalf("应报 schema 违约: %s", msg)
+	}
+}

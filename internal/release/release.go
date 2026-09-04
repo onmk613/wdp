@@ -1,5 +1,3 @@
-// Package release 记录每次 chart 部署（chart 版本 + values 快照 + 结果），
-// 供部署审计与重放（values 快照输出可直接作为 -f 输入复用）。
 package release
 
 import (
@@ -18,10 +16,11 @@ import (
 
 // Record 是一次部署记录。
 type Record struct {
-	ID        string                  `json:"id"` // <chart>-<unixnano>
+	ID        string                  `json:"id"`
 	Time      time.Time               `json:"time"`
 	Chart     string                  `json:"chart,omitempty"`
 	Version   string                  `json:"version,omitempty"`
+	Phase     string                  `json:"phase,omitempty"`    // 产生本次记录的相位（deploy/uninstall/声明 release 的自定义相位）
 	Playbook  string                  `json:"playbook,omitempty"` // 裸 playbook 模式
 	Values    map[string]any          `json:"values,omitempty"`
 	ValuesRef []string                `json:"values_ref,omitempty"` // -f 文件与 --set 明细
@@ -148,6 +147,26 @@ func Load(id string) (*Record, error) {
 		return nil, err
 	}
 	return &rec, nil
+}
+
+// Delete 删除一条记录。id 经 securejoin 约束在记录目录内（与 Load 同口径，
+// ../ 等穿越写法不越出 releases 删文件）；记录不存在时报错。
+func Delete(id string) error {
+	dir, err := Dir()
+	if err != nil {
+		return err
+	}
+	path, err := securejoin.SecureJoin(dir, id+".json")
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("record %s does not exist", id)
+		}
+		return err
+	}
+	return nil
 }
 
 // DiffValues 递归对比两份 values，返回 "- 路径: 旧值 / + 路径: 新值" 变更行

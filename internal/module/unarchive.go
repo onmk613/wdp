@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"slices"
 	"strings"
 
@@ -38,6 +39,7 @@ func (m *UnarchiveModule) Params() []ParamDoc {
 		{Name: "dest", Type: "string", Desc: "remote destination directory (created when missing)"},
 		{Name: "remote_src", Type: "bool", Default: "false", Desc: "src is a remote path (skip the upload, extract in place)"},
 		{Name: "creates", Type: "string", Desc: "idempotency guard: skip the task when this path exists (the control node cannot see archive contents, repeats rely on this)"},
+		{Name: "members", Type: "list", Desc: "extract only these entries, matched by basename or full archive path and flattened into dest/ (local src only; unmatched names fail)"},
 		{Name: "remove", Type: "bool", Default: "false", Desc: "deprecated (kept for compatibility): the uploaded temp archive copy is now always cleaned up automatically"},
 	}
 }
@@ -72,6 +74,7 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, _ string) *Re
 	}
 	remoteSrc, _ := argBool(args, "remote_src")
 	creates, _ := argStr(args, "creates")
+	members, hasMembers := argStrList(args, "members")
 	remove, _ := argBool(args, "remove")
 	if remove && remoteSrc {
 		return Fail("%s", "remove only supports a local src (a remote archive is not cleaned up when remote_src is set)")
@@ -91,6 +94,12 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, _ string) *Re
 		if out.Code == 0 {
 			return &Result{Msg: fmt.Sprintf("%s already exists, skipped", creates)}
 		}
+	}
+
+	// members 选取路径：控制端按名检索归档成员，逐文件分发（拍平到 dest/，
+	// 校验和幂等，权限沿用归档条目）——不再整体解压
+	if hasMembers && len(members) > 0 {
+		return m.runMembers(rc, src, kind, dest, members, remoteSrc)
 	}
 
 	// 控制端无法预知归档内容，check 模式只报告将执行解压
@@ -193,6 +202,68 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, _ string) *Re
 		return Fail("extract failed: %s", firstLine(out.Stderr))
 	}
 	return &Result{Changed: true, Msg: fmt.Sprintf("extracted %s to %s", src, dest)}
+}
+
+// runMembers 执行成员选取分发：本地归档按名检索成员（basename 或完整路径，
+// 未命中报错），逐个拍平写入 dest/，复用 putFile 的校验和幂等与回滚登记。
+func (m *UnarchiveModule) runMembers(rc *RunContext, src, kind, dest string, members []string, remoteSrc bool) *Result {
+	if remoteSrc {
+		return Fail("%s", "members requires a local src (the control node must inspect the archive to match entries)")
+	}
+	data, err := os.ReadFile(resolveLocal(rc, src))
+	if err != nil {
+		return Fail("failed to read local archive: %v", err)
+	}
+	sel, err := selectArchiveMembers(kind, data, members)
+	if err != nil {
+		return Fail("unarchive %s: %v", src, err)
+	}
+
+	cur, bad := probePath(rc, dest)
+	if bad != nil {
+		return bad
+	}
+	if cur != "missing" && cur != "directory" {
+		return Fail("%s exists and is not a directory", dest)
+	}
+	if !rc.CheckMode && cur == "missing" {
+		if out, bad := rc.exec(fmt.Sprintf("mkdir -p -- %s", shellquote.Quote(dest))); bad != nil {
+			return bad
+		} else if out.Code != 0 {
+			return Fail("failed to create directory: %s", firstLine(out.Stderr))
+		}
+	}
+
+	changed := false
+	for _, mem := range sel {
+		mode := mem.mode
+		if mode == 0 {
+			mode = 0o644
+		}
+		target := strings.TrimSuffix(dest, "/") + "/" + path.Base(mem.name)
+		memChanged, res := putFile(rc, mem.data, target, mode, false, true, "", "")
+		if res != nil {
+			if res.Failed {
+				return res
+			}
+			// check 预估：逐成员累积 changed，继续评估其余成员
+			if res.Changed {
+				changed = true
+			}
+			continue
+		}
+		if memChanged {
+			changed = true
+		}
+	}
+	if rc.CheckMode {
+		return &Result{Changed: changed, Msg: fmt.Sprintf("[check] would extract %d member(s) from %s to %s", len(sel), src, dest)}
+	}
+	msg := fmt.Sprintf("%d member(s) from %s are unchanged in %s", len(sel), src, dest)
+	if changed {
+		msg = fmt.Sprintf("extracted %d member(s) from %s to %s", len(sel), src, dest)
+	}
+	return &Result{Changed: changed, Msg: msg}
 }
 
 // archiveKind 按扩展名识别归档类型：zip / targz / tarxz / tar（无法识别返回空）。

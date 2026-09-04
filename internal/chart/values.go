@@ -42,15 +42,22 @@ type pathSeg struct {
 }
 
 // SubScope 计算子 chart 引用展开时的作用域 values（低 → 高）：
-// 子 chart 默认 values → 父作用域 <子chart名> 子树 → global（跨层共享，拷贝隔离）。
+// 子 chart 默认 values → 父作用域 <子chart名> 子树 → global（跨层共享，
+// 拷贝隔离；子 chart 自带的 global 默认值保留，父声明同名键时父胜出）。
 // 执行器与 template 预览共用本规则；引用 vars（task 级）由调用方在其上继续叠加。
 func SubScope(sub *Chart, parentScope map[string]any) map[string]any {
 	scope := deepCopyValues(sub.Values)
 	if tree, ok := parentScope[sub.Meta.Name].(map[string]any); ok {
 		scope = Merge(scope, tree)
 	}
+	// global 合并而非整体替换：子 chart 自带 global 默认值不能因父 chart
+	// 是否声明 global 而时有时无（组件行为被调用者的无关配置改变）
 	if g, ok := parentScope["global"].(map[string]any); ok {
-		scope["global"] = deepCopyValues(g)
+		subGlobal := map[string]any{}
+		if own, ok := scope["global"].(map[string]any); ok {
+			subGlobal = own
+		}
+		scope["global"] = Merge(subGlobal, g)
 	}
 	return scope
 }
@@ -254,7 +261,15 @@ func LoadValuesYAML(data []byte) (map[string]any, error) {
 // 默认 values 先深拷贝：--set 的点路径写入是原地写，浅拷贝会让嵌套 map
 // 与 c.Values 共享引用而污染 chart 默认值。
 func (c *Chart) BuildValues(files []string, sets []string) (map[string]any, error) {
-	merged := deepCopyValues(c.Values)
+	return ApplyOverrides(c.Values, files, sets)
+}
+
+// ApplyOverrides 在基线 values 上依序合并 -f 文件与 --set 参数（基线先深
+// 拷贝）。部署相位以 chart 默认 values 为基线；非部署相位（uninstall 等）
+// 以主机 marker 还原的 values 为基线——显式 -f/--set 是对实际部署入参的
+// 覆盖，不是对 values.yaml 默认值的覆盖。
+func ApplyOverrides(base map[string]any, files []string, sets []string) (map[string]any, error) {
+	merged := deepCopyValues(base)
 	for _, f := range files {
 		data, err := os.ReadFile(f)
 		if err != nil {

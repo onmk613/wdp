@@ -1,0 +1,51 @@
+# docker 离线制品准备（deploy.yaml 经 include 下沉 delegate_to: localhost +
+# run_once: true；--tags download 或根 download.yaml 相位触发）。下载官方
+# 静态包与 cli 插件的原始制品到控制机 packages/<arch>/，不做解压——分发侧
+# artifact 模块按 members 文件名在包内检索。幂等：目标文件存在且非空自动
+# 跳过（预置过制品的控制机重复执行零下载；升级版本改 values 后自动重下）。
+
+- name: 解析目标架构列表（values 优先，其次节点 facts，回退 x86_64）
+  set_fact:
+    download_arch_list: >-
+      {{ $list := list }}{{ if .download_archs }}{{ $list = .download_archs }}{{ else }}{{ range $h := index $.groups "docker" }}{{ $a := dig "arch" "" (index $.hostvars $h) }}{{ if $a }}{{ $list = append $list $a }}{{ end }}{{ end }}{{ end }}{{ if not $list }}{{ $list = list "x86_64" }}{{ end }}{{ to_json (uniq $list) }}
+
+- name: 输出目标架构
+  debug:
+    msg: '目标架构: {{ .download_arch_list }}'
+
+- name: 下载 docker 官方静态包（原始 tgz）
+  shell: |
+    set -e
+    pkg="{{ .playbook_dir }}/packages/{{ .item }}"
+    mkdir -p "$pkg"
+    tgz="$pkg/docker-{{ .version }}.tgz"
+    if [ -s "$tgz" ]; then echo "cached: $tgz"; exit 0; fi
+    echo "fetch {{ .download_base }}/{{ .item }}/docker-{{ .version }}.tgz"
+    curl -fSL --retry 3 --retry-delay 3 --retry-all-errors -C - --max-time 900 \
+      -o "$tgz.tmp" "{{ .download_base }}/{{ .item }}/docker-{{ .version }}.tgz"
+    mv "$tgz.tmp" "$tgz"
+  loop: '{{ .download_arch_list }}'
+
+- name: 下载 compose / buildx cli 插件
+  shell: |
+    set -e
+    pkg="{{ .playbook_dir }}/packages/{{ .item }}"
+    mkdir -p "$pkg"
+    # compose 发布名用 x86_64 风格架构（与 .item 一致），buildx 用 amd64/arm64
+    buildx_arch={{ if eq .item "x86_64" }}amd64{{ else }}arm64{{ end }}
+    if [ ! -s "$pkg/docker-compose" ]; then
+      echo "fetch docker-compose {{ .compose_version }} ({{ .item }})"
+      curl -fSL --retry 3 --retry-delay 3 --retry-all-errors -C - --max-time 900 \
+        -o "$pkg/docker-compose.tmp" \
+        "https://github.com/docker/compose/releases/download/{{ .compose_version }}/docker-compose-linux-{{ .item }}"
+      mv "$pkg/docker-compose.tmp" "$pkg/docker-compose"
+    fi
+    if [ ! -s "$pkg/docker-buildx" ]; then
+      echo "fetch docker-buildx {{ .buildx_version }} ({{ .item }})"
+      curl -fSL --retry 3 --retry-delay 3 --retry-all-errors -C - --max-time 900 \
+        -o "$pkg/docker-buildx.tmp" \
+        "https://github.com/docker/buildx/releases/download/{{ .buildx_version }}/buildx-{{ .buildx_version }}.linux-$buildx_arch"
+      mv "$pkg/docker-buildx.tmp" "$pkg/docker-buildx"
+    fi
+    chmod 0755 "$pkg/docker-compose" "$pkg/docker-buildx"
+  loop: '{{ .download_arch_list }}'

@@ -57,6 +57,12 @@ type Server struct {
 	logRing  *ringWriter
 	sink     *logSink
 	levelVar *slog.LevelVar
+
+	// 自治执行（POST /plan）：同刻至多一个 running run；running 期间抑制
+	// 空闲退出（没有请求到达不应导致收敛被杀，§7.5 必查项）
+	plans      *planManager
+	planActive atomic.Bool
+	runsDir    string // 自治执行持久化根（空 = 内置默认 /var/lib/wdp/runs）
 }
 
 // tlsMaterial 是一次生效的 mTLS 材料快照
@@ -78,6 +84,7 @@ func New(listen string) *Server {
 	exe, _ := os.Executable()
 	s.selfBin = exe
 	s.systemdUnit = "wdp-agent"
+	s.plans = newPlanManager()
 	s.initLogger()
 	return s
 }
@@ -182,6 +189,9 @@ func (s *Server) ListenAndServe() error {
 	return s.serve(ln)
 }
 
+// Serve 在给定监听器上服务（阻塞；外部编排场景与测试注入用）。
+func (s *Server) Serve(ln net.Listener) error { return s.serve(ln) }
+
 // serve 在给定监听器上服务（阻塞；ListenAndServe 的可测内核：
 // 测试可自建监听器断言空闲退出等行为）。返回 http.ErrServerClosed
 // 表示被 /shutdown 或空闲看门狗正常关停。
@@ -228,12 +238,16 @@ func (s *Server) watchIdle() {
 }
 
 // idleExpired 空闲判定：无在途已认证请求，且距最后一次完成超过周期。
-// 在途保护——数小时的长任务执行期间不判空闲（否则击杀在途任务）。
+// 在途保护——数小时的长任务执行期间不判空闲（否则击杀在途任务）；
+// 自治执行收敛期间同样不判空闲（后台执行没有请求到达，§7.5）。
 func (s *Server) idleExpired(now time.Time) bool {
 	if s.idleTimeout <= 0 {
 		return false
 	}
 	if s.inflight.Load() > 0 {
+		return false
+	}
+	if s.planIdleActive() {
 		return false
 	}
 	return now.Sub(time.Unix(0, s.lastActive.Load())) >= s.idleTimeout

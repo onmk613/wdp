@@ -19,12 +19,31 @@ import (
 	"wdp/internal/model"
 	"wdp/internal/playbook"
 	"wdp/internal/release"
-
-	_ "wdp/internal/conn/agentc"
-	_ "wdp/internal/conn/local"
-	_ "wdp/internal/conn/push"
-	_ "wdp/internal/conn/sshc"
+	"wdp/internal/render"
 )
+
+const runHelp = `
+执行 playbook 或 chart（编译 + 执行一条龙；拆开用 wdp plan + wdp apply）
+
+目标可为裸 playbook（site.yaml）、chart 目录或打包的 chart.tgz
+chart 按生命周期相位执行：--phase 选择 chart 根部的 <phase>.yaml（内置 deploy/uninstall/status，可自定义）
+主机来源：-i inventory 清单（可重复，后者覆盖前者合并）或 --hosts 内联表达式
+（IP/主机[:port]，支持 10.55.2.101-104 区间；每个 play 都以这些主机为目标），两者互斥
+连接通道由 inventory 的 conn 决定（ssh/push/agent/local），默认取 wdp.cfg [run].conn
+
+执行控制：--limit 在 play 目标范围内进一步过滤；--tags/--skip-tags 按标签筛选任务；
+--start-at-task 从指定任务起跑（断点续跑）；--list-hosts 只列出将执行的主机即退出
+预演：--check 零风险只读探测 + 变更预估；--diff 在 check 基础上输出内容级前后对照
+-f/--values-file 与 --set 覆盖 chart 默认值（依序深合并，同 Helm）；--fact-cache 跨运行持久化 facts
+不可逆相位（Destructive）执行前要求确认，-y 跳过（CI 推荐）
+按相位声明落部署记录（wdp release show 回看）与 release marker（wdp drift 巡检）
+
+示例：
+wdp run site.yaml -i inv.yaml                      # 裸 playbook
+wdp run ./myapp -f envs/prod.yaml                  # chart + 环境 values
+wdp run ./myapp --phase uninstall --check          # 卸载预演
+wdp run ./myapp --start-at-task "下发配置"          # 从指定任务续跑
+`
 
 // newRunCmd 构造 `wdp run`。
 func newRunCmd() *cobra.Command {
@@ -32,6 +51,7 @@ func newRunCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run <playbook.yaml|chart-dir|chart.tgz>",
 		Short: "run a playbook or chart",
+		Long:  runHelp,
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runTarget(cmd.Context(), args[0], opts)
@@ -47,7 +67,8 @@ func newRunCmd() *cobra.Command {
 	f.StringVar(&opts.startAtTask, "start-at-task", "", "start execution at the given task")
 	f.BoolVar(&opts.check, "check", false, "check mode: dry-run without applying changes")
 	f.BoolVar(&opts.diff, "diff", false, "diff mode: content-level diff with --check (copy/template/file)")
-	f.StringVar(&opts.phase, "phase", "deploy", "chart lifecycle phase: deploy | uninstall | status")
+	f.StringVar(&opts.phase, "phase", "deploy",
+		"chart lifecycle phase: any <phase>.yaml at the chart root (built-in: deploy/uninstall/status; custom e.g. update/stop/download)")
 	f.BoolVarP(&opts.yes, "yes", "y", false, "skip confirmation of irreversible operations (recommended for CI)")
 	f.StringVar(&opts.factCache, "fact-cache", "",
 		"persist setup/set_fact facts to this JSON file across runs (loaded at start, saved atomically at end)")
@@ -84,28 +105,9 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		defer cancel()
 	}
 	// 主机来源：--hosts 内联表达式（不写 inventory 文件）或 -i 清单。
-	inline := len(opts.hostsInline) > 0
-	var inv *inventory.Inventory
-	if inline {
-		// 只与"用户显式 -i"互斥；gInventories 可能是 PersistentPreRunE
-		// 回填的 config 默认值，不代表用户指定了清单
-		if gInventoryExplicit {
-			return fmt.Errorf("--hosts and -i are mutually exclusive (inline specs replace the inventory file)")
-		}
-		hs, err := inventory.HostsFromSpecs(opts.hostsInline, connDefaults())
-		if err != nil {
-			return err
-		}
-		if len(hs) == 0 {
-			return fmt.Errorf("--hosts resolved to no hosts")
-		}
-		inv = inventory.FromHosts(hs)
-	} else {
-		var err error
-		inv, err = loadInventories()
-		if err != nil {
-			return err
-		}
+	inv, inline, err := hostSource(opts.hostsInline)
+	if err != nil {
+		return err
 	}
 
 	eopts := executor.Options{
@@ -123,48 +125,26 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		MaxDownloadBytes: maxDownloadBytes(),
 	}
 	var plays []*model.Play
+	// spec 决定相位语义（是否部署事件/是否留部署记录）；无 chart 上下文
+	// （裸 playbook）按内置缺省判定
+	spec := chart.DefaultPhaseSpec(opts.phase)
 
 	if chart.IsChartPath(target) {
-		ch, values, eng, err := chart.OpenWithLimits(target, opts.valuesFiles, opts.setArgs, chart.Limits{MaxExtractBytes: config.Current().MaxExtractBytes()})
-		if err != nil {
-			return err
+		// 相位属性可能来自 chart.yaml phases: 声明（自定义相位声明 release），
+		// 它决定 values 来源与校验门控——先加载 chart 本体再分支
+		ch, loaded, lerr := loadChartRun(ctx, target, inv, opts, &eopts)
+		if lerr != nil {
+			return lerr
 		}
 		defer ch.Close()
-
-		// 生命周期相位：选择对应 play；deploy 相位校验 required 配置项
-		plays, err = ch.PhasePlays(opts.phase)
-		if err != nil {
-			return err
-		}
-		if opts.phase == "" || opts.phase == "deploy" {
-			if err := ch.ValidateRequired(values); err != nil {
-				return err
-			}
-			// 可逆性评估 + 不可逆操作确认（可 --yes 跳过；非交互环境警告放行）
-			if !opts.listHosts && !opts.check {
-				if err := confirmReversibility(ch, opts.yes); err != nil {
-					return err
-				}
-			}
-		}
-		eopts.Chart = ch
-		eopts.Values = values
-		eopts.Engine = eng
-		eopts.BaseDir = ch.Dir
-		eopts.Phase = opts.phase
-
-		// 同名碰撞预检：被 values 遮蔽的 inventory 变量告警（静默失效是真坑），
-		// inventory_override 白名单生效的键打信息。--list-hosts 不执行任务，跳过。
-		if !opts.listHosts {
-			if hosts := inv.SelectPlays(plays, opts.limit); len(hosts) > 0 {
-				reportValueCollisions(os.Stderr, eopts.Values, hosts, eopts.Chart.Meta.InventoryOverride)
-			}
-		}
+		plays, spec = loaded.plays, loaded.spec
 	} else {
-		var err error
 		plays, err = playbook.Load(target)
 		if err != nil {
 			return err
+		}
+		if abs, aerr := filepath.Abs(target); aerr == nil {
+			target = abs
 		}
 		eopts.BaseDir = filepath.Dir(target)
 	}
@@ -190,21 +170,35 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	finish()
 
 	// 部署记录（chart 版本 + values 快照 + 结果统计）。
-	// 预演/列主机/只读相位不产生真实部署，不写审计记录（否则与真实部署无法区分）
-	if opts.check || opts.listHosts || opts.phase == "status" {
+	// 预演/列主机/不留痕相位（未声明 release/record 的相位，如 status 与普通
+	// 自定义相位）不产生真实部署，不写审计记录（否则与真实部署无法区分）
+	if opts.check || opts.listHosts || !spec.Records() {
 		if failed {
 			return errPlayFailed
 		}
 		return nil
 	}
+	phaseLabel := opts.phase
+	if phaseLabel == "" {
+		phaseLabel = "deploy"
+	}
 	rec := &release.Record{
 		Playbook:  target,
+		Phase:     phaseLabel,
 		ValuesRef: append(append([]string{}, opts.valuesFiles...), opts.setArgs...),
 		Stats:     ex.LastStats(),
 		Failed:    failed,
 	}
 	if eopts.Chart != nil {
 		rec.Chart, rec.Version, rec.Values = eopts.Chart.Meta.Name, eopts.Chart.Meta.Version, eopts.Values
+		// marker 来源相位的 values 按主机还原（eopts.Values 为 nil）：审计
+		// 记录取代表性 values（各主机通常一致，逐主机差异在 marker 里）
+		if rec.Values == nil {
+			for _, v := range eopts.HostValues {
+				rec.Values = v
+				break
+			}
+		}
 	}
 	// 记录实际作用的主机范围：与 executor 一致取全部 play 的并集并应用
 	// --limit，避免 --limit web1 时审计记录虚报整个 play 的主机清单
@@ -221,5 +215,94 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	return nil
 }
 
-// errPlayFailed 标记存在失败（退出码 1，不打印重复错误）。
-var errPlayFailed = fmt.Errorf("execution finished with failed hosts")
+// chartRun 是 loadChartRun 的装载结果。
+type chartRun struct {
+	plays []*model.Play
+	spec  chart.PhaseSpec
+}
+
+// loadChartRun 装载 chart 执行目标：生命周期相位 plays、相位属性、values
+// 与渲染引擎，并完成可逆性确认与同名碰撞预检；eopts 的 chart 上下文
+// （Chart/Values/Engine/BaseDir/Phase/HostValues）在此填充。返回的 chart
+// 由调用方在执行完毕后 Close。
+func loadChartRun(ctx context.Context, target string, inv *inventory.Inventory, opts runOptions, eopts *executor.Options) (_ *chart.Chart, out chartRun, err error) {
+	ch, err := chart.LoadWithLimits(target, chart.Limits{MaxExtractBytes: config.Current().MaxExtractBytes()})
+	if err != nil {
+		return nil, out, err
+	}
+	defer func() {
+		if err != nil {
+			ch.Close()
+		}
+	}()
+
+	// 生命周期相位：选择对应 play；相位属性按 chart.yaml phases: 声明合并
+	plays, err := ch.PhasePlays(opts.phase)
+	if err != nil {
+		return nil, out, err
+	}
+	spec := ch.PhaseSpecFor(opts.phase)
+	eng, err := render.NewEngine(ch.CollectHelpers())
+	if err != nil {
+		return nil, out, err
+	}
+
+	var values map[string]any
+	if spec.Release {
+		// 部署事件相位（deploy 及声明 release 的自定义相位如 update）：
+		// values 来源不变（values.yaml + -f + --set），且必须过
+		// required + schema 校验
+		values, err = ch.BuildValues(opts.valuesFiles, opts.setArgs)
+		if err != nil {
+			return nil, out, err
+		}
+		if err := ch.ValidateRequired(values); err != nil {
+			return nil, out, err
+		}
+		// schema 校验（required 的强化版：类型/取值/结构），
+		// 子 chart 用 SubScope 逐层走查（引用 vars 由 executor 展开期校验）
+		if err := ch.ValidateValuesSchema(values); err != nil {
+			return nil, out, err
+		}
+		if err := ch.ValidateSubchartsSchema(values); err != nil {
+			return nil, out, err
+		}
+	} else if !opts.listHosts {
+		// 其他相位（uninstall / status / 未声明 release 的自定义相位）：
+		// values 默认从各主机 marker 还原实际部署入参，-f/--set 降级为
+		// 显式覆盖；marker 缺失/v1 报错，绝不静默回退 values.yaml 默认值。
+		// 校验强度按 ResolvesValues（uninstall 等清除 marker 的相位与部署同门控）
+		hosts := inv.SelectPlays(plays, opts.limit)
+		hostValues, rerr := resolveMarkerValues(ctx, ch, hosts, opts.valuesFiles, opts.setArgs, spec.ResolvesValues())
+		if rerr != nil {
+			return nil, out, rerr
+		}
+		eopts.HostValues = hostValues
+		for _, v := range hostValues { // 碰撞预检的代表性 values（各主机通常一致）
+			values = v
+			break
+		}
+	}
+	// 可逆性确认按 Destructive 门控（deploy/uninstall 及声明对应属性的
+	// 相位）：uninstall 此前因 Release == false 完全跳过确认——唯一会
+	// 删除数据的相位恰是唯一不确认的相位
+	if !opts.listHosts && !opts.check && spec.Destructive() {
+		if err := confirmReversibility(ch, opts.phase, opts.yes); err != nil {
+			return nil, out, err
+		}
+	}
+	eopts.Chart = ch
+	eopts.Values = values
+	eopts.Engine = eng
+	eopts.BaseDir = ch.Dir
+	eopts.Phase = opts.phase
+
+	// 同名碰撞预检：被 values 遮蔽的 inventory 变量告警（静默失效是真坑），
+	// inventory_override 白名单生效的键打信息。--list-hosts 不执行任务，跳过。
+	if !opts.listHosts && values != nil {
+		if hosts := inv.SelectPlays(plays, opts.limit); len(hosts) > 0 {
+			reportValueCollisions(os.Stderr, values, hosts, eopts.Chart.Meta.InventoryOverride)
+		}
+	}
+	return ch, chartRun{plays: plays, spec: spec}, nil
+}

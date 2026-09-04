@@ -108,13 +108,13 @@ func (c *Config) SSHUser() string {
 	return "root"
 }
 
-// DefaultConn 归一化默认连接类型（[run].conn，空 = ssh）。未知值原样返回，
+// DefaultConn 归一化默认连接类型（[run].conn，空 = push）。未知值原样返回，
 // 由连接工厂报 unknown connection type（错误信息含合法选项）。
 func (c *Config) DefaultConn() string {
 	if c.Run.Conn != "" {
 		return c.Run.Conn
 	}
-	return "ssh"
+	return "push"
 }
 
 // SSHConnectTimeout 归一化连接超时秒。

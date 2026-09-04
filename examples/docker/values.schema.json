@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "docker chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "compose_version": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "buildx_version": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "download_archs": {
+      "type": "array",
+      "items": {"enum": ["x86_64", "aarch64"]},
+      "uniqueItems": true
+    },
+    "download_base": {"type": "string", "pattern": "^https?://"},
+    "cli_plugins_dir": {"type": "string", "minLength": 1},
+    "data_dir": {"type": "string", "minLength": 1},
+    "bin_dir": {"type": "string", "minLength": 1},
+    "conf_dir": {"type": "string", "minLength": 1},
+    "log": {
+      "type": "object",
+      "properties": {
+        "driver": {"type": "string"},
+        "level": {"enum": ["debug", "info", "warn", "error", "fatal"]},
+        "max_size": {"type": "string", "pattern": "^[0-9]+[kmgt]?$"},
+        "max_file": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "uninstall_remove_binaries": {"type": "boolean"}
+  }
+}

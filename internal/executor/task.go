@@ -26,6 +26,17 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 	start := time.Now()
 	defer func() { res.ElapsedMs = time.Since(start).Milliseconds() }()
 
+	// 断点续跑：journal 已记 ok/changed 的任务不重做（register 记 skipped
+	// 数据——崩溃前的真实输出不可恢复，依赖它的 when 分支按 skipped 处理）
+	if task.PlanIdx > 0 && e.Opts.SkipDone != nil && e.Opts.SkipDone[hr.host.Name][task.PlanIdx] {
+		res.Skipped = true
+		res.SkipReason = "already completed (resumed from journal)"
+		if task.Register != "" {
+			hr.vars[task.Register] = resultData(res)
+		}
+		return res
+	}
+
 	// when（可引用 register 变量）
 	if r, done := e.evalWhen(task, base, hr, res); done {
 		return r
@@ -107,7 +118,7 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 
 // newTaskResult 构造任务结果模板（含任务级展示控制 output/no_log）。
 func newTaskResult(hr *hostRun, task *model.Task) *model.TaskResult {
-	res := &model.TaskResult{Host: hr.host.Name, Task: task.Label(), Module: task.Module}
+	res := &model.TaskResult{Host: hr.host.Name, Task: task.Label(), Module: task.Module, PlanIdx: task.PlanIdx}
 	// 任务级展示控制（只影响回显，不影响 register 数据）
 	res.Output = task.Output
 	if task.NoLog {

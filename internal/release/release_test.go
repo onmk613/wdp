@@ -39,3 +39,25 @@ func TestSaveLoadContainedInDir(t *testing.T) {
 		t.Errorf("回读内容不符: %+v", rec)
 	}
 }
+
+// TestDelete 删除记录：删后不可读，重复删除与不存在的记录报错。
+func TestDelete(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	id, err := Save(&Record{Chart: "app", Version: "1.0", Hosts: []string{"h1"}, Time: time.Unix(1700000000, 0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Delete(id); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, err := Load(id); err == nil {
+		t.Errorf("删除后记录应不可读")
+	}
+	if err := Delete(id); err == nil {
+		t.Errorf("重复删除应报错")
+	}
+	if err := Delete("no-such-record"); err == nil {
+		t.Errorf("删除不存在的记录应报错")
+	}
+}

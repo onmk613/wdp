@@ -96,8 +96,11 @@ func TestLoadChart(t *testing.T) {
 	if len(sub.Deploy[0].Handlers) != 1 {
 		t.Fatal("子 chart handlers 解析失败")
 	}
-	if c.FindSub("jdk") == nil || c.FindSub("nope") != nil {
+	if sub, err := c.FindSub("jdk"); err != nil || sub == nil {
 		t.Fatal("FindSub 异常")
+	}
+	if _, err := c.FindSub("nope"); err == nil {
+		t.Fatal("FindSub 未知名应报错")
 	}
 	if helpers := c.CollectHelpers(); !strings.Contains(helpers, "app.fullname") {
 		t.Fatal("CollectHelpers 为空")

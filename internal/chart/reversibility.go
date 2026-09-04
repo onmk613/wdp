@@ -19,27 +19,56 @@ type Reversibility struct {
 	AutoRollback bool     // 任一 play 配置 strategy.auto_rollback
 }
 
-// Analyze 评估 chart 部署任务的可逆性（含子 chart 递归）。
-func (c *Chart) Analyze() *Reversibility {
+// Analyze 评估 chart 在指定相位（空串按 deploy）会执行的任务的可逆性。
+// 评估从该相位的 play 清单出发（uninstall 评估 uninstall.yaml，不再
+// 硬编码 deploy.yaml），子 chart 只统计被 chart: 任务实际引用的部分
+// （含 tasks_from 入口相位），未被引用的 charts/ 子 chart 不计入。
+func (c *Chart) Analyze(phase string) *Reversibility {
 	r := &Reversibility{
-		HasUninstall: len(c.Uninstall) > 0,
-		HasStatus:    len(c.Status) > 0,
+		HasUninstall: len(c.Phases["uninstall"]) > 0,
+		HasStatus:    len(c.Phases["status"]) > 0,
 	}
-	var walk func(ch *Chart, prefix string)
-	walk = func(ch *Chart, prefix string) {
-		for _, p := range ch.Deploy {
+	plays, err := c.PhasePlays(phase)
+	if err != nil {
+		// 未知相位：无可评估任务（调用方在选相位时已先行报错）
+		plays = nil
+	}
+	type refKey struct {
+		ch    *Chart
+		phase string
+	}
+	// 入口相位归一化（"" 与 "deploy" 是同一入口，键不一致会让环检测漏判）
+	normEntry := func(e string) string {
+		if e == "" {
+			return "deploy"
+		}
+		return e
+	}
+	visited := map[refKey]bool{{c, normEntry(phase)}: true} // 根同样登记：环回到根时终止
+	var walk func(ch *Chart, plays []*model.Play, prefix string, depth int)
+	walk = func(ch *Chart, plays []*model.Play, prefix string, depth int) {
+		if depth > MaxChartDepth {
+			return // 环引用防护（执行侧同上限拦截并报错）
+		}
+		for _, p := range plays {
 			if p.Strategy != nil && p.Strategy.AutoRollback {
 				r.AutoRollback = true
 			}
 			for _, t := range append(append([]*model.Task{}, p.Tasks...), p.Handlers...) {
-				r.classify(prefix, t)
+				r.classifyTask(ch, prefix, t, func(sub *Chart, entry, subPrefix string) {
+					key := refKey{sub, normEntry(entry)}
+					if visited[key] {
+						return
+					}
+					visited[key] = true
+					if subPlay, err := sub.EntryPlay(entry); err == nil {
+						walk(sub, []*model.Play{subPlay}, subPrefix, depth+1)
+					}
+				})
 			}
 		}
-		for _, sub := range ch.Subs {
-			walk(sub, prefix+sub.Meta.Name+".")
-		}
 	}
-	walk(c, "")
+	walk(c, plays, "", 0)
 	slices.Sort(r.Examples)
 	if len(r.Examples) > 5 {
 		r.Examples = r.Examples[:5]
@@ -47,16 +76,24 @@ func (c *Chart) Analyze() *Reversibility {
 	return r
 }
 
-// classify 归类单个任务（block 组递归展开，chart 引用按可逆性最保守估计）。
-func (r *Reversibility) classify(prefix string, t *model.Task) {
+// classify 归类单个任务（block 组递归展开；chart 引用沿实际任务树递归，
+// 引用任务本身不重复计数——它的子任务在递归中单独统计）。
+func (r *Reversibility) classifyTask(ch *Chart, prefix string, t *model.Task, recurse func(sub *Chart, entry, subPrefix string)) {
 	if t.Block != nil {
 		for _, sub := range append(append([]*model.Task{}, t.Block...), append(t.Rescue, t.Always...)...) {
-			r.classify(prefix, sub)
+			r.classifyTask(ch, prefix, sub, recurse)
 		}
 		return
 	}
 	if t.ChartRef != "" {
-		// chart 引用按不可逆计（保守估计，子任务已在递归中单独统计）
+		sub, err := ch.ResolveSub(t.ChartRef)
+		if err != nil {
+			// 引用错误由 lint/执行侧报错；评估按不可逆计（保守）
+			r.Irreversible++
+			r.Examples = append(r.Examples, prefix+t.Label()+" (chart:"+t.ChartRef+")")
+			return
+		}
+		recurse(sub, t.TasksFrom, prefix+sub.Meta.Name+".")
 		return
 	}
 	label := prefix + t.Label()

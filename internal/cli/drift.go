@@ -24,6 +24,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const driftHelp = `
+跨主机配置漂移巡检（只读检测与报告，不自动收敛）
+
+读取各主机 release marker，与当前 chart + values 的摘要逐主机比对分类：
+OK 一致 / DRIFTED values 已变（改配置未部署或有人手改现场；marker v2 附字段级差异）/
+OUTDATED 部署的是旧 chart 版本 / NOT-DEPLOYED 无 marker / UNREACHABLE 连接失败
+判失败口径：DRIFTED / UNREACHABLE 非零退出（可直接进 CI）；
+NOT-DEPLOYED / OUTDATED 只列出不判失败（扩容中与待升级是常态，不是漂移）
+收敛口径：重跑 wdp run <chart> 幂等重部署
+可选位置参数限定主机模式（默认 all）；--limit 进一步收窄；-f/--set 提供巡检口径的 values
+要求 chart 未禁用 release marker（no_marker: true 报错）
+
+示例：
+wdp drift ./myapp -f envs/prod.yaml
+wdp drift ./myapp 'webservers:!canary'
+`
+
 // newDriftCmd 构造 `wdp drift`。
 func newDriftCmd() *cobra.Command {
 	var (
@@ -33,6 +50,7 @@ func newDriftCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "drift <chart-dir|chart.tgz> [host-pattern]",
 		Short: "compare each host's release marker against the current chart values (read-only)",
+		Long:  driftHelp,
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pattern := "all"
@@ -93,9 +111,10 @@ func runDrift(ctx context.Context, target, pattern, limit string, valuesFiles, s
 	conns.CloseAll()
 	finish()
 
-	// 汇总：逐主机比对 marker 与当前 values 摘要
-	wantSHA := chart.ValuesDigest(values)
-	rows, failed := drift.Classify(hosts, capture.Results(), ch.Meta.Version, wantSHA)
+	// 汇总：逐主机比对 marker 与当前 values 摘要（敏感键口径与 marker 写入
+	// 一致；marker v2 时 DRIFTED 附字段级差异）
+	wantSHA := ch.ValuesDigestOf(values)
+	rows, failed := drift.Classify(hosts, capture.Results(), ch.Meta.Version, wantSHA, values)
 
 	out := os.Stdout
 	fmt.Fprintf(out, "chart %s %s  expected values sha %s\n", ch.Meta.Name, ch.Meta.Version, wantSHA)

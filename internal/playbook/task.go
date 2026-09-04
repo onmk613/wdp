@@ -6,22 +6,38 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"regexp"
 	"strings"
 
 	"wdp/internal/model"
 )
 
-// taskKeys 是任务级已知键（非模块）。注意 chart 是模块键（`chart: 子chart名`），不在此列。
-var taskKeys = map[string]bool{
-	"name": true, "when": true, "loop": true, "with_items": true,
-	"register": true, "notify": true, "tags": true, "environment": true,
-	"ignore_errors": true, "retries": true, "delay": true, "timeout": true,
-	"become": true, "become_user": true,
-	"changed_when": true, "failed_when": true, "args": true,
-	"vars": true, "until": true,
-	"block": true, "rescue": true, "always": true,
-	"output": true, "no_log": true,
-	"delegate_to": true, "run_once": true, "loop_control": true, "hook": true,
+// hookRe 是 hook 的语法形态：pre_/post_ + 相位名（首字母字母，其余字母数字
+// 下划线连字符；deploy 相位沿用 install 词干）。此处只校验语法，"相位是否
+// 存在"由 chart lint 对照根目录 <phase>.yaml 判定（裸 playbook 无相位文件
+// 概念，任意合法命名的 hook 仅在同相位执行时才会被选中）。
+var hookRe = regexp.MustCompile(`^(pre|post)_[A-Za-z][A-Za-z0-9_-]*$`)
+
+// taskKeys 是任务级已知键（非模块）——由 TaskFieldSections 文档表派生：
+// 字段表是控制键的唯一清单（新增键在 taskdoc.go 写 FieldDoc 并在下方
+// parseTask* 补解析，TestTaskFieldsPopulateStruct 反射校验"文档键必被
+// 解析进声称的 model.Task 字段"）。chart/include 是模块键位置的写法，
+// 不进白名单。
+var taskKeys = docTaskKeys()
+
+// moduleKeyWrites 是写在模块位置的引用写法（不占用控制键白名单）。
+var moduleKeyWrites = map[string]bool{"chart": true, "include": true}
+
+func docTaskKeys() map[string]bool {
+	out := map[string]bool{}
+	for _, sec := range TaskFieldSections() {
+		for _, f := range sec.Fields {
+			if !moduleKeyWrites[f.Name] {
+				out[f.Name] = true
+			}
+		}
+	}
+	return out
 }
 
 func parseTask(raw any, isHandler bool) (*model.Task, error) {
@@ -146,10 +162,8 @@ func parseTaskContextKeys(m map[string]any, t *model.Task) error {
 	}
 	if v, ok := m["hook"]; ok {
 		t.Hook = fmt.Sprint(v)
-		switch t.Hook {
-		case "pre_install", "post_install", "pre_uninstall", "post_uninstall":
-		default:
-			return fmt.Errorf("task %q: unsupported hook %q (options: pre_install/post_install/pre_uninstall/post_uninstall)",
+		if !hookRe.MatchString(t.Hook) {
+			return fmt.Errorf("task %q: unsupported hook %q (expected pre_<phase>/post_<phase>, e.g. pre_install/pre_update)",
 				t.Label(), t.Hook)
 		}
 	}
@@ -237,6 +251,13 @@ func resolveTaskModule(m map[string]any, t *model.Task) (*model.Task, error) {
 		}
 		t.ChartVars = cv
 	}
+	if v, ok := m["tasks_from"]; ok {
+		s, ok := v.(string)
+		if !ok || s == "" {
+			return nil, fmt.Errorf("task %q: tasks_from must be a non-empty phase name string", t.Label())
+		}
+		t.TasksFrom = s
+	}
 	var explicitArgs map[string]any
 	if v, ok := m["args"]; ok {
 		am, err := toAnyMap(v)
@@ -294,6 +315,9 @@ func resolveTaskModule(m map[string]any, t *model.Task) (*model.Task, error) {
 	}
 	if t.ChartVars != nil {
 		return nil, fmt.Errorf("task %q: vars is only for chart reference tasks", t.Label())
+	}
+	if t.TasksFrom != "" {
+		return nil, fmt.Errorf("task %q: tasks_from is only for chart reference tasks", t.Label())
 	}
 	t.Module = modName
 	switch x := modVal.(type) {

@@ -47,6 +47,10 @@ type TaskResult struct {
 	Task   string `json:"task"`
 	Module string `json:"module"`
 
+	// PlanIdx 是 plan 执行模式下的任务序号（journal 断点续跑的键）；
+	// 非 plan 路径恒为 0。
+	PlanIdx int `json:"plan_idx,omitempty"`
+
 	Skipped     bool           `json:"skipped"`        // when 不满足
 	SkipReason  string         `json:"skip_reason"`    // 跳过原因（when 表达式）
 	Failed      bool           `json:"failed"`         // 执行失败（模块判定或异常）

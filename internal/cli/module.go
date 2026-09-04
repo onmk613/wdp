@@ -10,12 +10,24 @@ import (
 	"wdp/internal/module"
 )
 
+const moduleHelp = `
+内置模块速查
+
+不带参数：表格列出全部内置模块（名称 + 一句话描述）
+带模块名：输出该模块的参数文档与可直接粘贴的示例片段
+
+示例：
+wdp module                # 全部模块列表
+wdp module template       # template 的参数与示例
+`
+
 // newModuleCmd 构造 `wdp module`：无参列出全部内置模块，带名输出参数
 // 文档与示例片段。
 func newModuleCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "module [module-name]",
 		Short: "list built-in modules (with a name, print parameter docs and example)",
+		Long:  moduleHelp,
 
 		Args:              cobra.MaximumNArgs(1),
 		ValidArgsFunction: completeModuleNames,

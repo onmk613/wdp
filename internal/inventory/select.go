@@ -9,10 +9,14 @@ import (
 )
 
 // Select 按模式选择主机。表达式语法：
-//
-//	逗号联合：webservers,dbservers；! 前缀排除：all,!web1
-//	:& 交集：webservers:&production（可链式 a:&b:&c）
-//	通配：web*（同时匹配主机名与组名，组名展开为成员；? 单字符）
+// webservers,dbservers            # 两组并集
+// all,!web1                       # 除 web1 外全部
+// webservers:&production          # 交集：生产环境的 web
+// webservers:&production,!canary  # 生产 web 且非金丝雀（docs/03 的例子）
+// web*                            # 所有 web 开头的组（展开成员）+ 主机
+// db?                             # db1、dba……单字符
+// os_[12]                         # os_1、os_2 字符类
+// prod_*:&appservers              # 通配与交集链混用
 func (inv *Inventory) Select(pattern string) ([]*model.Host, error) {
 	include := map[string]bool{}
 	exclude := map[string]bool{}
@@ -77,6 +81,8 @@ func (inv *Inventory) SelectLimited(pattern, limit string) ([]*model.Host, error
 // SelectPlays 取 plays 全部 hosts 模式的并集（同名主机去重），再应用
 // --limit 收窄——与 executor 实际执行的主机范围同口径。模式解析失败的
 // play 跳过（调用方此前已让 executor 校验过全部模式）。
+// 返回按 inventory 声明序排列（去重集落 map 后按 inv.Hosts 顺序回排，
+// 不随 map 迭代漂移——plan 编译的逐字节确定性依赖此性质）。
 func (inv *Inventory) SelectPlays(plays []*model.Play, limit string) []*model.Host {
 	set := map[string]*model.Host{}
 	for _, p := range plays {
@@ -89,6 +95,13 @@ func (inv *Inventory) SelectPlays(plays []*model.Play, limit string) []*model.Ho
 		}
 	}
 	out := make([]*model.Host, 0, len(set))
+	for _, h := range inv.Hosts {
+		if set[h.Name] != nil {
+			out = append(out, h)
+			delete(set, h.Name)
+		}
+	}
+	// 兜底：不在 inv.Hosts 的主机（理论上不存在——Select 只产出清单主机）
 	for _, h := range set {
 		out = append(out, h)
 	}

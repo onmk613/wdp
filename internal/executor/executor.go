@@ -32,7 +32,7 @@ type Options struct {
 	TaskTimeout int    // 任务默认超时秒数（0 不限），任务级 timeout 属性可覆盖
 	CheckMode   bool   // check 模式：模块预演不实际变更
 	DiffMode    bool   // diff 模式：check 下输出内容级差异（copy/template/file 等）
-	Phase       string // chart 生命周期相位：deploy（缺省）| uninstall | status
+	Phase       string // chart 生命周期相位（缺省 deploy）；hook 按 pre_<phase>/post_<phase> 匹配（deploy 沿用 install 命名）
 	WdpVersion  string // 控制端版本（release marker 记录）
 
 	// FactCachePath 非空时启用跨运行 fact cache：启动时加载 JSON 快照并入
@@ -45,7 +45,23 @@ type Options struct {
 
 	Chart  *chart.Chart   // chart 模式（nil = 裸 playbook 模式）
 	Values map[string]any // chart 合并后的最终 values
-	Engine *render.Engine // 渲染引擎（含 helpers 命名模板）
+	// HostValues 按主机名覆盖 Values（非部署相位从 marker 还原的实际部署
+	// values；主机间可能因 deploy 时的 inventory_override 而不同）。空 = 全
+	// 部主机用 Values。
+	HostValues map[string]map[string]any
+	// PlanVars 非空时进入 plan 执行模式：主机名 → 编译期冻结的完整变量域
+	//（inventory vars + values + play vars + 内置变量快照）。跨主机信息
+	//（groups/hosts/hostvars）取冻结值，不再从运行期 inventory 注入；
+	// 单主机运行时信息（register/facts/play_batch/BaseDir）仍在本机求值。
+	PlanVars map[string]map[string]any
+	// SkipDone 是断点续跑的已完成集合：主机名 → plan 任务序号集合
+	//（journal 重放）。命中的任务直接按 skipped 记账不执行——幂等模块重跑
+	// 通常安全但昂贵（逐主机 checksum 探测），且金丝雀语义会被重置。
+	SkipDone map[string]map[int]bool
+	// PayloadDir 补齐 plan 大文件引用（--chart-dir）：plan.Payloads 记录的
+	// 制品不进 plan 本体，执行时从此目录按相对路径取回并校验摘要。
+	PayloadDir string
+	Engine     *render.Engine // 渲染引擎（含 helpers 命名模板）
 }
 
 // Executor 执行 playbook / chart。
@@ -92,9 +108,10 @@ type journalEntry struct {
 	execOn *model.Host // nil = 登记主机自身（无委托）
 }
 
-// maxChartDepth 是 chart 引用展开的深度上限：
-// 合法的组件组合远小于此值，超过即视为环引用并报错（而非栈溢出崩溃）。
-const maxChartDepth = 32
+// maxChartDepth 是 chart 引用展开的深度上限（单一事实来源在 chart 包，
+// 可逆性评估共用同一上限）：合法的组件组合远小于此值，超过即视为环引用
+// 并报错（而非栈溢出崩溃）。
+const maxChartDepth = chart.MaxChartDepth
 
 // playState 延续同一 play 内跨批次/跨 hook 的主机运行态：
 // register/facts 变量与回滚变更日志在批次间保持（修复原批次间 register 丢失）。
@@ -152,18 +169,12 @@ func (s *playState) takeJournal(host string) []journalEntry {
 	return append([]journalEntry{}, s.journal[host]...)
 }
 
-// splitHookTasks 按生命周期相位切分任务：相位匹配的 hook 任务归 pre/post，
-// 无 hook 的归主列表，其它相位的 hook 任务跳过（uninstall 时不跑 install hook）。
+// splitHookTasks 按生命周期相位切分任务：hook 标记 pre_<phase>/post_<phase>
+// 的任务归 pre/post（deploy 相位沿用历史命名 pre_install/post_install），无
+// hook 的归主列表，其它相位的 hook 任务跳过（uninstall 时不跑 install hook）。
 func splitHookTasks(tasks []*model.Task, phase string) (pre, post, main []*model.Task) {
-	var preHook, postHook string
-	switch phase {
-	case "uninstall":
-		preHook, postHook = "pre_uninstall", "post_uninstall"
-	case "", "deploy":
-		preHook, postHook = "pre_install", "post_install"
-	default: // status 等只读相位不执行 hook
-		return nil, nil, tasks
-	}
+	preHook := "pre_" + chart.HookNameFor(phase)
+	postHook := "post_" + chart.HookNameFor(phase)
 	for _, t := range tasks {
 		switch t.Hook {
 		case preHook:

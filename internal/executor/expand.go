@@ -33,11 +33,12 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 		res.Msg = serr.Error()
 		return res
 	}
-	var subPlay *model.Play
-	if len(sub.Deploy) == 1 {
-		subPlay = sub.Deploy[0]
-	} else {
-		subPlay = &model.Play{}
+	// 入口 play：缺省 deploy.yaml，`tasks_from: <相位>` 可选子 chart 的其他相位
+	subPlay, perr := sub.EntryPlay(task.TasksFrom)
+	if subPlay == nil {
+		res.Failed = true
+		res.Msg = perr.Error()
+		return res
 	}
 
 	// 子 chart 作用域 values（低 → 高）：子 chart 默认 values → 父作用域 <子chart名> 子树
@@ -51,6 +52,14 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 		if m, ok := cv.(map[string]any); ok {
 			maps.Copy(scope, m)
 		}
+	}
+
+	// 展开期 schema 校验：此刻作用域最完整（含引用 vars），静态走查覆盖不到的
+	// 引用处注入值在此拦截
+	if err := sub.ValidateValuesSchema(scope); err != nil {
+		res.Failed = true
+		res.Msg = err.Error()
+		return res
 	}
 
 	// loop 项

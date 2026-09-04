@@ -59,6 +59,28 @@ jobs:
       - name: golangci-lint（配置见 .golangci.yml）
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1 run
 
+  # jsonv2 观察位：GOEXPERIMENT=jsonv2 下 v1 encoding/json 由 v2 引擎重实现
+  # （v1 API 输出字节兼容，本地已实测：HTML 转义/map 排序/浮点/大小写折叠一致）。
+  # golden 逐字节对比、plan 确定性编译、marker digest 等以 Marshal 输出为口径的
+  # 测试在此验证跨引擎一致性；实验转正或行为清单变化时（Go 版本升级需复核）
+  # 此位第一时间暴露。默认引擎的结论仍以 check job 为准。
+  jsonv2:
+    runs-on: ubuntu-latest
+    env:
+      GOEXPERIMENT: jsonv2
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build（jsonv2 引擎）
+        run: go build ./...
+
+      - name: Test（jsonv2 引擎，含竞态检测）
+        run: go test -race -count=1 ./...
+
   vulncheck:
     runs-on: ubuntu-latest
     steps:

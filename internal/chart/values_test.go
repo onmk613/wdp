@@ -223,3 +223,28 @@ func TestApplySetEndToEnd(t *testing.T) {
 		t.Fatalf("%#v", app["hosts"])
 	}
 }
+
+// TestSubScopeGlobalMerge §1.4 回归：子 chart 自带 global 默认值不因父是否
+// 声明 global 而时有时无；父声明同名键时父胜出（Helm 语义）。
+func TestSubScopeGlobalMerge(t *testing.T) {
+	newSub := func() *Chart {
+		return &Chart{Meta: Meta{Name: "sub"}, Values: map[string]any{
+			"global": map[string]any{"keep": "sub-default", "overridden": "sub-value"},
+		}}
+	}
+	// 父无 global：子自带 global 完整保留
+	s1 := SubScope(newSub(), map[string]any{})
+	g1, ok := s1["global"].(map[string]any)
+	if !ok || g1["keep"] != "sub-default" || g1["overridden"] != "sub-value" {
+		t.Fatalf("父无 global 时子自带 global 应保留: %#v", s1["global"])
+	}
+	// 父有 global：合并而非替换——子的独有键保留，父的同名键胜出
+	s2 := SubScope(newSub(), map[string]any{"global": map[string]any{"overridden": "parent-value", "extra": "p"}})
+	g2, ok := s2["global"].(map[string]any)
+	if !ok || g2["keep"] != "sub-default" {
+		t.Fatalf("父声明 global 后子自带默认值被丢弃: %#v", g2)
+	}
+	if g2["overridden"] != "parent-value" || g2["extra"] != "p" {
+		t.Fatalf("父 global 同名键应胜出: %#v", g2)
+	}
+}

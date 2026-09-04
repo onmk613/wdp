@@ -18,7 +18,9 @@ func (e *Executor) mergeSubHandlers(p *model.Play) {
 	}
 	var add func(sub *chart.Chart)
 	add = func(sub *chart.Chart) {
-		for _, subPlay := range sub.Deploy {
+		// 全相位（deploy + uninstall/status/自定义）：tasks_from 引用的入口
+		// 相位里声明的 handler 同样要能被 notify 触发
+		for _, subPlay := range sub.AllPlays() {
 			for _, h := range subPlay.Handlers {
 				if seen[h.Name] {
 					e.Rep.PlayMsg("handler %q duplicated, ignoring the same-named handler from subchart %s", h.Name, sub.Meta.Name)

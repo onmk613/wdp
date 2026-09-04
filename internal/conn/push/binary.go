@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"wdp/internal/conn"
+	"wdp/internal/pushbin"
 )
 
 // resolveBinary 选择自举二进制（探测目标平台后按优先级取用）：
 // 主机 binary_path > wdp.cfg [agent].push_binary.<平台> > 控制端自身
-// （目标机与控制端同平台时）。跨平台且未配置对应二进制返回错误——
-// 调用方回退纯 SSH，不做注定失败的二进制上传。
+// （目标机与控制端同平台时）> 内嵌载荷（./build.sh push 构建版）。
+// 跨平台且四者皆无返回错误——调用方回退纯 SSH，不做注定失败的二进制上传。
 func (c *Conn) resolveBinary(ctx context.Context) (string, error) {
 	remote, err := c.detectPlatform(ctx)
 	if err != nil {
@@ -26,8 +27,13 @@ func (c *Conn) resolveBinary(ctx context.Context) (string, error) {
 	}
 	bin, useSelf, ok := selectPushBinary(c.host.BinaryPath, remote, runtime.GOOS+"_"+runtime.GOARCH, cfgMap)
 	if !ok {
-		return "", fmt.Errorf("remote platform %s has no matching push binary (control %s): set [agent].push_binary.%s in wdp.cfg or host binary_path",
-			remote, runtime.GOOS+"_"+runtime.GOARCH, remote)
+		// 内嵌载荷兜底（构建期打入，优先级最低：显式配置与同平台自身
+		// 仍在前）——跨平台自举免 wdp.cfg push_binary 配置
+		if p, lerr := pushbin.Lookup(remote); lerr == nil {
+			return p, nil
+		}
+		return "", fmt.Errorf("remote platform %s has no matching push binary (control %s, embedded %v): set [agent].push_binary.%s in wdp.cfg or host binary_path, or build control with './build.sh push'",
+			remote, runtime.GOOS+"_"+runtime.GOARCH, pushbin.Platforms(), remote)
 	}
 	if !useSelf {
 		return bin, nil

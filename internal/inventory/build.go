@@ -100,6 +100,12 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 	slices.SortFunc(inv.Hosts, func(a, b *model.Host) int { return strings.Compare(a.Name, b.Name) })
 	inv.applyVars()
 	inv.precomputeTopology()
+
+	// via 中继声明校验：目标必须存在、链不得成环（加载期拦截，防提交端
+	// 选择中继时死循环或静默漏段）
+	if err := inv.ValidateVia(); err != nil {
+		return nil, err
+	}
 	return inv, nil
 }
 

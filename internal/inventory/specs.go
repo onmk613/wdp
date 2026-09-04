@@ -120,7 +120,7 @@ func parseHostSpec(spec string, dc *conn.Defaults) (*model.Host, error) {
 		Name:              spec,
 		Address:           host,
 		Port:              port,
-		Conn:              "ssh",
+		Conn:              dc.ConnOrDefault(),
 		User:              user,
 		ConnectTimeoutSec: connectTimeout,
 	}

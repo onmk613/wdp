@@ -11,10 +11,12 @@ import (
 	"wdp/internal/fmtutil"
 )
 
-// confirmReversibility 打印 chart 可逆性评估（着色遵循全局颜色开关，
-// 与 buildReporter 同一决策：config 允许 && stderr 为终端且 NO_COLOR 未设）。
-func confirmReversibility(ch *chart.Chart, yes bool) error {
-	rep := ch.Analyze()
+// confirmReversibility 打印 chart 指定相位任务的可逆性评估（着色遵循全局
+// 颜色开关，与 buildReporter 同一决策：config 允许 && stderr 为终端且
+// NO_COLOR 未设）。按相位评估：uninstall 评估 uninstall.yaml 的删除任务，
+// 不再误用 deploy.yaml。
+func confirmReversibility(ch *chart.Chart, phase string, yes bool) error {
+	rep := ch.Analyze(phase)
 	p := fmtutil.New()
 	p.SetWriter(os.Stderr)
 	p.SetColor(config.Current().Color() && fmtutil.ColorAuto(os.Stderr))
@@ -48,7 +50,7 @@ func confirmReversibility(ch *chart.Chart, yes bool) error {
 			rep.Irreversible)
 		return nil
 	}
-	p.Printf(fmtutil.None, "==> %s, continue deploying? [Y/n] ",
+	p.Printf(fmtutil.None, "==> %s, continue? [Y/n] ",
 		p.Sprint(fmtutil.BoldRed, "irreversible operations detected"))
 	line, err := readLine(os.Stdin)
 	if err != nil {
