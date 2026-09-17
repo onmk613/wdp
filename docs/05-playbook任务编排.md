@@ -45,7 +45,7 @@ playbook 是 play 列表；每个 play 选一批主机、按顺序执行任务�
   ignore_errors: true          # 失败不中断该主机后续任务
   retries: 3                   # 重试次数（配合 delay；until 时总尝试 = retries+1）
   delay: 5                     # 重试/轮询间隔秒
-  timeout: 120                 # 任务超时秒（0/-1 不限）
+  timeout: 120                 # 任务超时秒（0 = 继承全局默认：wdp.cfg task_timeout / --task-timeout；-1 = 不限）
   become: true                 # 任务级提权覆盖
   become_user: app
   changed_when: '…'            # 覆盖 changed 判定（模板表达式）

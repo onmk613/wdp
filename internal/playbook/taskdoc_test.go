@@ -56,7 +56,8 @@ func taskSentinels() map[string]taskKeySentinel {
 		"register": {value: "zz"}, "notify": {value: []any{"n"}}, "tags": {value: []any{"t"}},
 		"changed_when": {value: "zz"}, "failed_when": {value: "zz"},
 		"output": {value: "none"}, "no_log": {value: true},
-		"block": {value: oneTask},
+		// 组任务不带模块键（parseTask 拒绝 shell+block 同现）
+		"block": {module: "block", value: oneTask},
 		// rescue/always 必须与 block 同现（parseTask 校验）
 		"rescue": {module: "block", value: oneTask},
 		"always": {module: "block", value: oneTask},
@@ -96,6 +97,29 @@ func TestTaskKeysFrozen(t *testing.T) {
 	}
 	if !reflect.DeepEqual(taskKeys, frozen) {
 		t.Fatalf("taskKeys 与冻结清单不一致（有意增删键？同步此处与 taskdoc.go）:\n  got  %v\n  want %v", taskKeys, frozen)
+	}
+}
+
+// TestBlockTaskRejectsModuleKeys 组任务上的模块键/引用键此前被静默丢弃
+// （写错层级时任务"看起来生效"实则没跑），现在必须报错。
+func TestBlockTaskRejectsModuleKeys(t *testing.T) {
+	bad := []map[string]any{
+		{"name": "t", "shell": "echo hi", "block": []any{map[string]any{"debug": map[string]any{"msg": "x"}}}},
+		{"name": "t", "chart": "sub", "block": []any{map[string]any{"debug": map[string]any{"msg": "x"}}}},
+		{"name": "t", "include": "tasks/x.yaml", "block": []any{map[string]any{"debug": map[string]any{"msg": "x"}}}},
+	}
+	for i, m := range bad {
+		if _, err := parseTask(m, false); err == nil {
+			t.Errorf("用例 %d：组任务携带模块/引用键应报错", i)
+		}
+	}
+	// 控制属性与 block 同现是合法的
+	ok := map[string]any{
+		"name": "t", "when": []any{"true"}, "tags": []any{"x"},
+		"block": []any{map[string]any{"debug": map[string]any{"msg": "x"}}},
+	}
+	if _, err := parseTask(ok, false); err != nil {
+		t.Fatalf("组任务携带控制属性不应报错: %v", err)
 	}
 }
 

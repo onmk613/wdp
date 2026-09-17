@@ -36,6 +36,8 @@ production:                   # 组的嵌套：children 引用其它组
 
 ## 主机条目连接参数全表
 
+> 与 `wdp schema host`（字段表与解析器同源，永不漂移）一致；下表是同一份清单的说明版。
+
 | 键 | 类型 | 说明 |
 |---|---|---|
 | `conn` | string | 连接类型：`push`（默认）/ `ssh` / `agent` / `local` |
@@ -43,7 +45,7 @@ production:                   # 组的嵌套：children 引用其它组
 | `port` | int | SSH 端口，缺省 22 |
 | `user` | string | SSH 用户（缺省取 wdp.cfg `[ssh].user`） |
 | `password` / `password_env` | string | SSH 密码认证（含 keyboard-interactive） |
-| `key_path` | string | 私钥路径（缺省依次尝试 ~/.ssh/id_ed25519、id_rsa） |
+| `key_path` | string | 私钥路径（缺省依次尝试 ~/.ssh/id_ed25519、id_ecdsa、id_rsa） |
 | `key_passphrase` / `key_passphrase_env` | string | 私钥口令 |
 | `host_key_check` | bool | 校验主机指纹（缺省取 wdp.cfg） |
 | `known_hosts` | string | 指纹文件路径（缺省 ~/.ssh/known_hosts） |
@@ -52,7 +54,9 @@ production:                   # 组的嵌套：children 引用其它组
 | `agent_port` | int | agent/push 端口（无 agent_url 时用 host:port） |
 | `tls` | bool | agent 通道启用 HTTPS |
 | `ca_file` / `cert_file` / `key_file` | string | agent 通道 mTLS 三件套 |
-| `insecure_skip_verify` | bool | 跳过服务端证书校验（明确声明的降级） |
+| `insecure_skip_verify` | bool | 跳过全部服务端证书校验（链 + 主机名；明确声明的降级） |
+| `tls_skip_host_verify` | bool | 仅跳过主机名（SAN）校验，保留 CA 链校验（NAT/端口转发下证书 SAN 与连接地址不符时用） |
+| `tls_server_name` | string | 显式覆盖主机名校验目标（证书 SAN 为其它名称时指定；缺省按 `host` 字段校验） |
 | `binary_path` | string | push 通道自举用的 wdp 二进制（跨平台场景） |
 | `keep_agent` | bool | push 通道结束后保留临时 agent（调试） |
 | `become_password` / `become_password_env` | string | sudo 密码（缺省免密 sudo） |

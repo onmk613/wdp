@@ -2,7 +2,6 @@ package cli
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -39,8 +38,10 @@ func newLintCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
-			// 裸 playbook：只做任务树静态检查（模块名/结构/chart 引用拒绝）
-			if strings.HasSuffix(args[0], ".yaml") || strings.HasSuffix(args[0], ".yml") {
+			// 裸 playbook 只做任务树静态检查（模块名/结构/chart 引用拒绝）。
+			// 判定与 run 同口径（chart.IsChartPath：目录或 .tgz 后缀），
+			// 避免"lint 按后缀当 playbook、run 按目录当 chart"两条规则漂移。
+			if !chart.IsChartPath(args[0]) {
 				errCount := 0
 				for _, is := range playbook.Lint(args[0]) {
 					fmt.Fprintf(out, "[%s] %s: %s\n", is.Level, is.Path, is.Msg)

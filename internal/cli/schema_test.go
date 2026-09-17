@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"wdp/internal/chart"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 	"wdp/internal/playbook"
@@ -18,10 +19,14 @@ import (
 
 // schemaSections 取域的字段表。
 func schemaSections(domain string) []model.FieldSection {
-	if domain == "host" {
+	switch domain {
+	case "host":
 		return inventory.HostFieldSections()
+	case "chart":
+		return chart.ChartFieldSections()
+	default:
+		return playbook.TaskFieldSections()
 	}
-	return playbook.TaskFieldSections()
 }
 
 // TestSchemaRegistered 命令注册且归属 Package 组。
@@ -38,7 +43,7 @@ func TestSchemaRegistered(t *testing.T) {
 	t.Fatal("缺少顶层命令 schema")
 }
 
-// TestSchemaCompletion 补全候选 host/task 在前、带描述、按前缀过滤。
+// TestSchemaCompletion 补全候选 host/task/chart 在前、带描述、按前缀过滤。
 func TestSchemaCompletion(t *testing.T) {
 	cmd := newSchemaCmd()
 	if cmd.ValidArgsFunction == nil {
@@ -48,11 +53,15 @@ func TestSchemaCompletion(t *testing.T) {
 	if dir != cobra.ShellCompDirectiveNoFileComp {
 		t.Fatalf("directive = %v，期望 NoFileComp", dir)
 	}
-	if len(got) != 2 || !strings.HasPrefix(got[0], "host\t") || !strings.HasPrefix(got[1], "task\t") {
-		t.Fatalf("候选应为 host/task（host 在前）: %v", got)
+	if len(got) != 3 || !strings.HasPrefix(got[0], "host\t") || !strings.HasPrefix(got[1], "task\t") ||
+		!strings.HasPrefix(got[2], "chart\t") {
+		t.Fatalf("候选应为 host/task/chart（host 在前）: %v", got)
 	}
 	if got, _ := cmd.ValidArgsFunction(cmd, nil, "ho"); len(got) != 1 || !strings.HasPrefix(got[0], "host") {
 		t.Fatalf("前缀 ho 应只剩 host: %v", got)
+	}
+	if got, _ := cmd.ValidArgsFunction(cmd, nil, "ch"); len(got) != 1 || !strings.HasPrefix(got[0], "chart") {
+		t.Fatalf("前缀 ch 应只剩 chart: %v", got)
 	}
 	if got, _ := cmd.ValidArgsFunction(cmd, []string{"host"}, ""); got != nil {
 		t.Fatalf("参数已齐应返回空: %v", got)
@@ -61,7 +70,7 @@ func TestSchemaCompletion(t *testing.T) {
 
 // TestSchemaRender 渲染冒烟：域表含分组标题/字段行/示例，未知域报错。
 func TestSchemaRender(t *testing.T) {
-	for _, domain := range []string{"host", "task"} {
+	for _, domain := range []string{"host", "task", "chart"} {
 		var buf bytes.Buffer
 		printFieldSections(&buf, domain, schemaSections(domain))
 		s := buf.String()

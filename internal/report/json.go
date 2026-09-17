@@ -32,6 +32,7 @@ type JSONReporter struct {
 	plays   []*JSONPlay
 	curPlay *JSONPlay
 	curTask *JSONTask
+	extra   map[string]any // 命令自定义的顶层字段（如 drift 的分类行）
 }
 
 // NewJSONReporter 创建 JSON reporter。
@@ -118,6 +119,17 @@ func (r *JSONReporter) Recap(_ string, stats map[string]*model.Stats) {
 	}
 }
 
+// SetExtra 附加一个顶层字段（命令自定义的结构化结果，如 drift 的逐主机
+// 分类行）。必须在 Finish 之前调用；同名键后写覆盖。
+func (r *JSONReporter) SetExtra(key string, v any) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.extra == nil {
+		r.extra = map[string]any{}
+	}
+	r.extra[key] = v
+}
+
 // Finish 输出最终 JSON 文档（整个 run 结束时调用一次）。
 func (r *JSONReporter) Finish() {
 	r.mu.Lock()
@@ -125,7 +137,11 @@ func (r *JSONReporter) Finish() {
 	if r.plays == nil {
 		r.plays = []*JSONPlay{}
 	}
+	doc := map[string]any{"plays": r.plays}
+	for k, v := range r.extra {
+		doc[k] = v
+	}
 	enc := json.NewEncoder(r.out)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(map[string]any{"plays": r.plays})
+	_ = enc.Encode(doc)
 }

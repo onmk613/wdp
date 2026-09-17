@@ -28,8 +28,47 @@ import (
 	"github.com/ulikunitz/xz"
 )
 
+// maxExtractBytes / maxExtractEntries 是单次解压的资源上限（解压炸弹与
+// inode 耗尽是解压不可信归档的典型攻击面）。正常制品远小于此值。
+// 以变量形式参与判定：测试用小型归档即可覆盖两条超限分支。
+const (
+	MaxExtractBytes   int64 = 8 << 30 // 8 GiB 总解压量
+	MaxExtractEntries       = 200_000 // 条目数
+)
+
+var (
+	maxExtractBytes   = MaxExtractBytes
+	maxExtractEntries = MaxExtractEntries
+)
+
+// extractBudget 累计本次解压的字节数与条目数，超限即失败（fail-loud）。
+type extractBudget struct {
+	bytes   int64
+	entries int
+}
+
+func (b *extractBudget) add(name string, n int64) error {
+	if n < 0 {
+		return fmt.Errorf("archive entry %q declares a negative size", name)
+	}
+	b.bytes += n
+	if b.bytes > maxExtractBytes {
+		return fmt.Errorf("archive exceeds the %d GiB extraction limit at entry %q (suspected decompression bomb)", maxExtractBytes>>30, name)
+	}
+	return nil
+}
+
+func (b *extractBudget) entry() error {
+	b.entries++
+	if b.entries > maxExtractEntries {
+		return fmt.Errorf("archive exceeds the %d entry limit (suspected inode exhaustion)", maxExtractEntries)
+	}
+	return nil
+}
+
 // ExtractArchive 解压 src 到 dest（格式按魔数识别），返回解出的条目数。
 func ExtractArchive(src, dest string) (int, error) {
+	budget := &extractBudget{}
 	f, err := os.Open(src)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read archive: %w", err)
@@ -48,18 +87,18 @@ func ExtractArchive(src, dest string) (int, error) {
 			return 0, fmt.Errorf("gzip decompression failed: %w", err)
 		}
 		defer gz.Close()
-		return extractTar(tar.NewReader(gz), dest)
+		return extractTar(tar.NewReader(gz), dest, budget)
 	case n >= 6 && head[0] == 0xfd && head[1] == 0x37 && head[2] == 0x7a &&
 		head[3] == 0x58 && head[4] == 0x5a && head[5] == 0x00:
 		xr, err := xz.NewReader(f)
 		if err != nil {
 			return 0, fmt.Errorf("xz decompression failed: %w", err)
 		}
-		return extractTar(tar.NewReader(xr), dest)
+		return extractTar(tar.NewReader(xr), dest, budget)
 	case n >= 4 && string(head[:4]) == "PK\x03\x04":
-		return extractZip(src, dest)
+		return extractZip(src, dest, budget)
 	default:
-		return extractTar(tar.NewReader(f), dest)
+		return extractTar(tar.NewReader(f), dest, budget)
 	}
 }
 
@@ -135,7 +174,7 @@ func safeLinkTarget(link string) (string, error) {
 }
 
 // extractTar 逐条目解压 tar 流。
-func extractTar(tr *tar.Reader, dest string) (int, error) {
+func extractTar(tr *tar.Reader, dest string, budget *extractBudget) (int, error) {
 	count := 0
 	for {
 		hdr, err := tr.Next()
@@ -159,6 +198,9 @@ func extractTar(tr *tar.Reader, dest string) (int, error) {
 				return count, fmt.Errorf("failed to create directory %s: %w", hdr.Name, err)
 			}
 		case tar.TypeReg:
+			if err := budget.add(hdr.Name, hdr.Size); err != nil {
+				return count, err
+			}
 			removeSymlinkAt(target)
 			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 				return count, err
@@ -190,12 +232,15 @@ func extractTar(tr *tar.Reader, dest string) (int, error) {
 			// 其余类型（fifo/device 等）静默跳过——agent 不引入设备文件
 			continue
 		}
+		if err := budget.entry(); err != nil {
+			return count, err
+		}
 		count++
 	}
 }
 
 // extractZip 解压 zip 归档（随机访问，走文件名重开）。
-func extractZip(src, dest string) (int, error) {
+func extractZip(src, dest string, budget *extractBudget) (int, error) {
 	zr, err := zip.OpenReader(src)
 	if err != nil {
 		return 0, fmt.Errorf("failed to read zip: %w", err)
@@ -236,6 +281,9 @@ func extractZip(src, dest string) (int, error) {
 				return count, fmt.Errorf("failed to create symlink %s: %w", zf.Name, err)
 			}
 		default:
+			if err := budget.add(zf.Name, int64(zf.UncompressedSize64)); err != nil {
+				return count, err
+			}
 			rc, err := zf.Open()
 			if err != nil {
 				return count, err
@@ -250,6 +298,9 @@ func extractZip(src, dest string) (int, error) {
 			if err != nil {
 				return count, fmt.Errorf("failed to write %s: %w", zf.Name, err)
 			}
+		}
+		if err := budget.entry(); err != nil {
+			return count, err
 		}
 		count++
 	}

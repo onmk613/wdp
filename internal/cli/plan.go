@@ -97,23 +97,27 @@ func runPlanCompile(ctx context.Context, target string) error {
 		FactCache:  planOpts.factCache,
 		Limits:     limits,
 	}
-	// 非部署相位的 values 来源是主机 marker：编译期先行解析（需连接主机）
+	// 从 marker 取 values 的相位（uninstall 等）：编译期先行解析（需连接主机）
 	probe, err := chart.LoadWithLimits(target, limits)
 	if err != nil {
 		return err
 	}
 	spec := probe.PhaseSpecFor(planOpts.phase)
-	if !spec.Release {
+	if spec.EffectiveValuesFrom() == chart.ValuesFromMarker {
 		plays, perr := probe.PhasePlays(planOpts.phase)
 		if perr != nil {
 			probe.Close()
 			return perr
 		}
 		hosts := inv.SelectPlays(plays, planOpts.limit)
+		if len(hosts) == 0 {
+			probe.Close()
+			return noHostsError(planOpts.limit, target)
+		}
 		if cerr := func() error {
 			defer probe.Close()
 			hostValues, rerr := resolveMarkerValues(ctx, probe, hosts,
-				planOpts.valuesFiles, planOpts.setArgs, spec.ResolvesValues())
+				planOpts.valuesFiles, planOpts.setArgs, spec.Destructive())
 			if rerr != nil {
 				return rerr
 			}

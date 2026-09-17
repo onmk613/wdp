@@ -12,6 +12,7 @@ package playbook
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 
@@ -109,6 +110,31 @@ func propagateIncludeAttrs(inc, ft *model.Task) {
 	}
 	if inc.TimeoutSec != 0 && ft.TimeoutSec == 0 {
 		ft.TimeoutSec = inc.TimeoutSec
+	}
+	// 错误处理与展示控制同样下沉：在 `- include: x.yaml` 上写 no_log /
+	// ignore_errors 是常见写法，此前这些键被静默丢弃（片段任务"看起来受控"
+	// 实则没有）。
+	if inc.IgnoreErrors {
+		ft.IgnoreErrors = true
+	}
+	if inc.NoLog {
+		ft.NoLog = true
+	}
+	if inc.Retries != 0 && ft.Retries == 0 {
+		ft.Retries = inc.Retries
+	}
+	if inc.DelaySec != 0 && ft.DelaySec == 0 {
+		ft.DelaySec = inc.DelaySec
+	}
+	if inc.Output != "" && ft.Output == "" {
+		ft.Output = inc.Output
+	}
+	// 环境变量合并：片段任务自身声明优先（更具体的作用域胜出）
+	if len(inc.Environment) > 0 {
+		merged := map[string]string{}
+		maps.Copy(merged, inc.Environment)
+		maps.Copy(merged, ft.Environment)
+		ft.Environment = merged
 	}
 }
 

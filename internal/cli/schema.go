@@ -14,19 +14,22 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"wdp/internal/chart"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 	"wdp/internal/playbook"
 )
 
 const schemaHelp = `
-YAML 结构字段速查（写 inventory / playbook 前的骨架参考）
+YAML 结构字段速查（写 inventory / playbook / chart 前的骨架参考）
 
 不带参数：总览——结构字段域在前，具体模块参数另见 wdp module
 host：inventory 主机条目可用的全部连接参数键（地址/认证/TLS/提权/通道专属），
   未列出的键一律视为主机变量（模板经 .hostvars 访问）
 task：playbook 任务控制属性全表（条件/循环/重试/提权/委托/呈现/容错块），
   按语义分组并附可直接粘贴的示例片段
+chart：chart.yaml 全部字段 + 生命周期相位属性（release/record/clears_marker/
+  values_from），按语义分组并附示例
 
 字段表与解析器同源（新增字段不写文档过不了对账测试），永不漂移；
 具体模块（shell/copy/template...）的参数文档用 wdp module <模块名>
@@ -35,6 +38,7 @@ task：playbook 任务控制属性全表（条件/循环/重试/提权/委托/�
 wdp schema                    # 总览
 wdp schema host               # 主机条目字段
 wdp schema task               # 任务控制属性
+wdp schema chart              # chart.yaml 字段
 wdp schema task --json        # 机器可读（编辑器插件/脚本）
 `
 
@@ -42,20 +46,21 @@ wdp schema task --json        # 机器可读（编辑器插件/脚本）
 func newSchemaCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "schema [host|task]",
-		Short: "YAML structure field reference: host entries and task control attributes",
+		Use:   "schema [host|task|chart]",
+		Short: "YAML structure field reference: host entries, task attributes and chart.yaml",
 		Long:  schemaHelp,
 		Args:  cobra.MaximumNArgs(1),
 		ValidArgsFunction: func(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			if len(args) > 0 {
 				return nil, cobra.ShellCompDirectiveNoFileComp
 			}
-			// 结构字段域在前（骨架先于具体模块）；host/task 之后各域有
+			// 结构字段域在前（骨架先于具体模块）；host/task/chart 之后各域有
 			// 独立文档，模块参数不在本命令（wdp module）
 			var out []string
 			for _, c := range []struct{ name, desc string }{
 				{"host", "inventory 主机条目连接参数键"},
 				{"task", "playbook 任务控制属性"},
+				{"chart", "chart.yaml 字段与相位属性"},
 			} {
 				if strings.HasPrefix(c.name, toComplete) {
 					out = append(out, c.name+"\t"+c.desc)
@@ -66,6 +71,10 @@ func newSchemaCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
 			if len(args) == 0 {
+				// --json 在总览下没有可序列化的对象：显式报错而不是静默忽略
+				if asJSON {
+					return fmt.Errorf("--json requires a schema domain (options: host | task | chart)")
+				}
 				printSchemaOverview(out)
 				return nil
 			}
@@ -75,8 +84,10 @@ func newSchemaCmd() *cobra.Command {
 				sections = inventory.HostFieldSections()
 			case "task":
 				sections = playbook.TaskFieldSections()
+			case "chart":
+				sections = chart.ChartFieldSections()
 			default:
-				return fmt.Errorf("unknown schema domain %q (options: host | task; module parameters: `wdp module <name>`)", args[0])
+				return fmt.Errorf("unknown schema domain %q (options: host | task | chart; module parameters: `wdp module <name>`)", args[0])
 			}
 			if asJSON {
 				b, err := json.MarshalIndent(sections, "", "  ")
@@ -100,12 +111,13 @@ func printSchemaOverview(out io.Writer) {
 
   schema host    inventory 主机条目连接参数键（地址/认证/TLS/提权/通道专属）
   schema task    playbook 任务控制属性（条件/循环/重试/委托/容错块）
+  schema chart   chart.yaml 字段与生命周期相位属性
 
 模块参数（shell/copy/template... 的入参）不在本命令：
   wdp module            全部内置模块列表
   wdp module <name>     单个模块的参数与示例
 
-字段表与解析器同源（对账测试防漂移），详见 docs/03、docs/05。
+字段表与解析器同源（对账测试防漂移），详见 docs/03、docs/05、docs/08。
 `)
 }
 

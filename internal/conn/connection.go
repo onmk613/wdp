@@ -84,7 +84,7 @@ type Defaults struct {
 	AgentCertRotateMin  int               // push 临时证书轮换周期分钟（0 = 不轮换）
 	AgentIdleTimeoutMin int               // push 临时 agent 空闲自动退出分钟（0 = 默认 60；<0 = 禁用）
 	PushCADir           string            // push 会话 CA 落盘目录（空 = ~/.wdp/push-ca）
-	PushBinary          map[string]string // push 自举按目标平台的二进制表（键 linux_amd64 等；控制端同平台时无需配置）
+	PushBinary          map[string]string // push 自举按目标平台的二进制表（键 linux_amd64 等；默认靠 bin 目录同级查找，此表仅覆盖非默认路径）
 }
 
 // ConnOrDefault 归一化默认连接类型（空 = push：push 自举复用 SSH 认证，
@@ -114,15 +114,20 @@ func (d *Defaults) AgentCertRotateMinOrDefault() int {
 
 // PushCADirOrDefault 归一化 push 会话 CA 目录：空 = ~/.wdp/push-ca
 // （会话 CA 落盘复用：1 天有效期内跨进程共享信任链，可经 wdp ca show 检视）。
-func (d *Defaults) PushCADirOrDefault() string {
+//
+// HOME 不可用时不再回退 /tmp：会话 CA 是全部 push agent 的信任根，落在
+// 世界可写的临时目录意味着本机任意用户都能预置一套自己的 ca.crt/ca.key
+// 并被复用（等于交出全部目标机的 root）。拿不到 HOME 时要求显式配置
+// [agent].push_ca_dir。
+func (d *Defaults) PushCADirOrDefault() (string, error) {
 	if d != nil && d.PushCADir != "" {
-		return d.PushCADir
+		return d.PushCADir, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return filepath.Join(os.TempDir(), "wdp-push-ca")
+		return "", fmt.Errorf("cannot determine the home directory for the push session CA; set [agent].push_ca_dir in wdp.cfg to an absolute path owned by the current user (refusing to fall back to a world-writable temp directory)")
 	}
-	return filepath.Join(home, ".wdp", "push-ca")
+	return filepath.Join(home, ".wdp", "push-ca"), nil
 }
 
 // AgentIdleTimeoutMinOrDefault 归一化 push 临时 agent 空闲自动退出周期：

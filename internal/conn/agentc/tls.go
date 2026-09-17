@@ -1,8 +1,12 @@
 package agentc
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -49,7 +53,24 @@ func buildTLSConfig(h *model.Host) (*tls.Config, error) {
 	}
 	// CA 未配置 = 信任系统证书池（公网 CA 场景）
 
+	// 服务端证书 pin（push 通道）：精确比对叶子证书，优先于其它校验开关
+	// ——它是比"跳过主机名"更强的保证，显式声明时必须生效。
+	pin, err := parsePinnedCert(h.PeerCertData)
+	if err != nil {
+		return nil, err
+	}
 	switch {
+	case pin != nil:
+		roots := pool
+		if roots == nil {
+			sys, err := x509.SystemCertPool()
+			if err != nil {
+				return nil, err
+			}
+			roots = sys
+		}
+		cfg.InsecureSkipVerify = true
+		cfg.VerifyPeerCertificate = pinnedVerifier(roots, pin)
 	case h.InsecureSkipVerify:
 		cfg.InsecureSkipVerify = true // 全量降级：链与主机名校验均跳过
 	case h.TLSSkipHostVerify:
@@ -112,4 +133,43 @@ func chainVerifier(roots *x509.CertPool) func([][]byte, [][]*x509.Certificate) e
 		}
 		return nil
 	}
+}
+
+// parsePinnedCert 解析内联的期望服务端证书（pin）；空输入返回 nil。
+func parsePinnedCert(pemBytes []byte) (*x509.Certificate, error) {
+	if len(pemBytes) == 0 {
+		return nil, nil
+	}
+	block, _ := pem.Decode(pemBytes)
+	if block == nil {
+		return nil, errors.New("pinned server certificate is not valid PEM")
+	}
+	c, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse pinned server certificate: %w", err)
+	}
+	return c, nil
+}
+
+// pinnedVerifier 在链校验之上要求服务端叶子证书与 pin 逐字节一致
+// （push 通道：会话服务端证书由控制端签发并上传，控制端持有精确副本，
+// 共享证书无法按主机名区分但可以按证书本身 pin 住）。
+func pinnedVerifier(roots *x509.CertPool, pin *x509.Certificate) func([][]byte, [][]*x509.Certificate) error {
+	chain := chainVerifier(roots)
+	return func(rawCerts [][]byte, verified [][]*x509.Certificate) error {
+		if err := chain(rawCerts, verified); err != nil {
+			return err
+		}
+		if !bytes.Equal(rawCerts[0], pin.Raw) {
+			return fmt.Errorf("server certificate does not match the pinned certificate (expected sha256 %s, got %s)",
+				certFingerprint(pin.Raw), certFingerprint(rawCerts[0]))
+		}
+		return nil
+	}
+}
+
+// certFingerprint 返回证书 DER 的 sha256 前 16 位十六进制（错误消息用）。
+func certFingerprint(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])[:16]
 }

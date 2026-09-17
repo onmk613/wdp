@@ -8,34 +8,60 @@ import (
 	"wdp/internal/model"
 )
 
-// PhaseSpec 是相位属性：相位文件（根目录 <phase>.yaml）决定"跑哪些任务"，
-// 属性决定"相位语义"——是否视同一次部署、是否留部署记录、marker 如何处置。
-// 内置相位有缺省属性，chart.yaml 的 phases: 可为任意相位补充声明（只能追加，
-// 不能关闭内置行为）。未声明的自定义相位为零值：跑任务，不动 marker 不留记录。
-type PhaseSpec struct {
-	Release      bool `yaml:"release"`       // 部署语义：required 校验、可逆性确认、成功后写 marker、记部署记录
-	Record       bool `yaml:"record"`        // 记部署记录（Release 隐含本项；uninstall 内置——卸载同样留痕）
-	ClearsMarker bool `yaml:"clears_marker"` // 成功后清除 release marker（uninstall 内置）
+// ValuesFrom 决定相位读取 values 的来源。
+type ValuesFrom string
 
+const (
+	// ValuesFromChart 用 chart 默认 values + -f/--set 覆盖（部署语义：本次
+	// 提供的入参）。
+	ValuesFromChart ValuesFrom = "chart"
+	// ValuesFromMarker 用各主机 release marker 记录的实际部署 values
+	//（+ -f/--set 显式覆盖）——卸载类相位必须按"当初实际部署了什么"来删。
+	ValuesFromMarker ValuesFrom = "marker"
+)
+
+// PhaseSpec 是相位属性：相位文件（根目录 <phase>.yaml）决定"跑哪些任务"，
+// 属性决定"相位语义"——values 从哪来、是否视同一次部署、是否留部署记录、
+// marker 如何处置。内置相位有缺省属性，chart.yaml 的 phases: 可为任意相位
+// 补充声明（只能追加，不能关闭内置行为）。未声明的自定义相位：跑任务、
+// 读 chart values、不动 marker 不留记录。
+type PhaseSpec struct {
+	Release      bool       `yaml:"release"`       // 部署语义：required 校验、可逆性确认、成功后写 marker、记部署记录
+	Record       bool       `yaml:"record"`        // 记部署记录（Release 隐含本项；uninstall 内置——卸载同样留痕）
+	ClearsMarker bool       `yaml:"clears_marker"` // 成功后清除 release marker（uninstall 内置）
+	ValuesFrom   ValuesFrom `yaml:"values_from"`   // values 来源（空 = 按相位推导，见 EffectiveValuesFrom）
 }
 
 // Records 报告该相位是否写部署记录（release record）。
 func (s PhaseSpec) Records() bool { return s.Release || s.Record }
 
-// ResolvesValues 报告该相位是否需要解析 values → 必须过 required + schema。
-// 清除 marker 的相位同样解析 values（它要用 values 拼删除路径）。
-// 与 Release 分离的原因：uninstall（ClearsMarker）此前不参与任何校验，
-// 而卸载恰恰用 values 决定删除什么——校验门控开在了错误的相位上。
-func (s PhaseSpec) ResolvesValues() bool { return s.Release || s.ClearsMarker }
-
-// Destructive 报告该相位是否可能破坏现场 → 必须走可逆性确认。
+// Destructive 报告该相位是否可能破坏现场 → 必须走可逆性确认，且用
+// values 拼删除路径时必须过 required + schema 校验。
 func (s PhaseSpec) Destructive() bool { return s.Release || s.ClearsMarker }
+
+// EffectiveValuesFrom 解析该相位实际使用的 values 来源：显式声明优先；
+// 否则清除 marker 的相位（uninstall/purge）取 marker 记录的实际部署入参，
+// 其余相位取 chart values。
+//
+// 这条规则此前是隐式的（非 release 相位一律读 marker），把"纯准备/只读"
+// 相位（download、status）也拖进了"必须先部署过"的前提——未部署的主机上
+// 连制品预下载都跑不起来。
+func (s PhaseSpec) EffectiveValuesFrom() ValuesFrom {
+	if s.ValuesFrom != "" {
+		return s.ValuesFrom
+	}
+	if s.ClearsMarker {
+		return ValuesFromMarker
+	}
+	return ValuesFromChart
+}
 
 // builtinPhaseSpecs 是内置相位的缺省属性。
 var builtinPhaseSpecs = map[string]PhaseSpec{
 	"deploy":    {Release: true, Record: true},
 	"uninstall": {Record: true, ClearsMarker: true},
-	// status 与未声明的自定义相位：零值（只跑任务，不写记录不动 marker）。
+	// status 与未声明的自定义相位：零值（只跑任务、读 chart values、
+	// 不写记录不动 marker）。
 }
 
 // DefaultPhaseSpec 返回相位的内置缺省属性（无 chart 上下文时的判定依据；
@@ -47,15 +73,26 @@ func DefaultPhaseSpec(phase string) PhaseSpec {
 	return builtinPhaseSpecs[phase]
 }
 
+// MergePhaseSpec 合并内置缺省与 chart.yaml phases: 声明（声明只能追加
+// 属性；values_from 是"覆盖"语义——它是唯一可以改向的字段）。
+// chart.PhaseSpecFor 与 plan 快照侧的合成共用本函数，避免两处规则漂移。
+func MergePhaseSpec(base, declared PhaseSpec) PhaseSpec {
+	base.Release = base.Release || declared.Release
+	base.Record = base.Record || declared.Record || declared.Release
+	base.ClearsMarker = base.ClearsMarker || declared.ClearsMarker
+	if declared.ValuesFrom != "" {
+		base.ValuesFrom = declared.ValuesFrom
+	}
+	return base
+}
+
 // PhaseSpecFor 返回相位属性：内置缺省与 chart.yaml phases: 声明合并
 // （声明只能追加属性）。空串按 deploy。
 func (c *Chart) PhaseSpecFor(phase string) PhaseSpec {
 	spec := DefaultPhaseSpec(phase)
 	if c != nil {
 		if declared, ok := c.Meta.Phases[phase]; ok {
-			spec.Release = spec.Release || declared.Release
-			spec.Record = spec.Record || declared.Record || declared.Release
-			spec.ClearsMarker = spec.ClearsMarker || declared.ClearsMarker
+			spec = MergePhaseSpec(spec, declared)
 		}
 	}
 	return spec
@@ -69,6 +106,20 @@ func HookNameFor(phase string) string {
 		return "install"
 	}
 	return phase
+}
+
+// NormalizeHook 归一化 hook 名：deploy 相位的词干是 install（历史命名），
+// 但按"词干即相位名"的规则直觉会写 pre_deploy——两者等价，统一收敛到
+// install 词干，避免同一时机有两个只有拼写不同的名字。
+func NormalizeHook(hook string) string {
+	switch hook {
+	case "pre_deploy":
+		return "pre_install"
+	case "post_deploy":
+		return "post_install"
+	default:
+		return hook
+	}
 }
 
 // PhasePlays 返回指定生命周期相位对应的 play 清单。相位 = chart 根目录的

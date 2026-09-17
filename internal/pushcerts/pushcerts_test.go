@@ -108,3 +108,50 @@ func TestSessionCAOnDisk(t *testing.T) {
 		t.Fatal("新旧信任链应相互独立")
 	}
 }
+
+// TestSecureCADir 会话 CA 目录加固：过宽权限被收紧到 0700，符号链接被拒绝
+// （会话 CA 是全部 push agent 的信任根，不得复用可疑材料）。
+func TestSecureCADir(t *testing.T) {
+	// 已存在的 0755 目录 → 收紧为 0700
+	dir := t.TempDir()
+	loose := filepath.Join(dir, "ca")
+	if err := os.Mkdir(loose, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreate(loose); err != nil {
+		t.Fatalf("权限过宽应被收紧而非报错: %v", err)
+	}
+	fi, err := os.Stat(loose)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("目录权限应收紧为 0700，实际 %04o", perm)
+	}
+
+	// 符号链接 → 拒绝
+	target := filepath.Join(dir, "real-ca")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link-ca")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("平台不支持符号链接: %v", err)
+	}
+	if _, err := LoadOrCreate(link); err == nil {
+		t.Fatal("符号链接目录应被拒绝")
+	}
+}
+
+// TestPushCADirNoTempFallback HOME 不可用时不得回退到世界可写的临时目录。
+func TestPushCADirNoTempFallback(t *testing.T) {
+	t.Setenv("HOME", "")
+	if _, err := (&conn.Defaults{}).PushCADirOrDefault(); err == nil {
+		t.Skip("当前平台仍能解析 HOME（如 Windows），跳过")
+	}
+	// 显式配置仍可用
+	got, err := (&conn.Defaults{PushCADir: "/explicit/ca"}).PushCADirOrDefault()
+	if err != nil || got != "/explicit/ca" {
+		t.Fatalf("显式配置应优先: %q %v", got, err)
+	}
+}

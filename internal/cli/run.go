@@ -157,6 +157,13 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		}
 	}
 
+	// 零主机即失败：--limit 命中不到任何 play 的目标主机时，此前会跑完
+	// 空 RECAP 并退出 0，CI 把"什么都没做"当成部署成功。与 apply 的
+	// "--limit matched no plan hosts" 同口径。
+	if hosts := inv.SelectPlays(plays, eopts.Limit); len(hosts) == 0 {
+		return noHostsError(opts.limit, target)
+	}
+
 	rep, finish := buildReporter()
 	conns := conn.NewManagerWithDefaults(connDefaults())
 	conns.SetConnectConcurrency(2 * config.Current().Forks())
@@ -199,14 +206,21 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 				break
 			}
 		}
+		// 审计记录与 marker 同一脱敏口径：chart 声明的 sensitive_values
+		// 不因"落在控制端"就明文持久化（wdp release show --values 可读）
+		rec.Values = eopts.Chart.RedactValues(rec.Values)
 	}
 	// 记录实际作用的主机范围：与 executor 一致取全部 play 的并集并应用
 	// --limit，避免 --limit web1 时审计记录虚报整个 play 的主机清单
 	for _, h := range inv.SelectPlays(plays, eopts.Limit) {
 		rec.Hosts = append(rec.Hosts, h.Name)
 	}
+	// 审计记录写失败此前被完全吞掉：磁盘满/权限不足时"部署成功但无记录"
+	// 无声发生，回看与回滚依据随之缺失——至少给一条告警。
 	if id, err := release.Save(rec); err == nil {
 		fmt.Fprintf(os.Stderr, "[release] %s\n", id)
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: failed to write the deployment record: %v\n", err)
 	}
 
 	if failed {
@@ -219,6 +233,15 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 type chartRun struct {
 	plays []*model.Play
 	spec  chart.PhaseSpec
+}
+
+// noHostsError 是"零主机"的失败口径：--limit 命中不到目标主机，或 play 的
+// hosts 模式匹配不到任何清单主机。此前这两种情况都会静默跑完并退出 0。
+func noHostsError(limit, target string) error {
+	if limit != "" {
+		return fmt.Errorf("--limit %q matched no hosts of any play in %s (check the pattern against the inventory)", limit, target)
+	}
+	return fmt.Errorf("no hosts selected for %s (the plays match no inventory host)", target)
 }
 
 // loadChartRun 装载 chart 执行目标：生命周期相位 plays、相位属性、values
@@ -241,6 +264,11 @@ func loadChartRun(ctx context.Context, target string, inv *inventory.Inventory, 
 	if err != nil {
 		return nil, out, err
 	}
+	// 零主机即失败（在可逆性确认与 marker 读取之前）：--limit 命中不到目标
+	// 主机时不该先弹确认再报错，也不该去读一台都没有的 marker。
+	if hosts := inv.SelectPlays(plays, opts.limit); len(hosts) == 0 {
+		return nil, out, noHostsError(opts.limit, target)
+	}
 	spec := ch.PhaseSpecFor(opts.phase)
 	eng, err := render.NewEngine(ch.CollectHelpers())
 	if err != nil {
@@ -248,32 +276,39 @@ func loadChartRun(ctx context.Context, target string, inv *inventory.Inventory, 
 	}
 
 	var values map[string]any
-	if spec.Release {
-		// 部署事件相位（deploy 及声明 release 的自定义相位如 update）：
-		// values 来源不变（values.yaml + -f + --set），且必须过
-		// required + schema 校验
+	switch spec.EffectiveValuesFrom() {
+	case chart.ValuesFromChart:
+		// chart 默认 values + -f + --set。部署事件相位（deploy 及声明
+		// release 的自定义相位如 update）必须过 required + schema 校验；
+		// 普通相位（status/download/自定义）只取默认值，不强制校验——
+		// 它们不写 marker 也不删除数据。
 		values, err = ch.BuildValues(opts.valuesFiles, opts.setArgs)
 		if err != nil {
 			return nil, out, err
 		}
-		if err := ch.ValidateRequired(values); err != nil {
-			return nil, out, err
+		if spec.Release {
+			if err := ch.ValidateRequired(values); err != nil {
+				return nil, out, err
+			}
+			// schema 校验（required 的强化版：类型/取值/结构），
+			// 子 chart 用 SubScope 逐层走查（引用 vars 由 executor 展开期校验）
+			if err := ch.ValidateValuesSchema(values); err != nil {
+				return nil, out, err
+			}
+			if err := ch.ValidateSubchartsSchema(values); err != nil {
+				return nil, out, err
+			}
 		}
-		// schema 校验（required 的强化版：类型/取值/结构），
-		// 子 chart 用 SubScope 逐层走查（引用 vars 由 executor 展开期校验）
-		if err := ch.ValidateValuesSchema(values); err != nil {
-			return nil, out, err
+	case chart.ValuesFromMarker:
+		// 卸载类相位：values 从各主机 marker 还原实际部署入参，-f/--set
+		// 降级为显式覆盖；marker 缺失/v1 报错，绝不静默回退 values.yaml
+		// 默认值。校验强度按 Destructive（清除 marker 的相位用 values 拼
+		// 删除路径，与部署同门控）。
+		if opts.listHosts {
+			break
 		}
-		if err := ch.ValidateSubchartsSchema(values); err != nil {
-			return nil, out, err
-		}
-	} else if !opts.listHosts {
-		// 其他相位（uninstall / status / 未声明 release 的自定义相位）：
-		// values 默认从各主机 marker 还原实际部署入参，-f/--set 降级为
-		// 显式覆盖；marker 缺失/v1 报错，绝不静默回退 values.yaml 默认值。
-		// 校验强度按 ResolvesValues（uninstall 等清除 marker 的相位与部署同门控）
 		hosts := inv.SelectPlays(plays, opts.limit)
-		hostValues, rerr := resolveMarkerValues(ctx, ch, hosts, opts.valuesFiles, opts.setArgs, spec.ResolvesValues())
+		hostValues, rerr := resolveMarkerValues(ctx, ch, hosts, opts.valuesFiles, opts.setArgs, spec.Destructive())
 		if rerr != nil {
 			return nil, out, rerr
 		}

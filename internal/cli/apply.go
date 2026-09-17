@@ -137,6 +137,19 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 	if opts.diff && !opts.check {
 		opts.check = true
 	}
+	// 自治专用 flag 脱离 --autonomous 时此前被静默丢弃（漏写 --autonomous 的
+	// 用户会以为 sudo 密码已下发、以为已异步返回）：显式报错而不是假装生效。
+	if !opts.autonomous {
+		if opts.detach {
+			return fmt.Errorf("--detach requires --autonomous (it controls when autonomous submission returns)")
+		}
+		if opts.resume {
+			return fmt.Errorf("--resume requires --autonomous (it resumes from each agent's journal)")
+		}
+		if opts.becomePasswordEnv != "" {
+			return fmt.Errorf("--become-password-env requires --autonomous (the direct path takes the password from the inventory (become_password / become_password_env))")
+		}
+	}
 	if cfgTimeout := config.Current().Run.Timeout; cfgTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(cfgTimeout)*time.Second)
@@ -168,6 +181,7 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 		hosts = append(hosts, hp.Conn.Host(name))
 	}
 	inv := inventory.FromHosts(hosts)
+	var allowed map[string]bool // --limit 允许的主机集（nil = 全部）
 	if opts.limit != "" {
 		limited, lerr := inv.Select(opts.limit)
 		if lerr != nil {
@@ -176,11 +190,15 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 		if len(limited) == 0 {
 			return fmt.Errorf("--limit %s matched no plan hosts", opts.limit)
 		}
+		allowed = make(map[string]bool, len(limited))
+		for _, h := range limited {
+			allowed[h.Name] = true
+		}
 	}
 
 	// 自治执行：分片提交给目标 agent（异步），本控制端只做进度聚合
 	if opts.autonomous {
-		failed, aerr := runApplyAutonomous(ctx, p, opts)
+		failed, aerr := runApplyAutonomous(ctx, p, opts, allowed)
 		if aerr != nil {
 			return aerr
 		}
@@ -225,13 +243,16 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 		Phase:    p.Phase,
 		Chart:    p.Chart,
 		Version:  p.Version,
-		Values:   p.Values,
-		Stats:    ex.LastStats(),
-		Failed:   failed,
-		Hosts:    p.Host(),
+		// 与 marker 同一脱敏口径：sensitive_values 不因落在控制端就明文落盘
+		Values: chart.RedactValues(p.Meta.SensitiveValues, p.Values),
+		Stats:  ex.LastStats(),
+		Failed: failed,
+		Hosts:  p.Host(),
 	}
 	if id, serr := release.Save(rec); serr == nil {
 		fmt.Fprintf(os.Stderr, "[release] %s\n", id)
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: failed to write the deployment record: %v\n", serr)
 	}
 	if failed {
 		return errPlayFailed
@@ -240,13 +261,11 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 }
 
 // planPhaseSpec 从计划快照的 chart.yaml 声明合成相位属性（与
-// chart.PhaseSpecFor 同合并规则）。
+// chart.PhaseSpecFor 共用 chart.MergePhaseSpec，规则不漂移）。
 func planPhaseSpec(p *plan.Plan) chart.PhaseSpec {
 	spec := chart.DefaultPhaseSpec(p.Phase)
 	if declared, ok := p.Meta.Phases[p.Phase]; ok {
-		spec.Release = spec.Release || declared.Release
-		spec.Record = spec.Record || declared.Record || declared.Release
-		spec.ClearsMarker = spec.ClearsMarker || declared.ClearsMarker
+		spec = chart.MergePhaseSpec(spec, declared)
 	}
 	return spec
 }

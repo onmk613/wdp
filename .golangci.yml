@@ -41,6 +41,7 @@ linters:
         text: 'Error return value of `.+\.Close` is not checked'
 
 formatters:
-  default: none
+  # v2 schema 的 formatters 段没有 default 键（只有 enable/settings/exclusions），
+  # 写 default: none 会让 `golangci-lint config verify` 直接报非法配置。
   enable:
     - gofmt

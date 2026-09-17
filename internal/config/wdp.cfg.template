@@ -5,7 +5,7 @@ path = "inventory.yaml"
 [run]
 forks = 20
 task_timeout = 300
-# 默认连接类型（空 = ssh；可选 push/agent/local）。fleet 级默认放这里，
+# 默认连接类型（空 = push；可选 ssh/push/agent/local）。fleet 级默认放这里，
 # inventory 组 vars / 主机条目按序覆盖（优先级见 docs/04）
 # conn = "push"
 
@@ -22,9 +22,10 @@ port = 7602
 # 有效期内跨进程复用同一信任链，可经 `wdp ca show` 检视
 # push_ca_dir = ""
 
-# push 自举按目标平台的二进制表（跨平台控制端用，如 macOS 控制 Linux）。
-# 自举前探测目标平台（uname -sm），命中此表用对应二进制；目标与控制端
-# 同平台时无需配置（上传自身）；跨平台且未配置自动回退纯 SSH
+# push 自举按目标平台的二进制表（覆盖用，默认无需配置）。
+# 自举前探测目标平台（uname -sm）：同平台上传控制端自身，跨平台默认在
+# 控制端可执行文件同级查找 wdp-<os>-<arch>（./build.sh 全平台构建的 bin
+# 目录）；仅当二进制不在同一目录时才用此表显式指定
 # [agent.push_binary]
 # linux_amd64 = "/path/bin/wdp-linux-amd64"
 # linux_arm64 = "/path/bin/wdp-linux-arm64"

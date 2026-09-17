@@ -4,6 +4,9 @@ package plan
 // 文件快照物化往返、连接元数据脱敏。
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -291,6 +294,71 @@ func TestMarkerPhaseNeedsHostValues(t *testing.T) {
 	}
 	if p.Hosts[0].Values["a"] != 1 {
 		t.Fatalf("HostPlan.Values 应取 HostValues: %+v", p.Hosts[0].Values)
+	}
+}
+
+// TestCompilePayloads 制品采集：packages/ 下任何文件（与体积无关）与超过
+// 单文件阈值的大文件都记入 Payloads 而非 plan 本体；快照总量超限即报错。
+// golden 测试已把 Payloads 归一化剔除（本地制品缓存是否存在不影响 golden），
+// 本测试是 payload 语义的唯一覆盖点。
+func TestCompilePayloads(t *testing.T) {
+	oldFile, oldTotal := maxFileBytes, maxTotalBytes
+	defer func() { maxFileBytes, maxTotalBytes = oldFile, oldTotal }()
+	maxFileBytes = 1 << 10  // 1 KiB：小文件即可覆盖"超限转 payload"
+	maxTotalBytes = 2 << 10 // 2 KiB：叠加少量文件即可触发总量上限
+
+	dir := writeCompileChart(t)
+	writeBin := func(rel string, size int, fill byte) {
+		p := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, bytes.Repeat([]byte{fill}, size), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// packages/ 下即使只有 16 字节也进 payload
+	writeBin("packages/small.bin", 16, 'a')
+	// 超单文件阈值的大文件同样进 payload
+	writeBin("big.bin", 1100, 'b')
+
+	inv, err := inventory.Parse([]byte(compileInv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := Compile(dir, inv, nil, nil, CompileOptions{WdpVersion: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byPath := map[string]PayloadRef{}
+	for _, ref := range p.Payloads {
+		byPath[ref.Path] = ref
+	}
+	for _, want := range []string{"packages/small.bin", "big.bin"} {
+		ref, ok := byPath[want]
+		if !ok {
+			t.Fatalf("%s 应记入 Payloads: %+v", want, p.Payloads)
+		}
+		data, _ := os.ReadFile(filepath.Join(dir, want))
+		sum := sha256.Sum256(data)
+		if ref.Size != int64(len(data)) || ref.SHA256 != hex.EncodeToString(sum[:]) {
+			t.Fatalf("%s 的 size/sha256 不符: %+v", want, ref)
+		}
+		if _, embedded := p.Files[want]; embedded {
+			t.Fatalf("%s 不应嵌入 plan 本体", want)
+		}
+	}
+	if _, ok := p.Files["deploy.yaml"]; !ok {
+		t.Fatal("小文件应嵌入 plan 本体")
+	}
+
+	// 总量超限：两个 800 字节文件叠加后越过 2 KiB 上限
+	writeBin("bloat1.bin", 800, 'c')
+	writeBin("bloat2.bin", 800, 'd')
+	if _, err := Compile(dir, inv, nil, nil, CompileOptions{WdpVersion: "test"}); err == nil ||
+		!strings.Contains(err.Error(), "plan total") {
+		t.Fatalf("总量超限应报错: %v", err)
 	}
 }
 

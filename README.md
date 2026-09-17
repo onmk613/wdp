@@ -6,7 +6,7 @@ Helm 风格 chart 打包与多环境精准部署。
 
 ## 特性
 
-- **单静态二进制**：交叉编译开箱即用；SSH 通道目标机仅需 POSIX sh，agent 通道零依赖（`./build.sh` 默认内嵌 linux/amd64+darwin/arm64 自举载荷，跨平台 push 免配置；`--slim` 可关闭）
+- **一份多架构 bin 目录**：`./build.sh` 缺省交叉编译全平台产物（linux/darwin/windows × amd64/arm64），运行哪个二进制就到同级自动取对应平台文件——跨平台 push 与 agent 安装零配置；SSH 通道目标机仅需 POSIX sh，agent 通道零依赖
 - **声明式 playbook**：条件/循环/block 容错/委托/hook，连接按主机复用免重复握手
 - **部署策略**：金丝雀/滚动分批、健康门、失败自动回滚
 - **chart 应用包**：三层 values 叠加 + JSON Schema 校验、子 chart 组合与

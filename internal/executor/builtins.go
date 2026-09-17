@@ -30,8 +30,10 @@ var builtinVarNames = []string{
 }
 
 // injectBuiltins 在变量域组装完成后强制注入内置变量（最后写入，覆盖一切）。
-// 顶层批次（prepareBatchRuns）与子 chart 作用域（chartItemVars）共用本入口。
-func (e *Executor) injectBuiltins(vars map[string]any, h *model.Host, playHosts, batchHosts []*model.Host) {
+// hostvars 由调用方每批次计算一次后传入：该快照遍历全部主机与 fact store，
+// 逐主机重算在千台规模下是 O(N²)；与 hostvarsSnapshot 注释承诺的"批内共享"
+// 语义也一致——同批次内后写 facts 对先前主机不可见。
+func (e *Executor) injectBuiltins(vars map[string]any, h *model.Host, playHosts, batchHosts []*model.Host, hostvars map[string]map[string]any) {
 	vars["inventory_hostname"] = h.Name
 	// group_names 的权威来源是 inventory 层写入的 h.Vars（含运行期 add_host 更新）
 	vars["group_names"] = h.Vars["group_names"]
@@ -39,7 +41,7 @@ func (e *Executor) injectBuiltins(vars map[string]any, h *model.Host, playHosts,
 	vars["play_batch"] = hostNames(batchHosts)
 	vars["groups"] = e.Inv.GroupsMap()
 	vars["hosts"] = e.Inv.HostsMeta()
-	vars["hostvars"] = e.hostvarsSnapshot()
+	vars["hostvars"] = hostvars
 	vars["playbook_dir"] = e.Opts.BaseDir
 }
 

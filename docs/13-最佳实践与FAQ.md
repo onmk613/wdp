@@ -5,7 +5,7 @@
 1. **应用一律打包为 chart**：裸 playbook 适合临时操作；可复用的部署进 chart（参考 [examples/](../examples/) 起步，git 管理）
 2. **环境差异全部走 values**：`envs/prod.yaml` / `envs/staging.yaml`，任务模板只引用 values，不写死环境
 3. **上生产前四步**：`wdp lint` → `wdp render` → `--check --diff` 评审 → 执行
-4. **敏感值不落盘**：inventory/命令行只留 `*_env` 引用；输出敏感的任务加 `no_log: true`
+4. **敏感值不落盘**：inventory/命令行只留 `*_env` 引用；输出敏感的任务加 `no_log: true`；chart values 里的敏感键用 `sensitive_values` 声明（marker、控制端部署记录、plan 快照、drift 摘要一律脱敏，见 [08](08-chart应用包.md#敏感值sensitive_values)）
 5. **升级前看参数漂移**：`wdp release diff <旧id> <新id>` 确认本次要改的参数
 
 ## 幂等模式速查
@@ -70,6 +70,9 @@
 
 **Q: register 的结果里没有模块 facts？**
 setup/stat 的 facts 不进 register——它们直接并入变量域顶层（`.os.family`、`.stat.exists`）。register 拿到的是执行结果（rc/stdout/…）。
+
+**Q: `--limit 'web*'` 没匹配到主机，为什么命令还是"成功"？**
+现在不会再静默成功了：`run`/`apply` 的 `--limit` 未命中任何主机时**直接报错退出**（此前退出码 0，容易掩盖写错的模式或空清单）。先 `--list-hosts` 或 `wdp inv <模式>` 确认主机集合，再检查选择模式拼写。
 
 ## 已知限制
 

@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strings"
 	"time"
 
+	"wdp/internal/agentbin"
 	"wdp/internal/conn"
-	"wdp/internal/pushbin"
 )
 
 // resolveBinary 选择自举二进制（探测目标平台后按优先级取用）：
 // 主机 binary_path > wdp.cfg [agent].push_binary.<平台> > 控制端自身
-// （目标机与控制端同平台时）> 内嵌载荷（./build.sh push 构建版）。
+// （目标机与控制端同平台时）> 控制端可执行文件同级的
+// wdp-<os>-<arch>（./build.sh 全集构建的 bin 目录）。
 // 跨平台且四者皆无返回错误——调用方回退纯 SSH，不做注定失败的二进制上传。
 func (c *Conn) resolveBinary(ctx context.Context) (string, error) {
 	remote, err := c.detectPlatform(ctx)
@@ -25,15 +25,10 @@ func (c *Conn) resolveBinary(ctx context.Context) (string, error) {
 	if c.dc != nil {
 		cfgMap = c.dc.PushBinary
 	}
-	bin, useSelf, ok := selectPushBinary(c.host.BinaryPath, remote, runtime.GOOS+"_"+runtime.GOARCH, cfgMap)
+	bin, useSelf, ok := selectPushBinary(c.host.BinaryPath, remote, runtime.GOOS+"_"+runtime.GOARCH, cfgMap, agentbin.SiblingPath)
 	if !ok {
-		// 内嵌载荷兜底（构建期打入，优先级最低：显式配置与同平台自身
-		// 仍在前）——跨平台自举免 wdp.cfg push_binary 配置
-		if p, lerr := pushbin.Lookup(remote); lerr == nil {
-			return p, nil
-		}
-		return "", fmt.Errorf("remote platform %s has no matching push binary (control %s, embedded %v): set [agent].push_binary.%s in wdp.cfg or host binary_path, or build control with './build.sh push'",
-			remote, runtime.GOOS+"_"+runtime.GOARCH, pushbin.Platforms(), remote)
+		return "", fmt.Errorf("no local binary for remote platform %s (control %s): run wdp from a build.sh bin directory (expected sibling %s next to the executable), or set [agent].push_binary.%s in wdp.cfg or host binary_path",
+			remote, runtime.GOOS+"_"+runtime.GOARCH, agentbin.FileName(remote), remote)
 	}
 	if !useSelf {
 		return bin, nil
@@ -45,10 +40,10 @@ func (c *Conn) resolveBinary(ctx context.Context) (string, error) {
 	return exe, nil
 }
 
-// selectPushBinary 纯选择逻辑（hostBinary > 平台表 > 同平台自身）。
-// remote 为空（平台未知）时退回自身尝试（旧行为：探测不可用不阻断自举，
-// 由远端启动探测兜底报错）。ok=false 表示跨平台且无可用二进制。
-func selectPushBinary(hostBinary, remote, self string, cfg map[string]string) (bin string, useSelf, ok bool) {
+// selectPushBinary 纯选择逻辑（hostBinary > 平台表 > 同平台自身 > 同级
+// bin 目录）。remote 为空（平台未知）时退回自身尝试（旧行为：探测不可用
+// 不阻断自举，由远端启动探测兜底报错）。ok=false 表示跨平台且无可用二进制。
+func selectPushBinary(hostBinary, remote, self string, cfg map[string]string, sibling func(string) (string, bool)) (bin string, useSelf, ok bool) {
 	if hostBinary != "" {
 		return hostBinary, false, true
 	}
@@ -60,6 +55,11 @@ func selectPushBinary(hostBinary, remote, self string, cfg map[string]string) (b
 	}
 	if remote == self {
 		return "", true, true
+	}
+	if sibling != nil {
+		if b, hit := sibling(remote); hit {
+			return b, false, true
+		}
 	}
 	return "", false, false
 }
@@ -77,36 +77,5 @@ func (c *Conn) detectPlatform(ctx context.Context) (string, error) {
 	if out.Code != 0 {
 		return "", nil
 	}
-	return platformFromUname(out.Stdout), nil
-}
-
-// platformFromUname 归一 uname -sm 输出为 os_arch 平台键：
-// "Linux x86_64"→linux_amd64、"Linux aarch64"→linux_arm64、
-// "Darwin arm64"→darwin_arm64；无法识别返回空串。
-func platformFromUname(s string) string {
-	fields := strings.Fields(strings.TrimSpace(s))
-	if len(fields) != 2 {
-		return ""
-	}
-	var goos string
-	switch strings.ToLower(fields[0]) {
-	case "linux":
-		goos = "linux"
-	case "darwin":
-		goos = "darwin"
-	default:
-		return ""
-	}
-	var arch string
-	switch fields[1] {
-	case "x86_64", "amd64":
-		arch = "amd64"
-	case "aarch64", "arm64":
-		arch = "arm64"
-	case "i386", "i486", "i586", "i686":
-		arch = "386"
-	default:
-		return ""
-	}
-	return goos + "_" + arch
+	return agentbin.FromUname(out.Stdout), nil
 }

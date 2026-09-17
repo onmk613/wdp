@@ -54,8 +54,8 @@ func groupByRoot(p *plan.Plan) ([]relayGroup, error) {
 		g := groups[root]
 		if g == nil {
 			g = &relayGroup{root: root}
-			switch {
-			case root == host:
+			switch root {
+			case host:
 				g.rootCnn = hp.Conn
 			default:
 				rc, ok := p.Relays[root]
@@ -82,6 +82,25 @@ func groupByRoot(p *plan.Plan) ([]relayGroup, error) {
 	return out, nil
 }
 
+// filterGroups 按允许的主机集收窄分组的 targets（组内无剩余主机则丢弃该组）。
+func filterGroups(groups []relayGroup, allowed map[string]bool) []relayGroup {
+	out := make([]relayGroup, 0, len(groups))
+	for _, g := range groups {
+		var targets []string
+		for _, h := range g.targets {
+			if allowed[h] {
+				targets = append(targets, h)
+			}
+		}
+		if len(targets) == 0 {
+			continue
+		}
+		g.targets = targets
+		out = append(out, g)
+	}
+	return out
+}
+
 // autonomousRunID 由分片内容与根主机确定性派生（幂等重提与事后回查的键）。
 func autonomousRunID(shard *plan.Plan, root string) string {
 	h := sha256.Sum256([]byte(shard.PlanID + ":" + root))
@@ -89,13 +108,31 @@ func autonomousRunID(shard *plan.Plan, root string) string {
 }
 
 // runApplyAutonomous 分组提交分片并轮询进度；返回是否存在失败。
-func runApplyAutonomous(ctx context.Context, p *plan.Plan, opts applyOptions) (bool, error) {
+// allowed 非 nil 时只提交其中的主机（--limit）。
+func runApplyAutonomous(ctx context.Context, p *plan.Plan, opts applyOptions, allowed map[string]bool) (bool, error) {
 	if opts.check {
 		return false, fmt.Errorf("--autonomous does not support --check (check mode needs synchronous module probing; run `wdp apply --check` without --autonomous)")
+	}
+	// 计划携带的是编译期固化的任务清单，agent 侧没有 tags 过滤能力：
+	// 静默忽略会让用户以为只跑了部分任务，必须在提交前显式拒绝。
+	if len(opts.tags) > 0 || len(opts.skipTags) > 0 {
+		return false, fmt.Errorf("--autonomous does not support --tags/--skip-tags (the submitted plan carries the compiled task list; filter at compile time or run `wdp apply` without --autonomous)")
+	}
+	// 制品不进 plan 本体：agent 侧没有 --chart-dir 可传，payload 缺失时
+	// 只有告警，会在收敛中途才失败——离线补件的语义与自治执行不兼容，
+	// 必须在提交前拒绝。
+	if opts.chartDir != "" && len(p.Payloads) > 0 {
+		return false, fmt.Errorf("--chart-dir is not supported with --autonomous (%d payload(s) referenced by the plan cannot be delivered through the control host; distribute them to the target agents first, or run `wdp apply` without --autonomous)", len(p.Payloads))
 	}
 	groups, err := groupByRoot(p)
 	if err != nil {
 		return false, err
+	}
+	if allowed != nil {
+		groups = filterGroups(groups, allowed)
+		if len(groups) == 0 {
+			return false, fmt.Errorf("--limit matched no plan hosts")
+		}
 	}
 	becomePW := ""
 	if opts.becomePasswordEnv != "" {
@@ -124,12 +161,12 @@ func runApplyAutonomous(ctx context.Context, p *plan.Plan, opts applyOptions) (b
 			BecomePassword: becomePW,
 			Forks:          config.Current().Forks(),
 		})
-		switch {
-		case serr == nil:
+		switch serr {
+		case nil:
 			fmt.Fprintf(os.Stderr, "[autonomous] %s: run %s accepted (state=%s%s)\n",
 				g.root, shortID(resp.RunID), resp.State, resumedNote(resp.ResumedFromIdx))
 			subs = append(subs, autonomousSubmission{g, runID, client})
-		case serr == agentc.ErrPlanUnsupported:
+		case agentc.ErrPlanUnsupported:
 			// 旧版 agent（G4 回退：与 handleArchive 404 回退同惯例）
 			fmt.Fprintf(os.Stderr, "[autonomous] %s: agent has no /plan endpoint (older agent), falling back to direct execution\n", g.root)
 			fallback = append(fallback, g)
@@ -245,6 +282,8 @@ func runDirect(ctx context.Context, shard *plan.Plan, opts applyOptions) bool {
 }
 
 // runApplyStatus 回查自治执行进度（确定性 run_id 由计划与根重算）。
+// --limit 收窄到与提交时同一口径的主机集合：只看部分主机的进度时，
+// 未被选中的 relay 分组不再查询（此前 flag 声明了却不生效）。
 func runApplyStatus(ctx context.Context, planPath, runID string, opts applyOptions) error {
 	p, err := plan.Load(planPath)
 	if err != nil {
@@ -254,7 +293,29 @@ func runApplyStatus(ctx context.Context, planPath, runID string, opts applyOptio
 	if err != nil {
 		return err
 	}
+	if opts.limit != "" {
+		hosts := make([]*model.Host, 0, len(p.Host()))
+		for _, name := range p.Host() {
+			hosts = append(hosts, p.HostPlansOf(name)[0].Conn.Host(name))
+		}
+		limited, lerr := inventory.FromHosts(hosts).Select(opts.limit)
+		if lerr != nil {
+			return lerr
+		}
+		if len(limited) == 0 {
+			return fmt.Errorf("--limit %s matched no plan hosts", opts.limit)
+		}
+		allowed := make(map[string]bool, len(limited))
+		for _, h := range limited {
+			allowed[h.Name] = true
+		}
+		groups = filterGroups(groups, allowed)
+		if len(groups) == 0 {
+			return fmt.Errorf("--limit %s matched no plan hosts", opts.limit)
+		}
+	}
 	found := false
+	var notOK []string
 	for _, g := range groups {
 		if g.rootCnn.Conn != "agent" {
 			continue
@@ -269,9 +330,15 @@ func runApplyStatus(ctx context.Context, planPath, runID string, opts applyOptio
 		st, serr := client.PlanStatus(ctx, id, 0)
 		if serr != nil {
 			fmt.Fprintf(os.Stderr, "[autonomous] %s: status query failed: %v\n", g.root, serr)
+			notOK = append(notOK, fmt.Sprintf("%s (status query failed)", shortID(id)))
 			continue
 		}
 		fmt.Printf("run %s @ %s  state=%s%s\n", shortID(id), g.root, st.State, errNote(st.Error))
+		// 终态失败必须反映到退出码：回查命令此前恒返回 0，CI 无法据此判失败
+		switch st.State {
+		case "failed", "cancelled":
+			notOK = append(notOK, fmt.Sprintf("%s (%s)", shortID(id), st.State))
+		}
 		for _, e := range st.Journal {
 			printJournalLine(g.root, agentc.PlanJournalEntry{
 				Seq: e.Seq, Host: e.Host, Idx: e.Idx, Label: e.Label,
@@ -281,6 +348,9 @@ func runApplyStatus(ctx context.Context, planPath, runID string, opts applyOptio
 	}
 	if !found {
 		return fmt.Errorf("no autonomous run matching %q (runs are keyed by plan content and relay root; recompile produces new ids)", runID)
+	}
+	if len(notOK) > 0 {
+		return fmt.Errorf("autonomous run(s) not successful: %s", strings.Join(notOK, ", "))
 	}
 	return nil
 }

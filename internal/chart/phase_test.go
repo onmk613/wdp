@@ -118,12 +118,68 @@ func TestPhaseNameValidation(t *testing.T) {
 			t.Fatalf("非法 phases 键 %q 应报错", bad)
 		}
 	}
+	// values_from 只接受 chart / marker
+	dir := writePhaseChart(t, "phases:\n  update: {values_from: env}\n")
+	if _, err := Load(dir); err == nil {
+		t.Fatal("非法 values_from 应报错")
+	}
+}
+
+// TestPhaseSpecValuesFrom values 来源的缺省推导与显式覆盖：
+// 只有清除 marker 的相位（卸载类）读 marker，其余相位读 chart values——
+// 否则纯准备/只读相位会被"必须先部署过"卡死。
+func TestPhaseSpecValuesFrom(t *testing.T) {
+	def := map[string]ValuesFrom{
+		"":          ValuesFromChart, // 空串 = deploy
+		"deploy":    ValuesFromChart,
+		"status":    ValuesFromChart, // 只读相位不再依赖 marker
+		"download":  ValuesFromChart, // 自定义零值相位
+		"uninstall": ValuesFromMarker,
+	}
+	for phase, want := range def {
+		if got := DefaultPhaseSpec(phase).EffectiveValuesFrom(); got != want {
+			t.Errorf("DefaultPhaseSpec(%q).EffectiveValuesFrom() = %q, want %q", phase, got, want)
+		}
+	}
+	// 声明覆盖：purge 清除 marker 但显式改读 chart values
+	spec := MergePhaseSpec(DefaultPhaseSpec("purge"), PhaseSpec{ClearsMarker: true, ValuesFrom: ValuesFromChart})
+	if spec.EffectiveValuesFrom() != ValuesFromChart {
+		t.Fatalf("显式 values_from 应覆盖推导: %+v", spec)
+	}
+	// 声明覆盖：status 显式改读 marker（需要已部署入参的场景）
+	spec = MergePhaseSpec(DefaultPhaseSpec("status"), PhaseSpec{ValuesFrom: ValuesFromMarker})
+	if spec.EffectiveValuesFrom() != ValuesFromMarker {
+		t.Fatalf("status 显式 values_from: marker: %+v", spec)
+	}
+	// 未声明 values_from 时保持推导
+	spec = MergePhaseSpec(DefaultPhaseSpec("uninstall"), PhaseSpec{Record: true})
+	if spec.EffectiveValuesFrom() != ValuesFromMarker {
+		t.Fatalf("uninstall 推导应保持 marker: %+v", spec)
+	}
 }
 
 func TestHookNameFor(t *testing.T) {
 	for phase, want := range map[string]string{"": "install", "deploy": "install", "uninstall": "uninstall", "update": "update"} {
 		if got := HookNameFor(phase); got != want {
 			t.Fatalf("HookNameFor(%q) = %q, want %q", phase, got, want)
+		}
+	}
+}
+
+// TestNormalizeHook pre_deploy/post_deploy 是 pre_install/post_install 的
+// 等价别名（"词干即相位名"的直觉写法），其余名字原样返回。
+func TestNormalizeHook(t *testing.T) {
+	for in, want := range map[string]string{
+		"pre_deploy":    "pre_install",
+		"post_deploy":   "post_install",
+		"pre_install":   "pre_install",
+		"post_install":  "post_install",
+		"pre_uninstall": "pre_uninstall",
+		"pre_update":    "pre_update",
+		"":              "",
+	} {
+		if got := NormalizeHook(in); got != want {
+			t.Errorf("NormalizeHook(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

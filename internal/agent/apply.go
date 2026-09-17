@@ -102,7 +102,7 @@ func (m *planManager) register(runID, planID string) (*planRun, *planRun, error)
 	}
 	if existing, ok := m.byRunID[runID]; ok {
 		if existing.planID != planID {
-			return nil, nil, fmt.Errorf("run_id %s belongs to plan %s, refusing to reuse it for plan %s", runID, existing.planID[:12], planID[:12])
+			return nil, nil, fmt.Errorf("run_id %s belongs to plan %s, refusing to reuse it for plan %s", runID, shortID(existing.planID), shortID(planID))
 		}
 		return existing, nil, nil // 幂等命中：同一 plan 重复提交不启动第二个收敛
 	}
@@ -142,9 +142,15 @@ func (s *Server) handlePlanSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "run_id is required", http.StatusBadRequest)
 		return
 	}
+	// run_id 直接拼进运行目录路径（<runs_root>/<run_id>）：未校验时
+	// "../../.." 可让 root 进程在任意目录建目录并写文件，在入口拒绝。
+	if err := validateRunID(req.RunID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	// 完整性：内容寻址复核（防传输损坏与篡改后的静默执行）
 	if id := req.Plan.ComputeID(); id != req.Plan.PlanID {
-		http.Error(w, fmt.Sprintf("plan content hash mismatch: submitted %s, computed %s", req.Plan.PlanID[:12], id[:12]), http.StatusBadRequest)
+		http.Error(w, fmt.Sprintf("plan content hash mismatch: submitted %s, computed %s", shortID(req.Plan.PlanID), shortID(id)), http.StatusBadRequest)
 		return
 	}
 	// 自更新拒绝：plan 若升级 agent 自身（二进制路径/单元名），会杀掉正在
@@ -197,7 +203,7 @@ func (s *Server) handlePlanSubmit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "failed to read previous plan id: "+perr.Error(), http.StatusInternalServerError)
 			return
 		case string(prevID) != req.Plan.PlanID:
-			http.Error(w, fmt.Sprintf("resume refused: run dir holds plan %s, submitted plan %s (old progress is meaningless for a changed plan; use a new run_id)", string(prevID)[:12], req.Plan.PlanID[:12]), http.StatusConflict)
+			http.Error(w, fmt.Sprintf("resume refused: run dir holds plan %s, submitted plan %s (old progress is meaningless for a changed plan; use a new run_id)", shortID(string(prevID)), shortID(req.Plan.PlanID)), http.StatusConflict)
 			return
 		default:
 			done, jerr := CompletedIdx(filepath.Join(run.dir, "journal.ndjson"))
@@ -229,7 +235,7 @@ func (s *Server) handlePlanSubmit(w http.ResponseWriter, r *http.Request) {
 	go s.runPlanAsync(ctx, run, req, skipDone)
 
 	s.logInfo("plan accepted: run=%s plan=%s hosts=%d local=%q resume=%v skipped=%d",
-		req.RunID, req.Plan.PlanID[:12], len(req.Plan.Hosts), req.LocalHost, req.Resume, len(skipDone))
+		req.RunID, shortID(req.Plan.PlanID), len(req.Plan.Hosts), req.LocalHost, req.Resume, len(skipDone))
 	writeJSON(w, http.StatusOK, PlanSubmitResponse{
 		RunID: req.RunID, Accepted: true, State: "running", ResumedFromIdx: resumed,
 	})
@@ -317,6 +323,11 @@ func (s *Server) handlePlanStatus(w http.ResponseWriter, r *http.Request) {
 	runID := r.URL.Query().Get("run_id")
 	if runID == "" {
 		http.Error(w, "missing run_id parameter", http.StatusBadRequest)
+		return
+	}
+	// 读取路径同样校验：run_id 拼进目录路径，越界取值与提交路径同口径拒绝
+	if err := validateRunID(runID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	var since int64

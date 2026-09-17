@@ -156,6 +156,38 @@ func TestArtifactOfflineMissingFails(t *testing.T) {
 	}
 }
 
+// TestArtifactCheckModeDoesNotCreateDest check 模式下 members 分发不得在
+// 目标机创建任何目录（此前 cur=="missing" 时无条件 mkdir -p，破坏
+// "零风险预演"承诺）。
+func TestArtifactCheckModeDoesNotCreateDest(t *testing.T) {
+	arc := buildTarGz(t, map[string]string{"bin/app": "APP"})
+	chartDir := t.TempDir()
+	cacheRel := "packages/x86_64/app.tar.gz"
+	if err := os.MkdirAll(filepath.Join(chartDir, filepath.Dir(cacheRel)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(chartDir, cacheRel), arc, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rc, _, dirs := newTestRCState(t)
+	rc.BaseDir = chartDir
+	rc.CheckMode = true
+
+	r := (&ArtifactModule{}).Run(rc, map[string]any{
+		"cache": cacheRel, "members": []any{"app"}, "dest": "/opt/app",
+	}, "")
+	if r.Failed {
+		t.Fatalf("check 预演不应失败: %+v", r)
+	}
+	if !r.Changed {
+		t.Fatal("目标缺失时 check 应预估 changed")
+	}
+	if dirs["/opt/app"] {
+		t.Fatal("check 模式不得创建目标目录")
+	}
+}
+
 func TestArtifactPlainFileAndChecksum(t *testing.T) {
 	srv, hits := artifactSrv(t, []byte("BINARY-V1"))
 	chartDir := t.TempDir()

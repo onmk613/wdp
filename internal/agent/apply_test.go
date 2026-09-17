@@ -372,3 +372,35 @@ func TestPlanIntegrityRejected(t *testing.T) {
 		t.Fatalf("篡改 plan 应拒绝: %d %s", code, body)
 	}
 }
+
+// TestPlanRejectsMaliciousIDs run_id 直接拼进运行目录路径、plan_id 参与
+// 错误消息截断：非法/过短的取值必须被 400 拒绝，而不是路径穿越或 panic。
+func TestPlanRejectsMaliciousIDs(t *testing.T) {
+	_, base := startTestAgent(t)
+	p := selfPlan(t, "self", []string{"true"})
+
+	for _, bad := range []string{"../../etc", "a/b", ".", "..", strings.Repeat("x", 65)} {
+		code, body, _ := submitPlan(t, base, PlanSubmitRequest{RunID: bad, Plan: p, LocalHost: "self"})
+		if code != http.StatusBadRequest {
+			t.Fatalf("run_id %q 应被拒绝: %d %s", bad, code, body)
+		}
+	}
+
+	// plan_id 过短：ComputeID 不匹配 → 走错误分支，截断展示不得越界 panic
+	short := *p
+	short.PlanID = "x"
+	code, body, _ := submitPlan(t, base, PlanSubmitRequest{RunID: "run-short", Plan: &short, LocalHost: "self"})
+	if code != http.StatusBadRequest || !strings.Contains(body, "mismatch") {
+		t.Fatalf("过短 plan_id 应返回 400 而非 panic: %d %s", code, body)
+	}
+
+	// 读取路径同样拒绝越界 run_id
+	resp, err := http.Get(base + "/plan/status?run_id=../../etc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status 越界 run_id 应被拒绝: %d", resp.StatusCode)
+	}
+}

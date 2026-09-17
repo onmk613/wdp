@@ -18,6 +18,14 @@ import (
 // Fake 的 Exec 模拟了远端 sha256sum / stat / 探测 / mkdir / touch / rm 行为。
 func newTestRC(t *testing.T) (*RunContext, *fake.Fake) {
 	t.Helper()
+	rc, f, _ := newTestRCState(t)
+	return rc, f
+}
+
+// newTestRCState 同 newTestRC，但额外返回远端目录状态表（mkdir -p 的记录）：
+// "某路径是否被真实创建"类断言（如 check 模式不得建目录）需要它。
+func newTestRCState(t *testing.T) (*RunContext, *fake.Fake, map[string]bool) {
+	t.Helper()
 	fake := fake.NewFake(&model.Host{Name: "test"})
 	dirs := map[string]bool{}
 	fake.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
@@ -89,7 +97,7 @@ func newTestRC(t *testing.T) (*RunContext, *fake.Fake) {
 		Vars:    map[string]any{},
 		BaseDir: ".",
 	}
-	return rc, fake
+	return rc, fake, dirs
 }
 
 // extractQuoted 从脚本中提取 p='路径' 形式的值。

@@ -64,6 +64,14 @@ func parseTask(raw any, isHandler bool) (*model.Task, error) {
 		return nil, err
 	}
 	if t.Block != nil {
+		// 组任务只接受控制属性：模块键（shell/copy/…）、chart/include 引用与
+		// 其它未知键此前被静默丢弃——写错层级时任务"看起来生效"实则没跑。
+		for k := range m {
+			if k == "name" || k == "block" || k == "rescue" || k == "always" || taskKeys[k] {
+				continue
+			}
+			return nil, fmt.Errorf("task %q: block task does not accept key %q (module keys, chart/include references and their args belong inside the block's subtasks)", t.Label(), k)
+		}
 		t.Module = "block" // 组任务标记（executor 展开执行）
 		t.Args = map[string]any{}
 		return t, nil

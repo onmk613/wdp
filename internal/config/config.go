@@ -39,7 +39,7 @@ type RunConfig struct {
 	Timeout     int    `toml:"timeout"`      // 全局墙钟超时秒（0 = 不限）
 	TaskTimeout int    `toml:"task_timeout"` // 任务默认超时秒（0 = 不限）
 	Verbose     bool   `toml:"verbose"`      // 逐主机全量输出
-	Conn        string `toml:"conn"`         // 默认连接类型（空 = ssh；可选 push/agent/local，fleet 级默认）
+	Conn        string `toml:"conn"`         // 默认连接类型（空 = push，见 DefaultConn；可选 ssh/push/agent/local，fleet 级默认）
 }
 
 // OutputConfig 是输出相关默认值。
@@ -61,7 +61,7 @@ type AgentConfig struct {
 	CertRotateMin  int               `toml:"cert_rotate_min"`  // push 临时证书轮换周期分钟（0 = 不轮换）
 	PushCADir      string            `toml:"push_ca_dir"`      // push 会话 CA 落盘目录（空 = ~/.wdp/push-ca）
 	IdleTimeoutMin int               `toml:"idle_timeout_min"` // push 临时 agent 空闲自动退出分钟（0 = 默认 60；<0 = 禁用）
-	PushBinary     map[string]string `toml:"push_binary"`      // push 自举按目标平台的二进制表（键 linux_amd64/linux_arm64/…，值为本机预编译产物路径）
+	PushBinary     map[string]string `toml:"push_binary"`      // push 自举按目标平台的二进制表（键 linux_amd64/linux_arm64/…；默认靠 bin 目录同级查找，此表仅覆盖非默认路径）
 }
 
 // TransferConfig 是文件传输相关上限。

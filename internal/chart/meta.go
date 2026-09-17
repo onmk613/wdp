@@ -28,9 +28,14 @@ func validateMeta(m *Meta) error {
 	if !chartNameRe.MatchString(m.Name) || m.Name == "." || m.Name == ".." {
 		return fmt.Errorf("chart.yaml name %q is invalid (allowed: letters, digits, '.', '_', '-'; path separators are rejected)", m.Name)
 	}
-	for phase := range m.Phases {
+	for phase, spec := range m.Phases {
 		if !phaseNameRe.MatchString(phase) {
 			return fmt.Errorf("chart.yaml phases key %q is invalid (allowed: letter first, then letters, digits, '_', '-')", phase)
+		}
+		switch spec.ValuesFrom {
+		case "", ValuesFromChart, ValuesFromMarker:
+		default:
+			return fmt.Errorf("chart.yaml phases.%s values_from %q is invalid (options: chart | marker)", phase, spec.ValuesFrom)
 		}
 	}
 	if m.MarkerDir != "" {

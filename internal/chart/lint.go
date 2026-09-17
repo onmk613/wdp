@@ -53,6 +53,8 @@ func Lint(c *Chart, values map[string]any) []LintIssue {
 		validHooks["pre_"+HookNameFor(p)] = true
 		validHooks["post_"+HookNameFor(p)] = true
 	}
+	validHooks["pre_deploy"] = true // pre_install 的等价别名
+	validHooks["post_deploy"] = true
 	var walk func(prefix string, ch *Chart)
 	walk = func(prefix string, ch *Chart) {
 		var checkTask func(path, label string, t *model.Task)

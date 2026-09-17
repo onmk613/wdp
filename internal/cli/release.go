@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"wdp/internal/chart"
 	"wdp/internal/fmtutil"
 	"wdp/internal/release"
 )
@@ -89,6 +90,7 @@ func newReleaseShowCmd() *cobra.Command {
 				if rec.Values == nil {
 					return fmt.Errorf("this record has no values (bare playbook mode)")
 				}
+				warnRedacted(cmd.ErrOrStderr(), rec.Values)
 				return printYAML(out, rec.Values)
 			}
 			fmt.Fprintf(out, "ID:     %s\nTime:  %s\nChart:  %s %s\nResult:  %s\nHosts:  %v\n",
@@ -98,6 +100,7 @@ func newReleaseShowCmd() *cobra.Command {
 				fmt.Fprintf(out, "Args:  %v\n", rec.ValuesRef)
 			}
 			if rec.Values != nil {
+				warnRedacted(cmd.ErrOrStderr(), rec.Values)
 				fmt.Fprintln(out, "\nvalues snapshot (--values for the full content):")
 				if err := printYAML(out, rec.Values); err != nil {
 					return err
@@ -312,6 +315,36 @@ func candidateIDs(matches []*release.Record) string {
 		ids = append(ids, m.ID)
 	}
 	return "; candidates: " + strings.Join(ids, ", ")
+}
+
+// warnRedacted 提示快照中的敏感值已被脱敏为占位符：直接 -f 回放会把
+// "<redacted>" 当成真实值写入，必须先补齐真实敏感值（env 引用或 -f 覆盖）。
+func warnRedacted(out io.Writer, values map[string]any) {
+	if !containsRedacted(values) {
+		return
+	}
+	fmt.Fprintf(out, "note: sensitive values are stored as %q in this snapshot (chart.yaml sensitive_values); supply them again before replaying with -f/--set\n", chart.RedactedValue)
+}
+
+// containsRedacted 递归检查是否存在脱敏占位符。
+func containsRedacted(v any) bool {
+	switch x := v.(type) {
+	case string:
+		return x == chart.RedactedValue
+	case map[string]any:
+		for _, e := range x {
+			if containsRedacted(e) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range x {
+			if containsRedacted(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // printYAML 序列化输出 YAML（部署记录 values 快照用）。

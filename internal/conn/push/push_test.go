@@ -81,6 +81,20 @@ func TestPushMTLSDirectConnect(t *testing.T) {
 	if err := agentc.New(&h2, nil).Connect(context.Background()); err == nil {
 		t.Fatal("错误 CA 的链校验应拒绝")
 	}
+
+	// 服务端证书 pin：链校验通过但证书不符 → 拒绝（共享证书场景下防冒用）
+	h3 := *h
+	h3.PeerCertData = certs.ClientCertPEM // 故意 pin 成另一张证书
+	err = agentc.New(&h3, nil).Connect(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "pinned") {
+		t.Fatalf("证书 pin 不符应拒绝: %v", err)
+	}
+	// 正确 pin → 通过
+	h4 := *h
+	h4.PeerCertData = certs.ServerCertPEM
+	if err := agentc.New(&h4, nil).Connect(context.Background()); err != nil {
+		t.Fatalf("正确 pin 应通过: %v", err)
+	}
 }
 
 // TestAgentHostIPv6URL 验证 agentHost 的 URL 拼装对 IPv6 字面量加方括号。
@@ -297,55 +311,49 @@ func TestIsTransportErrorUnexpectedEOF(t *testing.T) {
 	}
 }
 
-// TestPlatformFromUname uname -sm 输出归一为 os_arch 平台键。
-func TestPlatformFromUname(t *testing.T) {
-	cases := map[string]string{
-		"Linux x86_64\n": "linux_amd64",
-		"Linux aarch64":  "linux_arm64",
-		"Linux arm64\n":  "linux_arm64",
-		"Darwin arm64\n": "darwin_arm64",
-		"Darwin x86_64":  "darwin_amd64",
-		"Linux i686":     "linux_386",
-		"SunOS sun4u":    "",
-		"":               "",
-		"Linux":          "",
-		"weird a b":      "",
-	}
-	for in, want := range cases {
-		if got := platformFromUname(in); got != want {
-			t.Fatalf("platformFromUname(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestSelectPushBinary 二进制选择优先级：主机 binary_path > 平台表 >
-// 同平台自身；跨平台未配置 → ok=false（调用方回退 SSH，不做无效上传）。
+// 同平台自身 > 同级 bin 目录；跨平台全未命中 → ok=false（调用方回退
+// SSH，不做无效上传）。
 func TestSelectPushBinary(t *testing.T) {
 	cfg := map[string]string{"linux_amd64": "/bin/wdp-linux-amd64"}
 	const self = "darwin_arm64"
+	siblingHit := func(platform string) (string, bool) {
+		if platform == "linux_arm64" {
+			return "/bin/dir/wdp-linux-arm64", true
+		}
+		return "", false
+	}
 
 	// 主机显式指定最高优先
-	if bin, useSelf, ok := selectPushBinary("/host/bin", "linux_amd64", self, cfg); !ok || useSelf || bin != "/host/bin" {
+	if bin, useSelf, ok := selectPushBinary("/host/bin", "linux_amd64", self, cfg, siblingHit); !ok || useSelf || bin != "/host/bin" {
 		t.Fatalf("host binary 应最优先: %q %v %v", bin, useSelf, ok)
 	}
 	// 平台表命中
-	if bin, useSelf, ok := selectPushBinary("", "linux_amd64", self, cfg); !ok || useSelf || bin != "/bin/wdp-linux-amd64" {
+	if bin, useSelf, ok := selectPushBinary("", "linux_amd64", self, cfg, siblingHit); !ok || useSelf || bin != "/bin/wdp-linux-amd64" {
 		t.Fatalf("平台表应命中: %q %v %v", bin, useSelf, ok)
 	}
 	// 目标与控制端同平台：用自身
-	if bin, useSelf, ok := selectPushBinary("", "darwin_arm64", self, cfg); !ok || !useSelf || bin != "" {
+	if bin, useSelf, ok := selectPushBinary("", "darwin_arm64", self, cfg, siblingHit); !ok || !useSelf || bin != "" {
 		t.Fatalf("同平台应用自身: %q %v %v", bin, useSelf, ok)
 	}
-	// 跨平台未配置：拒绝（回退 SSH）
-	if _, _, ok := selectPushBinary("", "linux_arm64", self, cfg); ok {
-		t.Fatal("跨平台未配置应 ok=false")
+	// 跨平台未配置但同级 bin 目录命中
+	if bin, useSelf, ok := selectPushBinary("", "linux_arm64", self, cfg, siblingHit); !ok || useSelf || bin != "/bin/dir/wdp-linux-arm64" {
+		t.Fatalf("同级 bin 目录应命中: %q %v %v", bin, useSelf, ok)
+	}
+	// 跨平台全未命中：拒绝（回退 SSH）
+	if _, _, ok := selectPushBinary("", "linux_386", self, cfg, siblingHit); ok {
+		t.Fatal("跨平台全未命中应 ok=false")
 	}
 	// 平台未知：退回自身尝试（旧行为兼容，由远端启动探测兜底）
-	if _, useSelf, ok := selectPushBinary("", "", self, cfg); !ok || !useSelf {
+	if _, useSelf, ok := selectPushBinary("", "", self, cfg, siblingHit); !ok || !useSelf {
 		t.Fatalf("平台未知应用自身: %v %v", useSelf, ok)
 	}
 	// 空 cfg map 不 panic、同平台仍用自身
-	if _, useSelf, ok := selectPushBinary("", "darwin_arm64", self, nil); !ok || !useSelf {
+	if _, useSelf, ok := selectPushBinary("", "darwin_arm64", self, nil, siblingHit); !ok || !useSelf {
 		t.Fatalf("nil cfg 同平台: %v %v", useSelf, ok)
+	}
+	// sibling 为 nil 不 panic，跨平台未配置按未命中处理
+	if _, _, ok := selectPushBinary("", "linux_arm64", self, cfg, nil); ok {
+		t.Fatal("nil sibling 跨平台未配置应 ok=false")
 	}
 }

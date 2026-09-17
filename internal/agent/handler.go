@@ -92,8 +92,10 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// info 记命令概要（运行基本记录）；debug 补执行参数全貌
-	s.logInfo("exec: %s", truncateStr(req.Script, 256))
+	// info 只记脚本摘要（字节数 + sha256 前 8 位）：脚本内容常含密码/令牌
+	//（no_log 只遮蔽控制端结果输出，不影响下发脚本），日志会落 stderr /
+	// --log-file / 环形缓冲并可经 /logs 拉取，不得记明文。
+	s.logInfo("exec: %d bytes sha256=%s", len(req.Script), scriptDigest(req.Script))
 	s.logDebug("exec detail: user=%q cwd=%q timeout_ms=%d env=%d", req.BecomeUser, req.Cwd, req.TimeoutMs, len(req.Env))
 
 	resp := RunScript(r.Context(), req)

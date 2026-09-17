@@ -34,8 +34,8 @@ func TestCommandTreeStructure(t *testing.T) {
 		top[c.Name()] = true
 	}
 	for _, name := range []string{
-		"run", "adhoc", "module", "render", "lint", "package",
-		"ca", "scan-ssh", "agent", "release",
+		"run", "plan", "apply", "adhoc", "schema", "module", "render", "lint", "package",
+		"ca", "scan-ssh", "agent", "agentctl", "drift", "release", "inv",
 	} {
 		if !top[name] {
 			t.Fatalf("缺少顶层命令 %q", name)

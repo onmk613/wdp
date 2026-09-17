@@ -59,6 +59,29 @@ func probeInventory(t *testing.T) func() {
 	return func() { gInventories, gInventoryExplicit = old, oldExplicit }
 }
 
+// TestCustomPhaseNeedsNoMarker 零值自定义相位（download 类纯准备动作）在
+// 从未部署过的主机上必须能跑：values 来自 chart，不读 marker。此前所有
+// 非 release 相位都被强制读 marker，导致离线制品预下载"必须先部署过"。
+func TestCustomPhaseNeedsNoMarker(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	restore := probeInventory(t)
+	defer restore()
+	chartDir, _, _, _ := writeProbeChart(t)
+	if err := os.WriteFile(filepath.Join(chartDir, "download.yaml"),
+		[]byte("- hosts: all\n  tasks:\n    - debug: {msg: preparing}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 从未 deploy：主机上没有 marker
+	if err := runTarget(context.Background(), chartDir, runOptions{phase: "download", yes: true}); err != nil {
+		t.Fatalf("零值自定义相位不应要求 marker: %v", err)
+	}
+	// 反向断言：uninstall 仍必须从 marker 还原实际部署入参
+	err := runTarget(context.Background(), chartDir, runOptions{phase: "uninstall", yes: true})
+	if err == nil || !strings.Contains(err.Error(), "no release marker") {
+		t.Fatalf("uninstall 仍应要求 marker: %v", err)
+	}
+}
+
 // TestUninstallUsesMarkerValues §1.1 验收：卸载不带 --set 时 values 取自
 // marker，实际部署的目录被删除，默认值路径从未被触碰。
 func TestUninstallUsesMarkerValues(t *testing.T) {

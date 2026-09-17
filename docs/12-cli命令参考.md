@@ -21,12 +21,13 @@
 
 | 分组 | 命令 |
 |---|---|
-| 部署命令 | `run`、`adhoc` |
-| 应用包命令 | `schema`、`module`、`render`、`lint`、`package` |
-| 安全与信任命令 | `ca`、`scan-ssh` |
-| 代理命令 | `agent` |
-| 运维与记录命令 | `release`、`drift`、`inventory` |
-| 计划与自治命令 | `plan`、`apply`（见 [15 自治执行](15-自治执行改造方案.md)） |
+| Deployment | `run`、`plan`、`apply`、`adhoc` |
+| Package | `schema`、`module`、`render`、`lint`、`package` |
+| Security | `ca`、`scan-ssh` |
+| Agent | `agent`、`agentctl` |
+| Operations | `drift`、`release`、`inv`（别名 `inventory`） |
+
+共 5 个分组，与 `wdp --help` 的分类一致。`plan`/`apply` 的自治执行语义见 [15 自治执行](15-自治执行改造方案.md)。
 
 版本信息用框架自带的 `wdp --version`。
 
@@ -44,7 +45,7 @@ wdp run <playbook.yaml | chart目录 | chart.tgz>
 |---|---|
 | `-f / --values-file` | chart values 覆盖文件，按序深合并（同 Helm） |
 | `--set` | 点路径覆盖（`--set a.b[0]=v`；`k=null` 删键） |
-| `--limit` | 在 play hosts 基础上进一步收窄主机（选择模式语法） |
+| `--limit` | 在 play hosts 基础上进一步收窄主机（选择模式语法）；**匹配不到任何主机时直接报错退出**（此前静默成功，容易掩盖写错的模式） |
 | `--hosts` | 内联主机表达式，免 inventory 文件：IP/`host:port`/区间 `10.8.2.101-104`（跨度上限 256）。内联清单只有 all 组——全部 play 作用于全部内联主机；与显式 `-i` 互斥 |
 | `-t / --tags` | 仅执行带这些 tag 的任务 |
 | `--skip-tags` | 跳过带这些 tag 的任务 |
@@ -52,7 +53,7 @@ wdp run <playbook.yaml | chart目录 | chart.tgz>
 | `--diff` | 内容级差异（自动启用 check） |
 | `--list-hosts` | 仅列出将执行的主机 |
 | `--start-at-task` | 从指定任务开始（调试） |
-| `--phase` | chart 生命周期相位（缺省 deploy）：根目录任意 `<phase>.yaml` 都是相位——内置 `uninstall` / `status`，自定义如 `update` / `download`（见 [08 生命周期](08-chart应用包.md#生命周期)）；未知相位报错并列出可用相位 |
+| `--phase` | chart 生命周期相位（缺省 deploy）：根目录任意 `<phase>.yaml` 都是相位——内置 `uninstall` / `status`，自定义如 `update` / `download`（见 [08 生命周期](08-chart应用包.md#生命周期)）；未知相位报错并列出可用相位。该相位的 **values 来源**由 chart.yaml `values_from` 决定：缺省卸载类相位（`clears_marker`）读各主机 marker 记录的实际部署入参，其余相位（含 `status`、`download` 等自定义相位）读 chart values——从未部署过的主机也能跑 `--phase download` |
 | `--fact-cache` | fact store 持久化 JSON：启动加载、结束原子落盘（setup/set_fact 跨运行复用；损坏自动忽略） |
 | `-y / --yes` | 跳过不可逆操作确认（CI 建议） |
 
@@ -79,8 +80,7 @@ wdp plan show <plan.json> [--host 主机名]
 wdp plan diff <plan-a.json> <plan-b.json>
 ```
 
-把 chart + inventory + values 离线编译为**完全解析的执行计划**（部署相位
-不连接任何主机）。plan 是一等产物：跨主机信息（groups/hosts/hostvars、
+把 chart + inventory + values 离线编译为**完全解析的执行计划**（读 chart values 的相位全程不连接任何主机）。plan 是一等产物：跨主机信息（groups/hosts/hostvars、
 values、play vars）在编译期固化为字面值；`when`/`loop`/模板渲染保留给
 执行侧（可能依赖运行时 register）。同一 chart + 同一 values 两次编译产出
 **逐字节相同**的 plan.json（PlanID 内容寻址）；文件被篡改后 `plan` 拒绝加载。
@@ -91,8 +91,9 @@ values、play vars）在编译期固化为字面值；`when`/`loop`/模板渲染
 | `--phase` / `--limit` / `-f` / `--set` | 与 `wdp run` 同语义 |
 | `--fact-cache` | 把已有 facts 冻结进计划变量域 |
 
-非部署相位（uninstall/status 等）的 values 来自各主机 release marker
-（需连接读取，与 `run` 同语义）。
+values 来源按相位的 `values_from` 决定（与 `run` 同语义）：`clears_marker` 相位
+（uninstall 等）从各主机 release marker 还原，**编译期需连接读取**；其余相位
+（deploy/status/自定义）用 chart values，编译全程离线。
 
 ```sh
 wdp plan ./myapp -i inv.yaml -f envs/prod.yaml -o plan.json   # 编译（离线）
@@ -120,11 +121,13 @@ wdp apply status <plan.json> <run-id前缀> [--limit 模式]
 
 | flag | 说明 |
 |---|---|
+| `--limit` | 在计划的主机集合上进一步收窄（选择模式语法）；匹配不到计划内主机直接报错 |
+| `-t / --tags`、`--skip-tags` | 按 tag 筛任务（控制端执行路径）；`--autonomous` 下不支持，见下 |
 | `--chart-dir` | 为计划引用的大文件制品提供本地来源（离线分发） |
-| `--autonomous` | 把计划分片提交给目标 agent 自治执行：agent 收到分片后本地完成收敛并落 journal，控制端可随时断开（断连容忍）；按 `via` 中继根分组提交，跳板机 agent 即该网段本地控制端。仅支持 agent 通道（其他通道显式报错）；旧版 agent 无 `/plan` 端点时自动回退控制端直接执行 |
-| `--detach` | 配合 `--autonomous`：agent 接受即返回，事后用 `apply status` 回查 |
-| `--resume` | 配合 `--autonomous`：从各 agent 的 journal 断点续跑（已 ok/changed 的任务不重做；plan 变更则拒绝续跑） |
-| `--become-password-env` | become 密码的环境变量（随分片下发、仅驻留 agent 内存；推荐免密 sudo） |
+| `--autonomous` | 把计划分片提交给目标 agent 自治执行：agent 收到分片后本地完成收敛并落 journal，控制端可随时断开（断连容忍）；按 `via` 中继根分组提交，跳板机 agent 即该网段本地控制端。仅支持 agent 通道（其他通道显式报错）；旧版 agent 无 `/plan` 端点时自动回退控制端直接执行。**`--limit` 照常生效**（只提交命中的分片主机；命中为空直接报错）；**不支持 `--check` 与 `--tags`/`--skip-tags`**——计划携带的是编译期固化的任务清单，agent 侧没有 tags 过滤能力，因此在提交前显式报错（请在编译期筛任务，或去掉 `--autonomous` 走控制端执行），而不是静默忽略 |
+| `--detach` | 配合 `--autonomous`：agent 接受即返回，事后用 `apply status` 回查；**不带 `--autonomous` 时直接报错**（不再被静默忽略） |
+| `--resume` | 配合 `--autonomous`：从各 agent 的 journal 断点续跑（已 ok/changed 的任务不重做；plan 变更则拒绝续跑）；**不带 `--autonomous` 时直接报错** |
+| `--become-password-env` | become 密码的环境变量（随分片下发、仅驻留 agent 内存；推荐免密 sudo）；**不带 `--autonomous` 时直接报错**——直连路径的 sudo 密码来自 inventory 的 `become_password` / `become_password_env` |
 
 ```sh
 wdp apply plan.json -y                          # 控制端直接执行
@@ -159,13 +162,14 @@ wdp adhoc -m stat -a 'path=/etc/hosts' --format '{{.host}} {{.stdout}}' web*
 ## wdp schema
 
 ```
-wdp schema [host|task] [--json]
+wdp schema [host|task|chart] [--json]
 ```
 
-**YAML 结构字段速查**（写 inventory / playbook 前的骨架参考，区别于具体模块的参数文档）：
+**YAML 结构字段速查**（写 inventory / playbook / chart 前的骨架参考，区别于具体模块的参数文档）：
 
 - `wdp schema host` — 主机条目可用的全部连接参数键（地址/SSH 认证/TLS/提权口令/agent 与 push 专属），未列出的键一律视为主机变量
 - `wdp schema task` — 任务控制属性全表（条件/循环/重试/提权/委托/结果判定/容错块），按语义分组附可粘贴示例
+- `wdp schema chart` — `chart.yaml` 全部字段（标识/values 契约/marker 与预演/phases）**加相位属性全表**（`release`/`record`/`clears_marker`/`values_from`，含缺省值与推导规则），按语义分组附示例
 - `--json` 机器可读（编辑器插件/脚本）；无参打总览
 
 字段表与解析器同源（对账测试防漂移）；具体模块（shell/copy/...）的参数文档用 `wdp module <名>`。
@@ -181,10 +185,17 @@ wdp module [模块名]
 ## wdp render
 
 ```
-wdp render <chart目录|tgz> [-f values 文件（可多次）] [--set k=v（可多次）] [--hostname 名字]
+wdp render <chart目录|tgz> [-f values 文件（可多次）] [--set k=v（可多次）]
+           [--phase 相位] [--hostname 名字]
 ```
 
-**chart 静态渲染预览**：合并后的最终 values + 全部 templates/ 渲染结果 + 任务树（chart 引用展开一层）。`--hostname` 指定预览用 `inventory_hostname` 占位（缺省 preview-host）。不需要 inventory/主机——写包阶段离线自查渲染；执行侧预演用 `wdp run --check`（真实主机、真实连接的模块级预演），两者互补分层。
+**chart 静态渲染预览**：合并后的最终 values + 全部 templates/ 渲染结果 + 指定相位的任务树（chart 引用展开一层）。`--phase` 可预览**任意相位**（缺省 deploy；uninstall/status/自定义相位同 chart 语义，未知相位报错并列出可用相位）——此前只支持部署相位。`--hostname` 指定预览用 `inventory_hostname` 占位（缺省 preview-host）。不需要 inventory/主机——写包阶段离线自查渲染（也因此只反映 chart values 口径，`inventory_override` 键的实际覆盖值不在此体现）；执行侧预演用 `wdp run --check`（真实主机、真实连接的模块级预演），两者互补分层。
+
+```sh
+wdp render ./myapp                              # deploy 相位
+wdp render ./myapp --phase uninstall            # 卸载清单静态预览
+wdp render ./myapp -f envs/prod.yaml --hostname web1
+```
 
 ## wdp lint
 
@@ -202,10 +213,10 @@ wdp package <chart目录> [-o/--out-dir 输出目录]
 
 先加载校验再打包为 `<name>-<version>.tgz`（包内顶层 `<name>/` 前缀，可直接 `wdp run`）。
 
-## wdp inventory
+## wdp inv（别名 `inventory` / `i`）
 
 ```sh
-wdp inventory [主机模式] [--vars]    # 主机模式缺省 all
+wdp inv [主机模式] [--vars]    # 主机模式缺省 all
 ```
 
 | 说明 |
@@ -232,10 +243,16 @@ wdp drift <chart目录|chart.tgz> [主机模式] [-f values] [--set k=v] [--limi
 - 存在 `DRIFTED` / `UNREACHABLE` 时退出非零（可直接进 CI 定时巡检）
 - 只读不收敛：纠偏动作是 `wdp run` 幂等重部署（刻意不做自动纠偏）
 - `no_marker: true` 的 chart 无法巡检（marker 是数据源）
+- chart 声明了 `sensitive_values` 时这些键**不参与摘要**——真实敏感值变化不构成
+  漂移信号（脱敏口径见 [08 敏感值](08-chart应用包.md#敏感值sensitive_values)）
+- `--output json`：stdout 只含最终 JSON 文档，逐主机分类进 `drift` 数组
+  （每项 `host` / `state` / `detail`），人类可读的摘要行改走 **stderr**
+  （需要纯 JSON 时用 `2>/dev/null` 或分开重定向）
 
 ```sh
 wdp drift ./myapp -i inv.yaml                    # 全部主机
 wdp drift ./myapp 'web*' -f envs/prod.yaml       # 指定组与 values 口径
+wdp drift ./myapp --output json 2>/dev/null | jq '.drift[] | select(.state!="OK")'
 ```
 
 ## wdp release
@@ -272,7 +289,7 @@ wdp ca show   <证书路径> [--key <私钥路径>]
 
 | 子命令 / flag | 说明 |
 |---|---|
-| `init` | 生成**全新根 CA**（目录为位置参数；`--name/-n` 自定义产物文件名，缺省 `ca.crt/ca.key`；**默认有效期 1 天**，`--path-len` 控制可签发的中间 CA 深度（默认 0 = 只签叶子，N>0 允许 N 级，-1 不限——企业 PKI 需要中间 CA 时用）；私钥明文 0600、目录 0700——短有效期取代静态加密，见 04 文档；常驻 agent 机群用 `--days N` 放宽）。复用已有根 CA 无需导入：issue/renew 直接 `--ca-cert/--ca-key` 指向它（见下）。cfssl 风格可定制：主题（`--cn/--o/--ou/--c/--st/--l`，O 缺省 wdp）、密钥（`--key-algo ed25519（默认）|ecdsa|rsa` + `--key-size`）——产物可作任意服务的信任根 |
+| `init` | 生成**全新根 CA**（目录为位置参数；`--name/-n` 自定义产物文件名，缺省 `ca.crt/ca.key`；**默认有效期 1 天**，`--path-len` 控制可签发的中间 CA 深度（默认 0 = 只签叶子，N>0 允许 N 级，-1 不限——企业 PKI 需要中间 CA 时用）；私钥明文 0600、目录 0700——短有效期取代静态加密，见 04 文档；常驻 agent 机群用 `--days N` 放宽）。复用已有根 CA 无需导入：issue/renew 直接 `--ca-cert/--ca-key` 指向它（见下）。cfssl 风格可定制：主题（`--cn/--o/--ou/--c/--st/--l`，O 缺省 wdp）、密钥（`--key-algo ed25519（默认）\|ecdsa\|rsa` + `--key-size`）——产物可作任意服务的信任根 |
 | `issue` | 签发证书（cfssl 风格，产物可直接交给 etcd/nginx 等任意服务）。`--name` 只决定产物文件名与 CN 缺省值（空 = 档案名 server/client/peer，`--cn` 可覆盖 CN）；**SAN 一律经 `--san`**，`--profile server\|client\|peer`（server=ServerAuth、client=ClientAuth、peer=双向，etcd mTLS 用；默认 server）；`--days` 缺省 0 = **自动档**（按签发 CA 剩余寿命分段：CA 剩余 ≤30 天 → 跟随 CA 一起到期；30~60 天 → 取剩余的 50%；>60 天 → 上限 30 天；显式给值时仍**一律钳制到 CA 到期时刻**）；`--key-algo/--key-size` 同 init；主题 flags 覆盖 O/OU/C/ST/L；输出 SHA256 指纹 |
 | `--san` | 追加额外 SAN（可多次）：裸值按 IP/DNS 自动识别；`uri:spiffe://…` 与 `email:a@b.c` 前缀签 URI/Email SAN——多地址/NAT/端口转发主机一张证书覆盖全部可达地址，`renew` 续期时全量继承（含 URI/Email） |
 | `renew` | **更新延期，全显式无命名约定**：`--cert` 旧证书必填；保留私钥模式 `--key` 必填（会校验与证书公钥配对，不配对拒绝），`--new-key` 换钥则无需旧钥；位置参数 = **新证书输出路径**（缺省当前目录，新私钥为同目录同名 `.key`）；身份字段（CN/SAN 四类/EKU/密钥算法）全部继承，`--days` 为在当前到期上**增加**的天数（默认 30，钳制到 CA 到期）。**新旧同目录时**旧证书/私钥先改名 `*.old.<时间戳>` 备份；输出到别处则旧件原地不动 |
@@ -344,7 +361,7 @@ wdp agent [--listen 127.0.0.1:7602]
 ssh target 'wdp agent --listen 0.0.0.0:7602 --ca ca.crt --cert <IP>.crt --key <IP>.key &'
 ```
 
-生产建议 systemd 托管（示例：`examples/wdp-agent.service`）。
+生产建议 systemd 托管：用 `wdp agentctl install <主机模式>` 生成并安装 systemd 单元（`--systemd-unit` 指定单元名，缺省 `wdp-agent`；单元内容 `ExecStart=… agent --listen 0.0.0.0:<agent 端口> --ca <dir>/ca.crt --cert <dir>/agent.crt --key <dir>/agent.key --log-file /var/log/wdp-agent.log`、`Restart=always`、`RestartSec=3`）——仓库内没有预置的 unit 示例文件，手写时可参照上面的 `wdp agent` 启动命令。
 
 ## wdp agentctl
 

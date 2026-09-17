@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -163,12 +165,11 @@ func (s *Server) logWarn(msg string, args ...any)  { s.logAt(slog.LevelWarn, msg
 func (s *Server) logDebug(msg string, args ...any) { s.logAt(slog.LevelDebug, msg, args...) }
 func (s *Server) logTrace(msg string, args ...any) { s.logAt(LevelTrace, msg, args...) }
 
-// truncateStr 截断超长内容（日志预览用：长脚本/文件列表不刷爆日志）。
-func truncateStr(str string, n int) string {
-	if len(str) <= n {
-		return str
-	}
-	return str[:n] + "...(truncated)"
+// scriptDigest 返回脚本内容的 sha256 前 8 位（日志用摘要替代明文：脚本
+// 常含密码/令牌，日志会落盘并可经 /logs 拉取）。
+func scriptDigest(script string) string {
+	sum := sha256.Sum256([]byte(script))
+	return hex.EncodeToString(sum[:])[:8]
 }
 
 // logRequest 访问日志（debug 起）与 httpdump（trace 起）中间件，位于

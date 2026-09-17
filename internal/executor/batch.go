@@ -27,25 +27,41 @@ func (e *Executor) runBatch(ctx context.Context, p *model.Play, playHosts, hosts
 	return taskFailed, runs
 }
 
-// hostValuesFor 返回主机实际生效的 chart values：HostValues 有该主机条目
-// 时用它（非部署相位从 marker 还原），否则用全局 Values。
-func (e *Executor) hostValuesFor(host string) map[string]any {
-	if v, ok := e.Opts.HostValues[host]; ok && v != nil {
+// hostValuesFor 返回主机在指定 play 中实际生效的 chart values：HostValues
+// 有该 (play, 主机) 条目时用它（非部署相位从 marker 还原 / plan 模式的编译
+// 期快照），否则用全局 Values。
+func (e *Executor) hostValuesFor(p *model.Play, host string) map[string]any {
+	key := host
+	if e.Opts.PlanVars != nil {
+		key = planScopeKey(p.PlanIdx, host) // plan 模式：按 (play, 主机) 定位
+	}
+	if v, ok := e.Opts.HostValues[key]; ok && v != nil {
 		return v
 	}
 	return e.Opts.Values
+}
+
+// planVarsFor 返回主机在指定 play 的冻结变量域（仅 plan 模式非 nil）。
+// 同一主机在不同 play 的 play vars / play_hosts 快照不同，键必须带 play 序号。
+func (e *Executor) planVarsFor(p *model.Play, host string) map[string]any {
+	if e.Opts.PlanVars == nil {
+		return nil
+	}
+	return e.Opts.PlanVars[planScopeKey(p.PlanIdx, host)]
 }
 
 // prepareBatchRuns 组装批次内各主机的运行态（变量分层合并 + 内置变量注入）
 // 并初始化统计条目。
 func (e *Executor) prepareBatchRuns(p *model.Play, playHosts, hosts []*model.Host, stats map[string]*model.Stats, st *playState) []*hostRun {
 	runs := make([]*hostRun, 0, len(hosts))
+	// 跨主机快照（hostvars）每批次算一次后批内共享：逐主机重算是 O(N²)
+	hostvars := e.hostvarsSnapshot()
 	for _, h := range hosts {
-		hostVals := e.hostValuesFor(h.Name)
+		hostVals := e.hostValuesFor(p, h.Name)
 		vars := map[string]any{}
 		// inventory 层（最低）
 		maps.Copy(vars, h.Vars)
-		if frozen, ok := e.Opts.PlanVars[h.Name]; ok && frozen != nil {
+		if frozen := e.planVarsFor(p, h.Name); frozen != nil {
 			// plan 执行模式：编译期冻结的完整变量域（inventory vars + values
 			// + play vars + 内置变量快照）整体胜出——跨主机信息已固化，不再
 			// 依赖运行期 inventory
@@ -74,7 +90,7 @@ func (e *Executor) prepareBatchRuns(p *model.Play, playHosts, hosts []*model.Hos
 		if e.Opts.PlanVars != nil {
 			e.injectPlanBuiltins(vars, h, playHosts, hosts)
 		} else {
-			e.injectBuiltins(vars, h, playHosts, hosts)
+			e.injectBuiltins(vars, h, playHosts, hosts, hostvars)
 		}
 		runs = append(runs, &hostRun{
 			host:       h,

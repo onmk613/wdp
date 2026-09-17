@@ -51,6 +51,12 @@ type Host struct {
 	CAData   []byte // CA 证书 PEM
 	CertData []byte // 客户端证书 PEM
 	KeyData  []byte // 客户端私钥 PEM
+	// PeerCertData 是期望的服务端证书（PEM，精确 pin）：非空时 TLS 握手
+	// 除链校验外还要求服务端叶子证书与它逐字节一致。push 通道用——会话
+	// 服务端证书由控制端签发并上传到目标机，控制端持有精确副本；该证书对
+	// 全部主机共享（SAN 与会话地址无关），无法按主机名校验，但可以按证书
+	// 本身 pin 住，防止被攻破的主机冒用共享证书冒充其它主机的 agent。
+	PeerCertData []byte
 
 	// push 临时 agent（conn: push）
 	BinaryPath string // 自举用的 wdp 二进制（缺省 os.Executable()）

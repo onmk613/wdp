@@ -64,9 +64,11 @@ func (c *Capture) Results() map[string]*model.TaskResult {
 	return c.out
 }
 
-// Row 一行巡检结论。
+// Row 一行巡检结论（JSON 输出字段名固定，供 CI 解析）。
 type Row struct {
-	Host, State, Detail string
+	Host   string `json:"host"`
+	State  string `json:"state"`
+	Detail string `json:"detail"`
 }
 
 // ReadMarkerPlay 构造读取全部主机 marker 的只读 shell play（marker 0600

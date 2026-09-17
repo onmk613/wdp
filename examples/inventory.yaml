@@ -17,9 +17,9 @@ docker:
 
 node-exporter:
   hosts:
-    10.8.2.101: {}
-    10.8.2.102: {}
-    10.8.2.103:
-      node_exporter_smart: true
-    10.8.2.104:
-      node_exporter_port: 9200
+    10.4.4.19: {}
+#    10.8.2.102: {}
+#    10.8.2.103:
+#      node_exporter_smart: false
+#    10.8.2.104:
+#      node_exporter_port: 9200

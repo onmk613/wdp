@@ -88,6 +88,24 @@ sensitive_values: [db.password]
 	if _, exists := db["password"]; exists {
 		t.Fatalf("StripSensitive 应剔除敏感键: %+v", stripped)
 	}
+	// RedactValues：控制端审计记录 / plan 快照共用同一脱敏口径
+	red := c.RedactValues(values)
+	if red["db"].(map[string]any)["password"] != RedactedValue {
+		t.Fatalf("RedactValues 应替换敏感键: %+v", red)
+	}
+	if values["db"].(map[string]any)["password"] != "s3cret" {
+		t.Fatal("RedactValues 不应修改入参")
+	}
+	// 无敏感声明时也返回深拷贝（不共享嵌套引用）
+	plain, err := Load(writeLifecycleChart(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp := plain.RedactValues(values)
+	cp["db"].(map[string]any)["password"] = "mutated"
+	if values["db"].(map[string]any)["password"] != "s3cret" {
+		t.Fatal("RedactValues 应返回深拷贝")
+	}
 }
 
 // TestMarkerRoundTrip：MarkerContent → ParseMarker 往返字段一致。

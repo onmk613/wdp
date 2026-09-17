@@ -1,6 +1,7 @@
 package render
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -83,20 +84,58 @@ func (e *Engine) DefinedNames() []string {
 // funcsForTest 返回引擎最终函数集（仅测试用）。
 func (e *Engine) funcsForTest() map[string]any { return e.funcs }
 
+// maxIncludeDepth 是 include 的嵌套深度上限。include 是普通模板函数，
+// Go 的 maxExecDepth 只保护 {{template}} 动作，函数自递归/互递归（helper
+// A 引用 B、B 引用 A，或自引用）会一路吃栈直到 runtime fatal error——
+// 进程直接死掉且不可 recover。合法 helper 组合远小于此值。
+const maxIncludeDepth = 32
+
+// includeDepthError 是深度超限错误（携带违规模板名，便于定位）。
+// 单独成类型是为了在 Render 里折叠掉 template 逐层包裹的错误链：
+// 32 层嵌套包裹后原始消息会长到无法阅读。
+type includeDepthError struct{ name string }
+
+func (e *includeDepthError) Error() string {
+	return fmt.Sprintf("include depth exceeded %d calling %q (recursive helper? a helper must not include itself directly or through a cycle)",
+		maxIncludeDepth, e.name)
+}
+
 // Render 渲染模板字符串（可引用 helpers 中的命名模板）。
 func (e *Engine) Render(tpl string, vars map[string]any) (string, error) {
 	if !strings.Contains(tpl, "{{") {
 		return tpl, nil
 	}
+	// 每次渲染克隆独立模板集，并在克隆上重注册带深度计数的 include：
+	// 计数器必须绑定到"本次渲染"，Engine 跨主机并发共享，挂在 Engine 上
+	// 会互相干扰；重注册到克隆上则嵌套 include 走的是同一计数器。
 	clone, err := e.base.Clone()
 	if err != nil {
 		return "", err
 	}
+	depth := 0
+	clone.Funcs(template.FuncMap{
+		"include": func(name string, data any) (string, error) {
+			depth++
+			defer func() { depth-- }()
+			if depth > maxIncludeDepth {
+				return "", &includeDepthError{name: name}
+			}
+			var sb strings.Builder
+			if err := clone.ExecuteTemplate(&sb, name, data); err != nil {
+				return "", fmt.Errorf("include %q failed: %w", name, err)
+			}
+			return sb.String(), nil
+		},
+	})
 	if _, err := clone.New("w").Parse(tpl); err != nil {
 		return "", fmt.Errorf("template parse failed %q: %w%s", tpl, err, bareIdentHint(err))
 	}
 	var sb strings.Builder
 	if err := clone.ExecuteTemplate(&sb, "w", vars); err != nil {
+		var ide *includeDepthError
+		if errors.As(err, &ide) {
+			return "", fmt.Errorf("template render failed %q: %w", tpl, ide)
+		}
 		return "", fmt.Errorf("template render failed %q: %w", tpl, err)
 	}
 	return sb.String(), nil

@@ -59,21 +59,25 @@ func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []str
 	spec := ch.PhaseSpecFor(phase)
 
 	values := map[string]any{}
-	if spec.Release {
+	switch spec.EffectiveValuesFrom() {
+	case chart.ValuesFromChart:
 		values, err = ch.BuildValues(valuesFiles, setArgs)
 		if err != nil {
 			return nil, err
 		}
-		if err := ch.ValidateRequired(values); err != nil {
-			return nil, err
+		// 与 run 同门控：只有部署事件相位强制 required + schema
+		if spec.Release {
+			if err := ch.ValidateRequired(values); err != nil {
+				return nil, err
+			}
+			if err := ch.ValidateValuesSchema(values); err != nil {
+				return nil, err
+			}
+			if err := ch.ValidateSubchartsSchema(values); err != nil {
+				return nil, err
+			}
 		}
-		if err := ch.ValidateValuesSchema(values); err != nil {
-			return nil, err
-		}
-		if err := ch.ValidateSubchartsSchema(values); err != nil {
-			return nil, err
-		}
-	} else {
+	default: // ValuesFromMarker
 		if len(opts.HostValues) == 0 {
 			return nil, fmt.Errorf("phase %q resolves values from host release markers; pass the resolved per-host values (compile after reading markers)", phase)
 		}
@@ -449,7 +453,7 @@ func snapshotFiles(dir string) (map[string]string, []PayloadRef, error) {
 		if err != nil {
 			return nil, nil, err
 		}
-		if info.Size() > MaxFileBytes || isPayloadPath(rel) {
+		if info.Size() > maxFileBytes || isPayloadPath(rel) {
 			sum, err := fileSHA256(filepath.Join(dir, rel))
 			if err != nil {
 				return nil, nil, err
@@ -458,8 +462,8 @@ func snapshotFiles(dir string) (map[string]string, []PayloadRef, error) {
 			continue
 		}
 		total += info.Size()
-		if total > MaxTotalBytes {
-			return nil, nil, fmt.Errorf("chart tree exceeds the %d MiB plan total; move large payloads out of the chart (artifact module distributes them by URL)", MaxTotalBytes>>20)
+		if total > maxTotalBytes {
+			return nil, nil, fmt.Errorf("chart tree exceeds the %d MiB plan total; move large payloads out of the chart (artifact module distributes them by URL)", maxTotalBytes>>20)
 		}
 		data, err := os.ReadFile(filepath.Join(dir, rel))
 		if err != nil {

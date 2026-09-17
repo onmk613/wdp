@@ -101,7 +101,9 @@ func (c *Conn) cleanupArtifacts() {
 }
 
 // agentHost 构造直连用的主机描述：https + 会话级临时 CA（内联 PEM）+
-// 客户端证书 + 只验证书链不验主机名（证书 SAN 为会话级固定值，与主机地址无关）。
+// 客户端证书 + 只验证书链不验主机名（证书 SAN 为会话级固定值，与主机地址
+// 无关），并以会话服务端证书精确 pin 住对端——共享证书场景下这是唯一能
+// 区分"是不是本会话该主机"的凭据。
 func (c *Conn) agentHost(port int, certs *pushcerts.Session) *model.Host {
 	clone := c.host.Clone()
 	clone.AgentURL = "https://" + net.JoinHostPort(c.host.Address, strconv.Itoa(port))
@@ -109,6 +111,7 @@ func (c *Conn) agentHost(port int, certs *pushcerts.Session) *model.Host {
 	clone.CAData = certs.CACertPEM
 	clone.CertData = certs.ClientCertPEM
 	clone.KeyData = certs.ClientKeyPEM
+	clone.PeerCertData = certs.ServerCertPEM
 	clone.TLSSkipHostVerify = true
 	clone.Conn = "agent"
 	return clone

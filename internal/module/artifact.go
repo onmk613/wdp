@@ -166,7 +166,9 @@ func (m *ArtifactModule) distributeMembers(rc *RunContext, data []byte, cacheHit
 	if cur != "missing" && cur != "directory" {
 		return Fail("%s exists and is not a directory", dest)
 	}
-	if cur == "missing" {
+	// check 模式不得产生任何目标机变更：目录缺失时只做"将会创建"的预估
+	//（逐成员 putFile 在 check 下不落盘，与 unarchive 同一约定）
+	if cur == "missing" && !rc.CheckMode {
 		if out, bad := rc.exec(fmt.Sprintf("mkdir -p -- %s", shellquote.Quote(dest))); bad != nil {
 			return bad
 		} else if out.Code != 0 {

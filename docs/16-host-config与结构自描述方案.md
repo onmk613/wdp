@@ -1,8 +1,8 @@
 # 16 --host-config 与结构自描述方案
 
-> 状态：**§1 未实施；§2 已实施 host/task 两个域**（`wdp schema host|task`，
-> 含对账测试与 `--json`；play/chart 域与 JSON Schema 导出未做）。两部分
-> 相互独立，可分期落地。
+> 状态：**§1 未实施；§2 已实施 host/task/chart 三个域**（`wdp schema
+> host|task|chart`，含对账测试与 `--json`；play 域与 JSON Schema 导出未做）。
+> 两部分相互独立，可分期落地。
 
 ## 1. `--host-config`：内联主机的连接配置
 
@@ -90,10 +90,10 @@ phases/check_mode）仍需翻文档——文档与代码分离，新增字段容
 
 | 结构 | 唯一真相 | 元数据 |
 |---|---|---|
-| task 控制键 | playbook/task.go `taskKeys` map（24-33 行）+ parseTask* 系列函数 | 无 |
+| task 控制键 | playbook/taskdoc.go `TaskFieldSections()`（`taskKeys` 由它**派生**）+ parseTask* 系列函数 | **有**（`wdp schema task`） |
 | play 键 | playbook/playbook.go parsePlayNode 的 switch | 无 |
-| inventory host 条目 | inventory/host.go `buildHost` 的字段 switch | 无 |
-| chart.yaml | chart/meta.go 结构体 + yaml tag | 无 |
+| inventory host 条目 | inventory/hostdoc.go `HostFieldSections()` + host.go `buildHost`/`hostKeyApplier` | **有**（`wdp schema host`） |
+| chart.yaml | chart/chartdoc.go `ChartFieldSections()` + chart/meta.go 结构体 + yaml tag | **有**（`wdp schema chart`） |
 | 模块参数 | module 各实现的 Params() | **有**（wdp module） |
 
 ### 2.3 方案对比
@@ -125,13 +125,14 @@ phases/check_mode）仍需翻文档——文档与代码分离，新增字段容
 ```sh
 wdp schema task          # 任务控制属性全表（when/loop/until/delegate_to...）
 wdp schema host          # inventory 主机条目字段全表（含 env: 敏感值约定）
-wdp schema play|chart    # play 键 / chart.yaml 键
+wdp schema chart         # chart.yaml 字段 + 生命周期相位属性（已实施）
+wdp schema play          # play 键（未实施）
 wdp schema task --json   # 机器可读（编辑器插件/脚本）
 ```
 
 - 实现：新 internal/schemadoc（FieldDoc 类型 + 四张字段表 + 对账测试），
   CLI 侧复用 `wdp module` 的表格渲染（outPrinter）与 `--json` 惯例；
-  补全用 ValidArgsFunction 候选四个域名。
+  补全用 ValidArgsFunction 候选域名（已实施 host/task/chart 三个；play 未做）。
 - 联动：lint 的 unknown-key 报错信息附 `wdp schema task` 提示
   （与 adhoc 的 "run `wdp module` for the list" 同惯例）。
 
@@ -141,7 +142,8 @@ wdp schema task --json   # 机器可读（编辑器插件/脚本）
    TLS 五件套/insecure_skip_verify），此前是查代码才知道存在——**已实施**；
 2. task 次之：docs/05 已全，但 CLI 内查更快，且与 §1 的 --host-config 键名
    互为印证——**已实施**；
-3. chart.yaml 第三：字段少——未做。
+3. chart.yaml 第三：字段少但相位属性易漏（release/record/clears_marker/
+   values_from）——**已实施**（`wdp schema chart`，含相位属性全表）。
 
 实施说明（2026-09）：`model.FieldDoc/FieldSection` 共享类型，FieldDoc 带
 `GoField`（该键填充的 model.Task/model.Host 结构体字段名）——文档与结构体
@@ -156,8 +158,9 @@ wdp schema task --json   # 机器可读（编辑器插件/脚本）
   inventory 包对账，conn 注册键全量对账在 cli 集成测试（blank import 驱动后
   `HostKeys()` 才是全集，反向断言同时拦截 hostKeys 字面量被删）。
   `HostKeys()` 导出亦为 §1 --host-config 的前置件。
-- 命令 `wdp schema [host|task]` 注册于 Package 组、列在 `wdp module` 之前
-  （结构骨架参考在前，区别于具体模块参数文档），总览输出同样 host/task 在前
+- 命令 `wdp schema [host|task|chart]` 注册于 Package 组、列在 `wdp module` 之前
+  （结构骨架参考在前，区别于具体模块参数文档），总览输出同样 host/task/chart 在前
   + 指引 `wdp module`；渲染带 CJK 双宽对齐。
 - `via` 中继键经组变量（inventory 组级配置）不属于主机条目键，故不在
-  host 表——见 docs/03 的中继章节。
+  host 表——其语义见 `internal/inventory/via.go` 的包注释与
+  [12 CLI 参考](12-cli命令参考.md#wdp-apply) 的 `--autonomous` 说明。

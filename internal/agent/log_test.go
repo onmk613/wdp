@@ -57,8 +57,8 @@ func TestParseLogLevel(t *testing.T) {
 	}
 }
 
-// TestLogsEndpointInfoLevel info 默认级：必要运行记录入缓冲
-// （执行的命令/传输的文件），访问日志与 httpdump 不出现。
+// TestLogsEndpointInfoLevel info 默认级：必要运行记录入缓冲（命令摘要——
+// 脚本常含密码/令牌，日志不记明文），访问日志与 httpdump 不出现。
 func TestLogsEndpointInfoLevel(t *testing.T) {
 	s := New(":0")
 	ts := httptest.NewServer(s.Handler())
@@ -71,7 +71,10 @@ func TestLogsEndpointInfoLevel(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	logs := waitLogsContain(t, ts, "echo hello")
+	logs := waitLogsContain(t, ts, "sha256=")
+	if strings.Contains(logs, "echo hello") {
+		t.Fatalf("info 级不得记录脚本明文（含密命令会随日志落盘并被 /logs 拉取）:\n%s", logs)
+	}
 	if strings.Contains(logs, "httpdump") || strings.Contains(logs, "HTTP POST") {
 		t.Fatalf("info 级不应出现访问日志/httpdump:\n%s", logs)
 	}

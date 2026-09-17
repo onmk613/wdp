@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "plan_id": "171cc1f092aa3ee9b5158e3c1a79542d34ea13f523400f5f610da6bc9e3af5d9",
+  "plan_id": "a66551e7aaaf95f317d3980050eb2155e398faf81f3019d921a7a418336781a7",
   "chart": "docker",
   "version": "1.0.0",
   "phase": "deploy",
@@ -51,58 +51,7 @@
     "values.schema.json": "ewogICIkc2NoZW1hIjogImh0dHBzOi8vanNvbi1zY2hlbWEub3JnL2RyYWZ0LzIwMjAtMTIvc2NoZW1hIiwKICAidGl0bGUiOiAiZG9ja2VyIGNoYXJ0IHZhbHVlcyIsCiAgInR5cGUiOiAib2JqZWN0IiwKICAiYWRkaXRpb25hbFByb3BlcnRpZXMiOiBmYWxzZSwKICAicHJvcGVydGllcyI6IHsKICAgICJ2ZXJzaW9uIjogeyJ0eXBlIjogInN0cmluZyIsICJwYXR0ZXJuIjogIl5bMC05XStcXC5bMC05XStcXC5bMC05XSskIn0sCiAgICAiY29tcG9zZV92ZXJzaW9uIjogeyJ0eXBlIjogInN0cmluZyIsICJwYXR0ZXJuIjogIl52WzAtOV0rXFwuWzAtOV0rXFwuWzAtOV0rJCJ9LAogICAgImJ1aWxkeF92ZXJzaW9uIjogeyJ0eXBlIjogInN0cmluZyIsICJwYXR0ZXJuIjogIl52WzAtOV0rXFwuWzAtOV0rXFwuWzAtOV0rJCJ9LAogICAgImRvd25sb2FkX2FyY2hzIjogewogICAgICAidHlwZSI6ICJhcnJheSIsCiAgICAgICJpdGVtcyI6IHsiZW51bSI6IFsieDg2XzY0IiwgImFhcmNoNjQiXX0sCiAgICAgICJ1bmlxdWVJdGVtcyI6IHRydWUKICAgIH0sCiAgICAiZG93bmxvYWRfYmFzZSI6IHsidHlwZSI6ICJzdHJpbmciLCAicGF0dGVybiI6ICJeaHR0cHM/Oi8vIn0sCiAgICAiY2xpX3BsdWdpbnNfZGlyIjogeyJ0eXBlIjogInN0cmluZyIsICJtaW5MZW5ndGgiOiAxfSwKICAgICJkYXRhX2RpciI6IHsidHlwZSI6ICJzdHJpbmciLCAibWluTGVuZ3RoIjogMX0sCiAgICAiYmluX2RpciI6IHsidHlwZSI6ICJzdHJpbmciLCAibWluTGVuZ3RoIjogMX0sCiAgICAiY29uZl9kaXIiOiB7InR5cGUiOiAic3RyaW5nIiwgIm1pbkxlbmd0aCI6IDF9LAogICAgImxvZyI6IHsKICAgICAgInR5cGUiOiAib2JqZWN0IiwKICAgICAgInByb3BlcnRpZXMiOiB7CiAgICAgICAgImRyaXZlciI6IHsidHlwZSI6ICJzdHJpbmcifSwKICAgICAgICAibGV2ZWwiOiB7ImVudW0iOiBbImRlYnVnIiwgImluZm8iLCAid2FybiIsICJlcnJvciIsICJmYXRhbCJdfSwKICAgICAgICAibWF4X3NpemUiOiB7InR5cGUiOiAic3RyaW5nIiwgInBhdHRlcm4iOiAiXlswLTldK1trbWd0XT8kIn0sCiAgICAgICAgIm1heF9maWxlIjogeyJ0eXBlIjogImludGVnZXIiLCAibWluaW11bSI6IDF9CiAgICAgIH0sCiAgICAgICJhZGRpdGlvbmFsUHJvcGVydGllcyI6IGZhbHNlCiAgICB9LAogICAgInVuaW5zdGFsbF9yZW1vdmVfYmluYXJpZXMiOiB7InR5cGUiOiAiYm9vbGVhbiJ9CiAgfQp9Cg==",
     "values.yaml": "IyBkb2NrZXIgY2hhcnQg6buY6K6k5YC844CC6KaG55uW6YCU5b6E77yaLWYgZW52cy8qLnlhbWwg4oaSIC0tc2V044CCCiMg5Yi25ZOB562W55WlIGNhY2hlLWZpcnN077yacGFja2FnZXMvPGFyY2g+LyDlt7LmnInliLblk4HljbPpm7bogZTnvZHvvIjnprvnur/lronoo4XvvInvvIwKIyDmnKrlkb3kuK3liJnmjIkgdXJsIOWcqOaOp+WItuerr+S4i+i9veS4gOasoeiQvee8k+WtmO+8iOWcqOe6v+Wuieijhe+8ieKAlOKAlOaXoOmcgOaooeW8j+W8gOWFs+OAggp2ZXJzaW9uOiAiMjkuMy4wIiAgICAgICAgICAgIyBkb2NrZXIg6Z2Z5oCB5YyF54mI5pysCmNvbXBvc2VfdmVyc2lvbjogInY1LjEuMSIgICAjIGRvY2tlciBjb21wb3NlIOaPkuS7tueJiOacrApidWlsZHhfdmVyc2lvbjogInYwLjMzLjAiICAgIyBkb2NrZXIgYnVpbGR4IOaPkuS7tueJiOacrApkb3dubG9hZF9hcmNoczogW10gICAgICAgICAgIyAtLXBoYXNlIGRvd25sb2FkIOmihOS4i+i9veebruagh+aetuaehO+8iHg4Nl82NC9hYXJjaDY077yJ77yb56m6ID0g5LuO6IqC54K5IGZhY3RzIOaOoua1i++8jOWbnumAgCB4ODZfNjQKCmRvd25sb2FkX2Jhc2U6ICJodHRwczovL2Rvd25sb2FkLmRvY2tlci5jb20vbGludXgvc3RhdGljL3N0YWJsZSIKY2xpX3BsdWdpbnNfZGlyOiAvdXNyL2xvY2FsL2xpYi9kb2NrZXIvY2xpLXBsdWdpbnMKCmRhdGFfZGlyOiAvdmFyL2xpYiAgICAgICAgICAjIGRhdGEtcm9vdCA9IDxkYXRhX2Rpcj4vZG9ja2Vy77yIaW52ZW50b3J5IOS4u+acuuWPmOmHjyBkb2NrZXJfZGF0YV9kaXIg5LyY5YWI55Sf5pWI77yJCmJpbl9kaXI6IC91c3IvYmluCmNvbmZfZGlyOiAvZXRjL2RvY2tlcgoKIyBkYWVtb24uanNvbiDlhoXlrrnvvIjmqKHmnb/muLLmn5PvvIzmlLnliqjop6blj5EgZG9ja2VyIOmHjeWQr++8iQpsb2c6CiAgZHJpdmVyOiBqc29uLWZpbGUKICBsZXZlbDogd2FybgogIG1heF9zaXplOiA1MG0KICBtYXhfZmlsZTogNQoKdW5pbnN0YWxsX3JlbW92ZV9iaW5hcmllczogZmFsc2UgICAjIOWNuOi9veaXtuaYr+WQpuWIoOS6jOi/m+WItuS4juaVsOaNruebruW9le+8iOS4jeWPr+mAhu+8iQo="
   },
-  "payloads": [
-    {
-      "path": "packages/x86_64/containerd",
-      "size": 42963128,
-      "sha256": "25a55a216e31789e7a4375c4c9fe1131dcea501db5c0291134f85922ec917941"
-    },
-    {
-      "path": "packages/x86_64/containerd-shim-runc-v2",
-      "size": 8339640,
-      "sha256": "7988c7c5d386ea873564316a072b551c9335f984c3a37336a8d8fc199c7d0bc6"
-    },
-    {
-      "path": "packages/x86_64/ctr",
-      "size": 22184120,
-      "sha256": "e29c6471de6d89ce36202dfcd35a79396584968e5c5e5f9ad6565e0a91ae2384"
-    },
-    {
-      "path": "packages/x86_64/docker",
-      "size": 41461288,
-      "sha256": "b803740c076b46942159eab6ab7a5678ec6e4e3beec330487f5984fa02c06e10"
-    },
-    {
-      "path": "packages/x86_64/docker-buildx",
-      "size": 64045240,
-      "sha256": "9426a15411f35f635afef3f5d3bae53155c3e30d26dee430cc968e13d34be49f"
-    },
-    {
-      "path": "packages/x86_64/docker-compose",
-      "size": 31557130,
-      "sha256": "2ac954c9d506b912a12477d72f01601dc72ec918c429c7bae48fd707bdf0f3e5"
-    },
-    {
-      "path": "packages/x86_64/docker-init",
-      "size": 708456,
-      "sha256": "b831fc949adfbf8afa5c8ccef4db0dacfc92f2cc884d9fcb50382eae17c60626"
-    },
-    {
-      "path": "packages/x86_64/docker-proxy",
-      "size": 2531660,
-      "sha256": "614e2ea8eead93f1b6bdc1b7987e8bcd2a60a2ac2c1c897f6c9d8262e481d26a"
-    },
-    {
-      "path": "packages/x86_64/dockerd",
-      "size": 93641496,
-      "sha256": "37b33a6b1318d22902b11d7ea98c488deae99d02b27a86989129075459a66dc6"
-    },
-    {
-      "path": "packages/x86_64/runc",
-      "size": 17825688,
-      "sha256": "068731a5e917a0a65752f7954f1ecc4a2492c35b58f78519e556c1e17aaa47db"
-    }
-  ],
+  "payloads": null,
   "hosts": [
     {
       "play_idx": 0,

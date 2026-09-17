@@ -83,8 +83,13 @@ func TestLogs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("应写入逐主机日志文件: %v", err)
 	}
-	if !strings.Contains(string(data), "marker-cmd") {
-		t.Fatalf("日志文件应含执行的命令记录:\n%s", data)
+	// 日志只记命令摘要（sha256 前缀），不记脚本明文——含密命令不得随
+	// 日志文件落盘
+	if !strings.Contains(string(data), "sha256=") {
+		t.Fatalf("日志文件应含执行记录（摘要）:\n%s", data)
+	}
+	if strings.Contains(string(data), "marker-cmd") {
+		t.Fatalf("日志文件不得含脚本明文:\n%s", data)
 	}
 	if !strings.Contains(out.String(), "web/1") {
 		t.Fatalf("输出应含主机与文件路径: %q", out.String())
@@ -103,6 +108,43 @@ func TestAgentUnitFile(t *testing.T) {
 		if !strings.Contains(u, want) {
 			t.Fatalf("unit 应含 %q:\n%s", want, u)
 		}
+	}
+}
+
+// TestPickHostBinary install 二进制选择优先级：[agent].push_binary 平台表 >
+// 同平台用控制端自身 > 同级 bin 目录；全未命中 false（该主机报错）。
+func TestPickHostBinary(t *testing.T) {
+	const self = "darwin_arm64"
+	cfg := map[string]string{"linux_amd64": "/opt/wdp-linux-amd64"}
+	sibling := func(platform string) (string, bool) {
+		if platform == "linux_arm64" {
+			return "/bin/wdp-linux-arm64", true
+		}
+		return "", false
+	}
+
+	// 平台表命中（优先于自身与同级）
+	if b, ok := pickHostBinary("linux_amd64", self, "/exe", cfg, sibling); !ok || b != "/opt/wdp-linux-amd64" {
+		t.Fatalf("平台表应命中: %q %v", b, ok)
+	}
+	// 同平台用控制端自身（优先于同级）
+	if b, ok := pickHostBinary("darwin_arm64", self, "/exe", cfg, sibling); !ok || b != "/exe" {
+		t.Fatalf("同平台应用自身: %q %v", b, ok)
+	}
+	// 跨平台同级 bin 目录命中
+	if b, ok := pickHostBinary("linux_arm64", self, "/exe", cfg, sibling); !ok || b != "/bin/wdp-linux-arm64" {
+		t.Fatalf("同级 bin 目录应命中: %q %v", b, ok)
+	}
+	// 全未命中 → false（install 该主机报错）
+	if _, ok := pickHostBinary("linux_386", self, "/exe", cfg, sibling); ok {
+		t.Fatal("全未命中应返回 false")
+	}
+	// nil cfg / nil sibling 不 panic
+	if b, ok := pickHostBinary("linux_arm64", self, "/exe", nil, sibling); !ok || b != "/bin/wdp-linux-arm64" {
+		t.Fatalf("nil cfg 应回退同级: %q %v", b, ok)
+	}
+	if _, ok := pickHostBinary("linux_arm64", self, "/exe", cfg, nil); ok {
+		t.Fatal("nil sibling 且未配置平台表应 false")
 	}
 }
 

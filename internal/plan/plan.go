@@ -34,6 +34,13 @@ const (
 	MaxTotalBytes int64 = 256 << 20 // 全部文件合计 256MiB
 )
 
+// 阈值以变量形式参与判定：测试用小型临时文件即可覆盖"超限转 payload /
+// 总量超限报错"两条分支，无需真的写出 32MiB 制品。生产路径恒等于上面的常量。
+var (
+	maxFileBytes  = MaxFileBytes
+	maxTotalBytes = MaxTotalBytes
+)
+
 // Plan 是一次执行的完全解析产物。
 type Plan struct {
 	SchemaVer  int               `json:"schema"`      // 结构版本（当前 1）

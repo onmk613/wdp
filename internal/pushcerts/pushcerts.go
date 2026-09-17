@@ -75,7 +75,10 @@ func Reset() {
 // 与 wdp ca init/issue 同一套逻辑：会话 CA 落盘可复用（1 天有效期内跨进程
 // 共享信任链），轮换/到期重建目录即换代。
 func refreshDueLocked(dc *conn.Defaults) error {
-	dir := dc.PushCADirOrDefault()
+	dir, err := dc.PushCADirOrDefault()
+	if err != nil {
+		return err
+	}
 	interval := dc.AgentCertRotateMinOrDefault()
 	if store.certs != nil && store.dir == dir &&
 		(interval <= 0 || time.Since(store.at) <= time.Duration(interval)*time.Minute) {
@@ -90,6 +93,34 @@ func refreshDueLocked(dc *conn.Defaults) error {
 	return nil
 }
 
+// secureCADir 校验（必要时收紧）会话 CA 目录：目录本身、非符号链接、
+// 属主为当前用户、且无 group/other 权限位。会话 CA 是全部 push agent 的
+// 信任根——复用一套属主不明/权限过宽的既有材料等于接受未知私钥。
+func secureCADir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return os.MkdirAll(dir, 0o700)
+		}
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("push session CA directory %s is a symbolic link; refusing to reuse it (point [agent].push_ca_dir at a directory you own)", dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("push session CA path %s exists and is not a directory", dir)
+	}
+	if uid, ok := dirOwnerUID(fi); ok && int(uid) != os.Geteuid() {
+		return fmt.Errorf("push session CA directory %s is owned by uid %d, not the current user (%d); refusing to reuse it", dir, uid, os.Geteuid())
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("push session CA directory %s has permissions %04o and could not be tightened: %w", dir, perm, err)
+		}
+	}
+	return nil
+}
+
 // LoadOrCreate 加载或重建 push 会话 CA（全部产物在 dir 内）：
 //   - CA 缺失/过期/密钥不匹配 → 清掉旧产物重新 init（1 天，CN=wdp-push-ca）
 //   - 叶子证书缺失或过期 → 按同名补签（server: SAN=wdp-push-server；
@@ -97,7 +128,7 @@ func refreshDueLocked(dc *conn.Defaults) error {
 //
 // 产物即普通 wdp ca 产物，`wdp ca show <dir>/ca.crt` 可直接检视。
 func LoadOrCreate(dir string) (*Session, error) {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := secureCADir(dir); err != nil {
 		return nil, err
 	}
 	caCrt, caKey := filepath.Join(dir, ca.DefaultCAFile), filepath.Join(dir, ca.DefaultKeyFile)

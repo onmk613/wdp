@@ -15,8 +15,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
+	"wdp/internal/agentbin"
 	"wdp/internal/ca"
 	"wdp/internal/conn"
 	"wdp/internal/conn/sshc"
@@ -56,9 +59,9 @@ WantedBy=multi-user.target
 		filepath.Join(dir, "agent.key"), logFile)
 }
 
-// Install 逐主机安装：SSH 推自身二进制 + 逐主机签发服务端证书 +
-// 安装 systemd 单元并启动 + 可选 mTLS 验证。与 retire 对称：retire 负责
-// 退役清理，install 负责上线。
+// Install 逐主机安装：SSH 推与目标机平台匹配的二进制 + 逐主机签发服务端
+// 证书 + 安装 systemd 单元并启动 + 可选 mTLS 验证。与 retire 对称：retire
+// 负责退役清理，install 负责上线。
 func Install(ctx context.Context, hosts []*model.Host, o Options, forks int, dc *conn.Defaults, out io.Writer) error {
 	if err := validateOptions(o); err != nil {
 		return err
@@ -82,12 +85,17 @@ func Install(ctx context.Context, hosts []*model.Host, o Options, forks int, dc 
 		}
 		defer ssh.Close()
 
-		// 1. 二进制（仅缺失或版本不同才重推：幂等重装不无谓覆盖）
+		// 1. 二进制：按目标机平台选本地文件（install 是显式操作，选不出
+		// 该主机直接报错，不降级推送注定跑不起来的二进制）
+		local, err := resolveHostBinary(ctx, ssh, exe, dc)
+		if err != nil {
+			return fmt.Errorf("select binary: %w", err)
+		}
 		if err := sshRun(ctx, ssh, fmt.Sprintf(
 			"mkdir -p %s", quoteSh(filepath.Dir(o.BinPath)))); err != nil {
 			return err
 		}
-		bin, err := os.Open(exe)
+		bin, err := os.Open(local)
 		if err != nil {
 			return err
 		}
@@ -128,4 +136,47 @@ func Install(ctx context.Context, hosts []*model.Host, o Options, forks int, dc 
 		return nil
 	})
 	return summarize(failed, len(hosts))
+}
+
+// resolveHostBinary 探测目标机平台并选择本地 agent 二进制（优先级见
+// pickHostBinary）。探测失败或平台无法识别返回错误。
+func resolveHostBinary(ctx context.Context, ssh *sshc.Conn, selfExe string, dc *conn.Defaults) (string, error) {
+	self := runtime.GOOS + "_" + runtime.GOARCH
+	out, err := ssh.Exec(ctx, conn.ExecRequest{Script: "uname -sm 2>/dev/null", TimeoutMs: 5_000})
+	if err != nil {
+		return "", fmt.Errorf("detect platform: %w", err)
+	}
+	platform := ""
+	if out.Code == 0 {
+		platform = agentbin.FromUname(out.Stdout)
+	}
+	if platform == "" {
+		return "", fmt.Errorf("cannot detect target platform (uname -sm: %q); binary selection requires a Linux/Darwin target", strings.TrimSpace(out.Stdout))
+	}
+	var cfg map[string]string
+	if dc != nil {
+		cfg = dc.PushBinary
+	}
+	if b, ok := pickHostBinary(platform, self, selfExe, cfg, agentbin.SiblingPath); ok {
+		return b, nil
+	}
+	return "", fmt.Errorf("no local binary for target platform %s: run wdp from a build.sh bin directory (expected sibling %s next to the executable), or set [agent].push_binary.%s in wdp.cfg",
+		platform, agentbin.FileName(platform), platform)
+}
+
+// pickHostBinary 纯选择逻辑：[agent].push_binary 平台表 > 同平台用控制端
+// 自身 > 控制端可执行文件同级的 wdp-<os>-<arch>（build.sh 全集构建产物）。
+func pickHostBinary(platform, selfPlatform, selfExe string, cfg map[string]string, sibling func(string) (string, bool)) (string, bool) {
+	if b := cfg[platform]; b != "" {
+		return b, true
+	}
+	if platform == selfPlatform {
+		return selfExe, true
+	}
+	if sibling != nil {
+		if b, ok := sibling(platform); ok {
+			return b, true
+		}
+	}
+	return "", false
 }

@@ -99,6 +99,21 @@ func (c *Chart) redactSensitive(values map[string]any) map[string]any {
 	return replacePaths(values, c.Meta.SensitiveValues, RedactedValue)
 }
 
+// RedactValues 返回把敏感点路径替换为占位符的深拷贝（始终拷贝，路径为空
+// 时也是独立副本）。控制端审计记录（~/.wdp/releases）与 plan 快照同样
+// 落盘 values，chart 作者声明的敏感键不应绕过 marker 口径出现在那里。
+func (c *Chart) RedactValues(values map[string]any) map[string]any {
+	return RedactValues(c.Meta.SensitiveValues, values)
+}
+
+// RedactValues 按敏感点路径脱敏（无 chart 上下文时的入口，如 plan 快照）。
+func RedactValues(paths []string, values map[string]any) map[string]any {
+	if len(paths) == 0 {
+		return deepCopyValues(values)
+	}
+	return replacePaths(values, paths, RedactedValue)
+}
+
 // MarkerContent 构造 marker JSON 内容（phase 为产生本次 release 的相位，
 // 空串按 deploy）。v2：记录 resolved values（敏感键脱敏），摘要按脱敏前
 // 剔除敏感键的口径计算。

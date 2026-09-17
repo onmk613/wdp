@@ -42,6 +42,9 @@ myapp/
 
 ## chart.yaml 字段
 
+完整字段表（含类型/缺省值/相位属性，与解析器同源、永不漂移）用
+`wdp schema chart` 查看（`--json` 机器可读）；下表是同一份清单的注释版。
+
 ```yaml
 name: myapp                     # 必需
 version: 0.1.0
@@ -63,9 +66,13 @@ inventory_override:             # values 键白名单：允许 inventory 组/主
                                 # lint 校验键必须是 values 顶层键；marker/drift
                                 # 的 values 摘要不含覆盖结果
 
+sensitive_values:               # 敏感 values 点路径：marker 落盘/摘要一律脱敏
+  - db.password                 # （详见下文"敏感值：sensitive_values"）
+
 phases:                         # 自定义相位属性声明（可选，见"生命周期"）
   update: {release: true}       # 例：update 相位视同一次部署
   stop: {}                      # 例：普通相位（零值缺省，可省略）
+  status: {values_from: marker} # 例：只读相位改读各主机已部署入参
 ```
 
 ## values schema 校验（values.schema.json）
@@ -230,29 +237,43 @@ wdp run ./myapp --phase download -i inv.yaml   # 自定义相位：准备离线�
   （marker 内容、应用产物探测）
 - 自定义相位任意命名（`update.yaml`/`stop.yaml`/`download.yaml`…），未知的
   `--phase` 报错并列出 chart 实际提供的相位
-- 全相位支持 `--check` / `--diff` 预演
+- 全相位支持 `--check` / `--diff` 预演；**任意相位**都可静态预览：
+  `wdp render ./myapp --phase uninstall`（不连主机，看合并 values + 模板 + 任务树）
 
 ### 相位属性：chart.yaml phases 声明
 
 文件名决定"跑哪些任务"，相位**属性**决定语义（是否视同部署、marker 处置、
-是否记部署记录）。内置缺省：
+是否记部署记录、**values 从哪来**）。内置缺省：
 
-| 相位 | release | record | clears_marker | 语义 |
-|---|---|---|---|---|
-| `deploy` | ✔ | ✔ | - | 部署：required 校验、可逆性确认、写 marker、记部署记录 |
-| `uninstall` | - | ✔ | ✔ | 卸载：清 marker、记部署记录（卸载留痕） |
-| `status` | - | - | - | 只读：不记部署记录 |
-| 自定义（未声明） | - | - | - | 普通相位：只跑任务 |
+| 相位 | release | record | clears_marker | values_from | 语义 |
+|---|---|---|---|---|---|
+| `deploy` | ✔ | ✔ | - | chart | 部署：required 校验、可逆性确认、写 marker、记部署记录 |
+| `uninstall` | - | ✔ | ✔ | marker | 卸载：按"当初实际部署了什么"删，清 marker、记部署记录（卸载留痕） |
+| `status` | - | - | - | chart | 只读：读 chart values（要按已部署入参探测时声明 `values_from: marker`） |
+| 自定义（未声明） | - | - | - | chart | 普通相位：只跑任务（`download` 在从未部署的主机上也能跑） |
 
 ```yaml
 phases:
-  update: {release: true}   # update 视同一次部署（写 marker / 记录 / 部署前确认）
-  backup: {record: true}    # 只记部署记录，不写 marker 不做部署前确认
-  purge: {clears_marker: true}
+  update: {release: true}        # update 视同一次部署（写 marker / 记录 / 部署前确认）
+  backup: {record: true}         # 只记部署记录，不写 marker 不做部署前确认
+  purge: {clears_marker: true}   # 成功后清除 marker（values 随之改读 marker）
+  status: {values_from: marker}  # 只读相位改读各主机已部署入参
 ```
 
 - `release: true` 隐含 `record`；声明只能**追加**内置缺省，不能关闭
 - lint 校验声明键与相位文件匹配（声明了 `bakcup:` 但没有 `bakcup.yaml` 会告警）
+
+**values 来源规则**（`values_from: chart | marker`）：
+
+- `chart`（缺省）：chart 默认 values + `-f`/`--set` 覆盖——"这次要部署成什么样"；
+- `marker`：各主机 release marker 记录的实际部署入参 + `-f`/`--set` 显式覆盖
+  ——卸载类相位必须按"当初实际部署了什么"删；
+- 未显式声明时按相位推导：`clears_marker` 相位（uninstall/purge）取 marker，
+  **其余相位（含 `status` 与自定义相位）一律取 chart**；
+- 这条规则此前是隐式的（非 release 相位一律读 marker），把 `status`、`download`
+  这类纯准备/只读相位也拖进了"必须先部署过"的前提——从未部署的主机上
+  `wdp run <chart> --phase download` 直接失败，现已修正；
+- `values_from` 是相位属性里唯一**覆盖**语义的字段（其余属性只能追加内置缺省）。
 
 ### hook 任务
 
@@ -263,6 +284,7 @@ phases:
 |---|---|
 | `pre_install` | deploy 主任务序列之前 |
 | `post_install` | deploy 全部成功（含 handlers flush）之后 |
+| `pre_deploy` / `post_deploy` | `pre_install` / `post_install` 的**等价别名**（按"词干即相位名"的直觉写也认，内部归一化到 install 词干） |
 | `pre_uninstall` / `post_uninstall` | uninstall 主任务之前 / 之后 |
 | `pre_update` / `post_stop` … | 任意自定义相位的 pre/post |
 
@@ -279,8 +301,34 @@ deploy（及声明 `release` 的相位）成功后每台主机写入：
 ```
 
 内容：chart 名 / 版本 / 产生本次 release 的相位 / values 摘要（sha256 前 12 位）/
-部署时间 / wdp 版本。uninstall（及 `clears_marker` 相位）成功后自动清除。这是
-status 相位与漂移检测的数据地基；`no_marker: true` 禁用。
+**resolved values 快照**（marker schema v2，供卸载等相位还原实际入参；敏感键按
+`sensitive_values` 脱敏）/ 部署时间 / wdp 版本。uninstall（及 `clears_marker` 相位）
+成功后自动清除。这是 status 相位与漂移检测的数据地基；`no_marker: true` 禁用。
+
+### 敏感值：sensitive_values
+
+chart.yaml 的 `sensitive_values` 是 values 点路径列表（支持 `a.b[0]`），声明
+"这些键一律不落盘"——让"敏感值不落盘"从约定变成由工具强制：
+
+```yaml
+sensitive_values: [db.password, api.token]
+```
+
+生效范围（与 marker 同一脱敏口径）：
+
+| 落盘位置 | 行为 |
+|---|---|
+| 目标机 release marker（`release.json`） | 这些键写成 `<redacted>` 占位（其余键照常记录） |
+| drift 摘要 | 脱敏键**不参与**摘要计算——真实敏感值变化不构成 drift 信号 |
+| 控制端部署记录 `~/.wdp/releases/*.json` | 同样脱敏；`wdp release show <id> --values` 会提示快照含占位符 |
+| plan 快照（`wdp plan -o plan.json`） | 同样脱敏（计划内嵌的 values 不因落在控制端就明文） |
+
+两点注意：
+
+- 从 marker 还原入参的相位（`uninstall` 等 `clears_marker` 相位）拿到的是占位值
+  ——卸载若需要真实敏感值，用 `-f`/`--set` 显式补齐；
+- 回放快照（`wdp release show <id> --values` 喂回 `-f`）前必须先补真实敏感值，
+  否则会把 `<redacted>` 当真实值写进目标机。
 
 ### 部署前可逆性确认
 

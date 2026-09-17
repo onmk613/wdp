@@ -42,7 +42,7 @@ web1: {host: 10.0.0.11, port: 22, conn: ssh, user: deploy}
 			Fields: []model.FieldDoc{
 				{Name: "password", Type: "string", Default: "密钥认证", Desc: "SSH 密码（支持 \"env:VAR\" 引用环境变量，避免清单明文）", GoField: "Password"},
 				{Name: "password_env", Type: "string", Default: "-", Desc: "SSH 密码环境变量名（password 的显式 env 形式）", GoField: "PasswordEnv"},
-				{Name: "key_path", Type: "string", Default: "~/.ssh/id_ed25519、id_rsa", Desc: "私钥路径；显式给出时优先于 ~/.ssh/config 的 IdentityFiles", GoField: "KeyPath"},
+				{Name: "key_path", Type: "string", Default: "~/.ssh/id_ed25519、id_ecdsa、id_rsa", Desc: "私钥路径；显式给出时优先于 ~/.ssh/config 的 IdentityFiles", GoField: "KeyPath"},
 				{Name: "key_passphrase", Type: "string", Default: "-", Desc: "私钥口令（支持 \"env:VAR\"）", GoField: "KeyPassphrase"},
 				{Name: "key_passphrase_env", Type: "string", Default: "-", Desc: "私钥口令环境变量名", GoField: "KeyPassphraseEnv"},
 			},

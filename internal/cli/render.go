@@ -21,8 +21,9 @@ const renderHelp = `
 chart 静态渲染预览（不执行、不连主机）
 
 输出三段：合并后的 values（defaults + -f/--set 深合并）、全部模板文件的渲染
-结果、deploy 任务清单（chart 引用展开一层，与执行侧同口径）
+结果、指定相位的任务清单（chart 引用展开一层，与执行侧同口径）
 渲染用样例域：合并 values + --hostname 占位主机名（默认 preview-host）
+--phase 选择要预览的相位（缺省 deploy；uninstall/status/自定义相位同 chart 语义）
 预览不加载 inventory：声明了 inventory_override 的键实际值可能被 inventory
 同名变量覆盖，此处只反映 chart values 口径
 要看"真机现状下会改什么"用 wdp run --check（连主机、只读探测 + 变更预估）
@@ -30,6 +31,7 @@ chart 静态渲染预览（不执行、不连主机）
 示例：
 wdp render ./myapp
 wdp render ./myapp -f envs/prod.yaml --hostname web1
+wdp render ./myapp --phase uninstall
 `
 
 // newRenderCmd 构造 `wdp render`：chart 静态渲染预览（不执行；执行侧
@@ -37,6 +39,7 @@ wdp render ./myapp -f envs/prod.yaml --hostname web1
 func newRenderCmd() *cobra.Command {
 	var (
 		hostname             string
+		phase                string
 		valuesFiles, setArgs []string
 	)
 	cmd := &cobra.Command{
@@ -50,6 +53,11 @@ func newRenderCmd() *cobra.Command {
 				return err
 			}
 			defer ch.Close()
+			// 相位清单：与执行侧同口径（未知相位报错并列出可用相位）
+			plays, err := ch.PhasePlays(phase)
+			if err != nil {
+				return err
+			}
 
 			out := cmd.OutOrStdout()
 			sample := sampleDomain(values, hostname)
@@ -83,7 +91,7 @@ func newRenderCmd() *cobra.Command {
 			}
 
 			fmt.Fprintln(out, "========== TASKS ==========")
-			for _, p := range ch.Deploy {
+			for _, p := range plays {
 				fmt.Fprintf(out, "play [%s] hosts=%s\n", p.Name, p.Hosts)
 				printTasks(out, p.Tasks, sample, eng, ch, "")
 			}
@@ -92,6 +100,8 @@ func newRenderCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&hostname, "hostname", "preview-host",
 		"inventory_hostname placeholder for preview")
+	cmd.Flags().StringVar(&phase, "phase", "",
+		"lifecycle phase to preview (default deploy; any <phase>.yaml at the chart root)")
 	chartValueFlags(cmd, &valuesFiles, &setArgs)
 	return cmd
 }

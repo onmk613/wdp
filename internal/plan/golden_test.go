@@ -47,6 +47,11 @@ func TestGoldenExamples(t *testing.T) {
 			if err != nil {
 				t.Fatalf("compile %s: %v", example, err)
 			}
+			// 环境无关归一化：packages/ 制品缓存是否存在于本地不影响 golden
+			// 语义（examples/*/packages 是 .gitignore 的下载产物，全新 clone
+			// 必然不存在）。payload 采集机制由 TestCompilePayloads 单独覆盖。
+			p.Payloads = nil
+			p.FillID()
 			got, err := json.MarshalIndent(p, "", "  ")
 			if err != nil {
 				t.Fatal(err)

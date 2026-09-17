@@ -1,6 +1,9 @@
 package render
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestEngineNamedTemplate(t *testing.T) {
 	e, err := NewEngine(`{{ define "app.name" }}{{ .name }}-{{ .env }}{{ end }}`)
@@ -27,6 +30,49 @@ func TestEngineIncludeWithPipe(t *testing.T) {
 		t.Fatal(err)
 	}
 	if out != "PORT=8080" {
+		t.Fatalf("got %q", out)
+	}
+}
+
+// TestEngineRecursiveIncludeErrors 自引用/互引用的 helper 必须返回错误，
+// 而不是把进程吃到栈溢出（Go 的 maxExecDepth 只保护 {{template}} 动作，
+// 普通函数递归不受保护，栈溢出是 fatal error，不可 recover）。
+func TestEngineRecursiveIncludeErrors(t *testing.T) {
+	cases := map[string]string{
+		"self": `{{ define "loop" }}{{ include "loop" . }}{{ end }}`,
+		"mutual": `{{ define "a" }}{{ include "b" . }}{{ end }}` +
+			`{{ define "b" }}{{ include "a" . }}{{ end }}`,
+	}
+	for name, helpers := range cases {
+		t.Run(name, func(t *testing.T) {
+			e, err := NewEngine(helpers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entry := "loop"
+			if name == "mutual" {
+				entry = "a"
+			}
+			if _, err := e.Render(`{{ include "`+entry+`" . }}`, map[string]any{}); err == nil ||
+				!strings.Contains(err.Error(), "include depth exceeded") {
+				t.Fatalf("递归 include 应报深度超限: %v", err)
+			}
+		})
+	}
+}
+
+// TestEngineNestedIncludeStillWorks 深度计数不能误伤合法嵌套。
+func TestEngineNestedIncludeStillWorks(t *testing.T) {
+	e, err := NewEngine(`{{ define "outer" }}[{{ include "inner" . }}]{{ end }}` +
+		`{{ define "inner" }}{{ .v }}{{ end }}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := e.Render(`{{ include "outer" . }}`, map[string]any{"v": "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "[x]" {
 		t.Fatalf("got %q", out)
 	}
 }

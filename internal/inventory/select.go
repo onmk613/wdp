@@ -142,8 +142,14 @@ func (inv *Inventory) matchSegment(seg string) (map[string]bool, error) {
 		return out, nil
 	case strings.ContainsAny(seg, "*?["):
 		matched := false
+		// 非法通配模式（如未闭合的 '['）必须报模式错误，而不是静默当成
+		// "没有匹配"——`wdp inventory '['` 此前给出的是误导性的空结果
 		for name, g := range inv.Groups {
-			if ok, _ := path.Match(seg, name); ok {
+			ok, err := path.Match(seg, name)
+			if err != nil {
+				return nil, fmt.Errorf("invalid host pattern %q: %w", seg, err)
+			}
+			if ok {
 				matched = true
 				for _, h := range expandGroup(inv, g, map[string]bool{}) {
 					out[h] = true
@@ -151,7 +157,11 @@ func (inv *Inventory) matchSegment(seg string) (map[string]bool, error) {
 			}
 		}
 		for _, h := range inv.Hosts {
-			if ok, _ := path.Match(seg, h.Name); ok {
+			ok, err := path.Match(seg, h.Name)
+			if err != nil {
+				return nil, fmt.Errorf("invalid host pattern %q: %w", seg, err)
+			}
+			if ok {
 				matched = true
 				out[h.Name] = true
 			}

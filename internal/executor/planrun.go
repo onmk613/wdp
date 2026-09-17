@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"wdp/internal/chart"
 	"wdp/internal/inventory"
@@ -60,8 +61,10 @@ func (e *Executor) RunPlan(ctx context.Context, p *plan.Plan) bool {
 		return true
 	}
 
-	// 计划内主机清单 → 合成 inventory（连接元数据来自计划；hosts 模式一律
-	// all——目标主机集合已在编译期固化，不再按模式重选）
+	// 计划内主机清单 → 合成 inventory（连接元数据来自计划）。hosts 模式
+	// 不能一律 all：编译期是逐 play 选主机（plan/compile.go），一个 chart
+	// 的多个 play 往往作用于不同主机组，全 all 会让后续 play 跑到不属于
+	// 它的主机上。每个 play 用一个只含自己成员的合成组，见 playsOf。
 	var hosts []*model.Host
 	seen := map[string]bool{}
 	for _, name := range p.Host() {
@@ -74,14 +77,21 @@ func (e *Executor) RunPlan(ctx context.Context, p *plan.Plan) bool {
 			break
 		}
 	}
+	// 冻结变量域按 (playIdx, host) 索引：同一主机出现在多个 play 时，
+	// 各 play 的 play vars/play_hosts 快照不同，不能以主机名为键互相覆盖。
 	hostValues := make(map[string]map[string]any, len(p.Hosts))
 	planVars := make(map[string]map[string]any, len(p.Hosts))
 	for _, hp := range p.Hosts {
-		hostValues[hp.Host] = hp.Values
-		planVars[hp.Host] = hp.Vars
+		hostValues[planScopeKey(hp.PlayIdx, hp.Host)] = hp.Values
+		planVars[planScopeKey(hp.PlayIdx, hp.Host)] = hp.Vars
 	}
 
+	byName := make(map[string]*model.Host, len(hosts))
+	for _, h := range hosts {
+		byName[h.Name] = h
+	}
 	e.Inv = inventory.FromHosts(hosts)
+	e.Inv.Groups = planPlayGroups(p, byName) // 每个 play 的合成组（playsOf 以组名选主机）
 	e.Opts.Chart = ch
 	e.Opts.BaseDir = root
 	e.Opts.Values = p.Values
@@ -124,6 +134,10 @@ func (e *Executor) supplyPayloads(p *plan.Plan, root string) error {
 // 分片合成一个 play（任务清单在编译期由同一 play 产出，取首条即可），
 // pre/post hook 任务按原 Hook 标记拼回主列表——runPlay 的 hook 拆分是
 // 幂等的，重建后再拆结果一致。
+//
+// Hosts 取该 play 的合成组名而非 "all"：编译期是逐 play 选主机的，多 play
+// chart 的各 play 常作用于不同主机组，"all" 会把后续 play 下发到不属于它的
+// 主机（合成 inventory 是全 plan 主机的并集）。
 func playsOf(p *plan.Plan) []*model.Play {
 	var idxs []int
 	byIdx := map[int]*plan.HostPlan{}
@@ -138,7 +152,8 @@ func playsOf(p *plan.Plan) []*model.Play {
 		hp := byIdx[idx]
 		play := &model.Play{
 			Name:        hp.Play.Name,
-			Hosts:       "all",
+			Hosts:       planPlayGroupName(idx),
+			PlanIdx:     idx,
 			Become:      hp.Play.Become,
 			BecomeUser:  hp.Play.BecomeUser,
 			Serial:      hp.Play.Serial,
@@ -158,6 +173,44 @@ func playsOf(p *plan.Plan) []*model.Play {
 		plays = append(plays, play)
 	}
 	return plays
+}
+
+// planPlayGroupName 返回 play 的合成组名。合成 inventory 里不存在真实组，
+// 该名字只用于"按编译期固化的主机集合选主机"。
+func planPlayGroupName(playIdx int) string {
+	return fmt.Sprintf("__wdp_play_%d", playIdx)
+}
+
+// planScopeKey 是 plan 执行模式下"每主机 values / 冻结变量域"的键。同一
+// 主机可能出现在多个 play（各 play 的 play vars 与 play_hosts 快照不同），
+// 仅以主机名为键会让后一个 play 的冻结值覆盖前一个。
+func planScopeKey(playIdx int, host string) string {
+	return strconv.Itoa(playIdx) + "|" + host
+}
+
+// planPlayGroups 为每个 play 构造只含其成员主机的合成组（成员指针取自
+// 合成 inventory，保证与连接元数据是同一对象）。
+func planPlayGroups(p *plan.Plan, byName map[string]*model.Host) map[string]*model.Group {
+	groups := map[string]*model.Group{}
+	seen := map[int]map[string]bool{}
+	for _, hp := range p.Hosts {
+		name := planPlayGroupName(hp.PlayIdx)
+		g := groups[name]
+		if g == nil {
+			g = &model.Group{Name: name}
+			groups[name] = g
+			seen[hp.PlayIdx] = map[string]bool{}
+		}
+		if seen[hp.PlayIdx][hp.Host] {
+			continue
+		}
+		seen[hp.PlayIdx][hp.Host] = true
+		if h := byName[hp.Host]; h != nil {
+			g.Hosts = append(g.Hosts, h)
+			g.HostNames = append(g.HostNames, hp.Host)
+		}
+	}
+	return groups
 }
 
 // fileSHA256Path 计算文件摘要（不存在时返回错误）。

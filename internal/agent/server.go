@@ -207,6 +207,11 @@ func (s *Server) serve(ln net.Listener) error {
 	srv := &http.Server{
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// 读写超时保持不限：大文件上传（/upload）与长任务 exec 的响应都可能
+		// 远超任何固定超时，超时策略由各 handler 的 LimitReader 与任务级
+		// timeout 控制；空闲连接与请求头大小必须收紧（连接/内存资源耗尽）。
+		IdleTimeout:    120 * time.Second,
+		MaxHeaderBytes: 1 << 20,
 	}
 	s.httpSrv.Store(srv)
 	go s.watchIdle()

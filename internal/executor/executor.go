@@ -170,13 +170,14 @@ func (s *playState) takeJournal(host string) []journalEntry {
 }
 
 // splitHookTasks 按生命周期相位切分任务：hook 标记 pre_<phase>/post_<phase>
-// 的任务归 pre/post（deploy 相位沿用历史命名 pre_install/post_install），无
-// hook 的归主列表，其它相位的 hook 任务跳过（uninstall 时不跑 install hook）。
+// 的任务归 pre/post（deploy 相位沿用历史命名 pre_install/post_install，
+// pre_deploy 等价），无 hook 的归主列表，其它相位的 hook 任务跳过（uninstall
+// 时不跑 install hook）。
 func splitHookTasks(tasks []*model.Task, phase string) (pre, post, main []*model.Task) {
 	preHook := "pre_" + chart.HookNameFor(phase)
 	postHook := "post_" + chart.HookNameFor(phase)
 	for _, t := range tasks {
-		switch t.Hook {
+		switch chart.NormalizeHook(t.Hook) {
 		case preHook:
 			pre = append(pre, t)
 		case postHook:

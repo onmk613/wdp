@@ -16,6 +16,10 @@ type Play struct {
 	Strategy    *Strategy         `yaml:"-"`           // 手工解析：部署策略（nil = 传统线性语义）
 	Tasks       []*Task           `yaml:"-"`           // 手工解析：主任务列表（单键 map 模块语法）
 	Handlers    []*Task           `yaml:"-"`           // 手工解析：处理器（notify 触发，play 末尾 flush）
+	// PlanIdx 是 plan 执行模式下的 play 序号（编译期 plan.HostPlan.PlayIdx，
+	// 非 plan 路径恒为 0）。执行器用它定位 (play, 主机) 维度的冻结变量域与
+	// 每主机 values——同一主机可出现在多个 play，仅按主机名索引会互相覆盖。
+	PlanIdx int `yaml:"-"`
 }
 
 // Strategy 是 play 级部署策略：分批节奏 + 批间健康门 + 失败自动回滚。

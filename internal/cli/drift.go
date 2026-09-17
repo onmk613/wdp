@@ -10,6 +10,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 	"wdp/internal/drift"
 	"wdp/internal/executor"
 	"wdp/internal/model"
+	"wdp/internal/report"
 
 	"github.com/spf13/cobra"
 )
@@ -109,14 +111,24 @@ func runDrift(ctx context.Context, target, pattern, limit string, valuesFiles, s
 	defer stop()
 	_ = ex.Run(ctx, []*model.Play{drift.ReadMarkerPlay(ch.Meta.Name, ch.MarkerPath(), pattern)})
 	conns.CloseAll()
-	finish()
 
 	// 汇总：逐主机比对 marker 与当前 values 摘要（敏感键口径与 marker 写入
 	// 一致；marker v2 时 DRIFTED 附字段级差异）
 	wantSHA := ch.ValuesDigestOf(values)
 	rows, failed := drift.Classify(hosts, capture.Results(), ch.Meta.Version, wantSHA, values)
 
-	out := os.Stdout
+	// 逐主机结论：JSON 模式必须让 stdout 只含最终 JSON 文档（人类可读摘要
+	// 改走 stderr，同时把分类行进 JSON 的 drift 字段供 CI 解析）。附加字段
+	// 必须在 finish 之前写入——JSON 文档在 Finish 时一次性输出。
+	out := io.Writer(os.Stdout)
+	if gOutput == "json" {
+		out = os.Stderr
+		if js, ok := rep.(*report.JSONReporter); ok {
+			js.SetExtra("drift", rows)
+		}
+	}
+	finish()
+
 	fmt.Fprintf(out, "chart %s %s  expected values sha %s\n", ch.Meta.Name, ch.Meta.Version, wantSHA)
 	for _, r := range rows {
 		fmt.Fprintf(out, "  %-28s %-13s %s\n", r.Host, r.State, r.Detail)
