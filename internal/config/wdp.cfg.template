@@ -1,0 +1,17 @@
+# wdp 配置文件（TOML 格式）
+[inventory]
+path = "inventory.yaml"
+
+[run]
+forks = 20
+task_timeout = 300
+# 默认连接类型（空 = agent；可选 agent/local）。fleet 级默认放这里，
+# inventory 组 vars / 主机条目按序覆盖（优先级见 docs/04）
+# conn = "agent"
+
+[agent]
+port = 7602
+
+[transfer]
+max_download_mb = 2048
+max_extract_mb = 2048

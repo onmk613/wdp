@@ -1,0 +1,194 @@
+package executor
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"wdp/internal/chart"
+	"wdp/internal/conn"
+	"wdp/internal/model"
+)
+
+// TestBuiltinVars 验证 play_hosts/play_batch/groups/hosts 注入与模板可用性。
+func TestBuiltinVars(t *testing.T) {
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
+	})
+	plays := []*model.Play{{
+		Hosts: "webservers",
+		Tasks: []*model.Task{
+			{Name: "展开内置变量", Module: "shell",
+				FreeForm: `self={{ .inventory_hostname }} batch={{ len .play_batch }} total={{ len .play_hosts }} group={{ index .groups "webservers" }} addr={{ (index .hosts "h2").address }}`},
+		},
+	}}
+	if ex.Run(context.Background(), plays) {
+		t.Fatalf("不应失败:\n%s", rep.joined())
+	}
+	scripts := joinExecScripts(allFakes())
+	if !strings.Contains(scripts, "self=h1 batch=2 total=2") {
+		t.Fatalf("内置变量渲染错误:\n执行记录:\n%s\n结果:\n%s", scripts, rep.joined())
+	}
+	if !strings.Contains(scripts, "group=[h1 h2]") {
+		t.Fatalf("groups 渲染错误:\n%s", scripts)
+	}
+	if !strings.Contains(scripts, "addr=h2") {
+		t.Fatalf("hosts 元信息渲染错误:\n%s", scripts)
+	}
+}
+
+// TestBuiltinVarsImmutable 验证内置变量不可被 play vars 覆盖。
+func TestBuiltinVarsImmutable(t *testing.T) {
+	ex, _ := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
+	})
+	plays := []*model.Play{{
+		Hosts: "h1",
+		Vars:  map[string]any{"play_hosts": "被覆盖的值"},
+		Tasks: []*model.Task{
+			{Name: "验证", Module: "shell", FreeForm: "n={{ len .play_hosts }}"},
+		},
+	}}
+	if ex.Run(context.Background(), plays) {
+		t.Fatal("不应失败")
+	}
+	if !strings.Contains(joinExecScripts(allFakes()), "n=1") {
+		t.Fatalf("play_hosts 被覆盖:\n%s", joinExecScripts(allFakes()))
+	}
+}
+
+// TestBuiltinVarsIdentityNotOverridable 回归：inventory_hostname/group_names
+// 曾只注入在变量叠加的最低层（inventory 层），play vars 可覆盖，
+// 与 README「不可被覆盖」承诺矛盾。现在必须在全部叠加之后强制注入。
+func TestBuiltinVarsIdentityNotOverridable(t *testing.T) {
+	ex, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0, Stdout: "ran: " + req.Script + "\n"}, nil
+	})
+	plays := []*model.Play{{
+		Hosts: "webservers",
+		Vars: map[string]any{
+			"inventory_hostname": "PWNED",
+			"group_names":        []any{"PWNED"},
+			"play_hosts":         []any{"PWNED"},
+			"groups":             map[string]any{"PWNED": []any{"PWNED"}},
+		},
+		Tasks: []*model.Task{
+			{Name: "验证", Module: "shell",
+				FreeForm: "self={{ .inventory_hostname }} grp={{ index .group_names 0 }} first={{ index .play_hosts 0 }}"},
+		},
+	}}
+	if ex.Run(context.Background(), plays) {
+		t.Fatalf("不应失败:\n%s", rep.joined())
+	}
+	scripts := joinExecScripts(allFakes())
+	if strings.Contains(scripts, "PWNED") {
+		t.Fatalf("内置变量被 play vars 覆盖:\n%s", scripts)
+	}
+	if !strings.Contains(scripts, "self=h1 grp=webservers first=h1") {
+		t.Fatalf("内置变量应保持真实值:\n%s", scripts)
+	}
+}
+
+// TestMarkerWriteAndRemove 验证 deploy 写 marker、uninstall 清除。
+func TestMarkerWriteAndRemove(t *testing.T) {
+	ch := &chart.Chart{}
+	ch.Meta.Name = "markerapp"
+	ch.Meta.MarkerDir = "/tmp/wdp-marker-test"
+
+	run := func(phase string) {
+		_, rep := setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+			return conn.ExecResult{Code: 0}, nil
+		})
+		_ = rep
+		// 直接构造执行器（复用 setupFeature 注册的 fake 工厂与 fakes 记录）
+		inv := parseTestInv(t)
+		rep2 := &captureReporter{}
+		ex := New(inv, conn.NewManager(), rep2, Options{
+			Forks: 2, Chart: ch, Phase: phase, WdpVersion: "test",
+			Values: map[string]any{},
+		})
+		plays := []*model.Play{{Hosts: "h1", Tasks: []*model.Task{
+			{Module: "shell", FreeForm: "true"},
+		}}}
+		if ex.Run(context.Background(), plays) {
+			t.Fatalf("phase=%s 不应失败", phase)
+		}
+	}
+
+	run("deploy")
+	fs := allFakes()
+	if len(fs) == 0 {
+		t.Fatal("无 fake")
+	}
+	markerPath := "/tmp/wdp-marker-test/markerapp/release.json"
+	content, ok := fs[0].File(markerPath)
+	if !ok {
+		t.Fatalf("marker 未写入: %#v", fs[0].Files)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(content), &m); err != nil {
+		t.Fatalf("marker 非法 JSON: %v", err)
+	}
+	if m["chart"] != "markerapp" || m["phase"] != "deploy" {
+		t.Fatalf("marker 内容: %s", content)
+	}
+
+	run("uninstall")
+	// uninstall 后 marker 被清除：只删 marker 文件 + rmdir 收敛空目录，
+	// 不再 rm -rf 整个 <marker_dir>/<name>（防 chart 名/目录被污染时误删）
+	scripts := joinExecScripts(allFakes())
+	if !strings.Contains(scripts, "rm -f -- '/tmp/wdp-marker-test/markerapp/release.json'") {
+		t.Fatalf("uninstall 未删除 marker 文件:\n%s", scripts)
+	}
+	if !strings.Contains(scripts, "rmdir -- '/tmp/wdp-marker-test/markerapp'") {
+		t.Fatalf("uninstall 未收敛空目录:\n%s", scripts)
+	}
+	if strings.Contains(scripts, "rm -rf") {
+		t.Fatalf("uninstall 不应再使用 rm -rf:\n%s", scripts)
+	}
+}
+
+// TestMarkerCustomPhase 相位属性驱动 marker：声明 release 的自定义相位
+// （update）成功后写 marker 并记录真实相位；普通相位（stop）不写不清。
+func TestMarkerCustomPhase(t *testing.T) {
+	setupFeature(t, false, func(host string, req conn.ExecRequest) (conn.ExecResult, error) {
+		return conn.ExecResult{Code: 0}, nil
+	})
+	ch := &chart.Chart{}
+	ch.Meta.Name = "markerapp"
+	ch.Meta.MarkerDir = "/tmp/wdp-marker-test"
+	ch.Meta.Phases = map[string]chart.PhaseSpec{"update": {Release: true}}
+
+	run := func(phase string) {
+		inv := parseTestInv(t)
+		ex := New(inv, conn.NewManager(), &captureReporter{}, Options{
+			Forks: 2, Chart: ch, Phase: phase, WdpVersion: "test", Values: map[string]any{},
+		})
+		plays := []*model.Play{{Hosts: "h1", Tasks: []*model.Task{{Module: "shell", FreeForm: "true"}}}}
+		if ex.Run(context.Background(), plays) {
+			t.Fatalf("phase=%s 不应失败", phase)
+		}
+	}
+
+	run("update")
+	fs := allFakes()
+	markerPath := "/tmp/wdp-marker-test/markerapp/release.json"
+	content, ok := fs[0].File(markerPath)
+	if !ok {
+		t.Fatalf("release 相位应写 marker: %#v", fs[0].Files)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(content), &m); err != nil {
+		t.Fatalf("marker 非法 JSON: %v", err)
+	}
+	if m["phase"] != "update" {
+		t.Fatalf("marker 应记录实际相位 update: %s", content)
+	}
+
+	run("stop")
+	scripts := joinExecScripts(allFakes())
+	if strings.Contains(scripts, "rm -f -- '/tmp/wdp-marker-test/markerapp/release.json'") {
+		t.Fatalf("普通相位不应清 marker:\n%s", scripts)
+	}
+}

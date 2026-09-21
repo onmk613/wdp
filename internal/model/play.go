@@ -1,0 +1,109 @@
+package model
+
+// Play 是 playbook 中的一个执行单元：选定一批主机，按顺序执行任务列表。
+// 简单字段带 yaml tag 由 playbook 包直接映射（新增简单字段只需打 tag，
+// 见 parsePlayNode）；特殊语义字段标 yaml:"-" 手工解析：
+// become（宽容 yes/no/on/off）、serial（批次表达式校验）、strategy
+// （默认值填充）、tasks/handlers（动态模块键语法）。
+type Play struct {
+	Name        string            `yaml:"name"`        // play 名称（可选）
+	Hosts       string            `yaml:"hosts"`       // 主机选择模式，如 all / webservers / web1,web2
+	Vars        map[string]any    `yaml:"vars"`        // play 级变量
+	Environment map[string]string `yaml:"environment"` // play 级环境变量
+	Become      bool              `yaml:"-"`           // 是否提权（手工解析：model.ParseBool 宽容布尔）
+	BecomeUser  string            `yaml:"become_user"` // 提权目标用户，缺省 root
+	Serial      string            `yaml:"-"`           // 手工解析：分批大小 "5"/"10%"/"5,10,20"（最后一个重复），空 = 一批
+	Strategy    *Strategy         `yaml:"-"`           // 手工解析：部署策略（nil = 传统线性语义）
+	Tasks       []*Task           `yaml:"-"`           // 手工解析：主任务列表（单键 map 模块语法）
+	Handlers    []*Task           `yaml:"-"`           // 手工解析：处理器（notify 触发，play 末尾 flush）
+	// PlanIdx 是 plan 执行模式下的 play 序号（编译期 plan.HostPlan.PlayIdx，
+	// 非 plan 路径恒为 0）。执行器用它定位 (play, 主机) 维度的冻结变量域与
+	// 每主机 values——同一主机可出现在多个 play，仅按主机名索引会互相覆盖。
+	PlanIdx int `yaml:"-"`
+}
+
+// Strategy 是 play 级部署策略：分批节奏 + 批间健康门 + 失败自动回滚。
+//
+//	type: rolling        # linear | rolling | canary
+//	batch: "10%"         # 每批主机数（百分比或绝对数，缺省 25%）
+//	gate:                # 批次完成且 handlers flush 后的健康门
+//	  shell: 'curl -sf http://localhost:8080/health'
+//	  until: '{{ if eq .result.rc 0 }}ok{{ end }}'   # 缺省即 rc==0
+//	  retries: 10
+//	  delay: 3
+//	auto_rollback: true  # 批次失败或门未过 → 回滚该批变更（文件快照恢复）
+type Strategy struct {
+	Type         string // linear | rolling | canary
+	Batch        string // 每批大小："10%" 或 "3"（空 = 25%）
+	Gate         *Task  // 健康门（shell 任务，复用 until 轮询机制）
+	AutoRollback bool   // 失败自动回滚（文件类变更快照恢复）
+}
+
+// Task 是单个任务。模块名作为 YAML key，其余为控制属性。
+type Task struct {
+	Name      string         // 任务名（可选，缺省用模块名）
+	Module    string         // 模块名，如 shell / copy；chart 引用时为 "chart"
+	ChartRef  string         // 子 chart 引用名（`chart: jdk` 或 `chart: {name: jdk}`），非空时展开为子 chart 任务序列
+	ChartVars map[string]any // chart 引用处附加注入的变量（`vars:`/`values:`，优先级最高）
+	// ChartValuesFrom 是 chart 引用的 values 覆盖文件（`values_from:`，相对
+	// playbook/chart 根目录，依序合并）；优先级在作用域子树之上、内联
+	// values 之下。
+	ChartValuesFrom []string
+	// ChartHosts 是 chart 引用的主机过滤选择器（`hosts:`）：当前 play 批次
+	// 与该选择器的交集，不在集合内的主机跳过该 chart 引用（不跨 play 重新
+	// 选主机——批次/串行/回滚语义保持在 play 级）。
+	ChartHosts string
+	TasksFrom  string         // chart 引用的入口相位名（`tasks_from:`/`phase:`），缺省/空 = deploy；仅 chart 引用任务
+	Args       map[string]any // 模块参数
+	FreeForm   string         // 简写形式的模块参数，如 `shell: uptime` 中的 "uptime"
+
+	When         []string          // 条件（模板表达式，多条件 AND）
+	Loop         []any             // 循环项，执行时注入 item 变量
+	Register     string            // 结果注册到的变量名
+	Notify       []string          // 触发的 handler 名称
+	Tags         []string          // 标签
+	Environment  map[string]string // 任务级环境变量（覆盖 play 级）
+	IgnoreErrors bool              // 失败不中断该主机后续任务
+	Retries      int               // 失败重试次数（0 = 不重试）
+	DelaySec     int               // 重试间隔秒数
+	TimeoutSec   int               // 任务超时秒数（0 = 用全局默认，-1 = 不限）
+
+	Become     *bool  // 任务级提权覆盖（nil = 继承 play）
+	BecomeUser string // 提权目标用户
+
+	ChangedWhen string // 模板表达式，覆盖 changed 判定
+	FailedWhen  string // 模板表达式，覆盖 failed 判定
+	Until       string // until 轮询条件（.result 引用本轮结果），满足即停
+
+	// 展示与编排扩展
+	Output     string // 展示控制：full|none|oneline|head=N|tail=N（只控展示不控数据）
+	NoLog      bool   // 等价 output=none：stdout/stderr/msg 不回显（register 数据不受影响）
+	DelegateTo string // 委托执行：任务在指定主机（或 localhost）上执行，结果归属当前主机
+	RunOnce    bool   // 整批只在一台主机执行，结果复制到全部主机
+	LoopVar    string // 自定义循环变量名（loop_control.loop_var，缺省 item；嵌套 loop 必需）
+	Hook       string // 生命周期钩子：pre_<phase>/post_<phase>，在该相位 play 的 pre/post 时机执行（deploy 相位命名沿用 pre_install/post_install）
+
+	Block  []*Task // block 组：顺序执行，失败转 rescue
+	Rescue []*Task // rescue 组：block 失败时执行
+	Always []*Task // always 组：恒执行
+
+	Include string // include 片段路径（`include: tasks/x.yaml`）：Load 阶段静态展开为任务序列
+
+	IsHandler bool // 标记该 Task 是 handler（解析时使用）
+
+	// PlanIdx 是 plan 执行模式的任务序号（journal 的 (主机, 任务) 键）。
+	// 非 plan 路径恒为 0；由 executor 的计划重建写入，YAML 解析不涉及。
+	PlanIdx int `yaml:"-"`
+
+	// Line 是任务在所属 playbook 文件中的行号（1 起，0 = 未知）：由
+	// playbook 解析从 yaml 节点填充，lint 问题定位用；不参与任何序列化。
+	Line int `yaml:"-" json:"-"`
+}
+
+// Label 返回任务展示名。
+func (t *Task) Label() string {
+	if t.Name != "" {
+		return t.Name
+	}
+	return t.Module
+}

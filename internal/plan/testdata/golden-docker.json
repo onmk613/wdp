@@ -1,0 +1,669 @@
+{
+  "schema": 1,
+  "plan_id": "3522745677e05d161efe579fac4c99e4d5ffcf4e3b9827af4d779fc9c3de8aab",
+  "chart": "docker",
+  "version": "1.0.0",
+  "phase": "deploy",
+  "wdp_version": "golden",
+  "values": {
+    "bin_dir": "/usr/bin",
+    "buildx_download_base": "https://github.com/docker/buildx/releases/download",
+    "buildx_version": "v0.33.0",
+    "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+    "compose_download_base": "https://github.com/docker/compose/releases/download",
+    "compose_version": "v5.1.1",
+    "data_dir": "/var/lib",
+    "docker_version": "29.3.0",
+    "download_base": "https://download.docker.com/linux/static/stable",
+    "log": {
+      "driver": "json-file",
+      "level": "warn",
+      "max_file": 5,
+      "max_size": "50m"
+    },
+    "online_install": true,
+    "uninstall_remove_binaries": false
+  },
+  "meta": {
+    "Name": "docker",
+    "Version": "1.0.0",
+    "Description": "安装docker",
+    "Required": null,
+    "MarkerDir": "",
+    "NoMarker": false,
+    "CheckMode": false,
+    "InventoryOverride": null,
+    "SensitiveValues": null,
+    "Phases": null
+  },
+  "helpers": "{{/* 架构别名：下载 URL 用 Go 风格（x86_64→amd64，aarch64→arm64）；不支持 → unsupported */}}\n{{ define \"docker.arch_alias\" -}}\n{{ index (dict \"x86_64\" \"amd64\" \"aarch64\" \"arm64\" \"amd64\" \"amd64\" \"arm64\" \"arm64\") .arch | default \"unsupported\" }}\n{{- end }}\n",
+  "files": {
+    "_helpers.tpl": "e3svKiDmnrbmnoTliKvlkI3vvJrkuIvovb0gVVJMIOeUqCBHbyDpo47moLzvvIh4ODZfNjTihpJhbWQ2NO+8jGFhcmNoNjTihpJhcm02NO+8ie+8m+S4jeaUr+aMgSDihpIgdW5zdXBwb3J0ZWQgKi99fQp7eyBkZWZpbmUgImRvY2tlci5hcmNoX2FsaWFzIiAtfX0Ke3sgaW5kZXggKGRpY3QgIng4Nl82NCIgImFtZDY0IiAiYWFyY2g2NCIgImFybTY0IiAiYW1kNjQiICJhbWQ2NCIgImFybTY0IiAiYXJtNjQiKSAuYXJjaCB8IGRlZmF1bHQgInVuc3VwcG9ydGVkIiB9fQp7ey0gZW5kIH19Cg==",
+    "chart.yaml": "IyBjaGFydCDlhYPmlbDmja7vvIjlv4XpnIDvvInjgIJuYW1lL3ZlcnNpb24g5LiO5L+d5a2Y55qE54mI5pys5Y+35a+56LSm77yM5b+F6aG75LiA6Ie0Cm5hbWU6IGRvY2tlcgp2ZXJzaW9uOiAxLjAuMApkZXNjcmlwdGlvbjog5a6J6KOFZG9ja2VyCiMgcmVxdWlyZWQ6IFthcHAucG9ydF0gICAjIOW/hemhu+eUseiwg+eUqOaWueaPkOS+m+eahCB2YWx1ZXMg54K56Lev5b6E77yI5Y+v6YCJ77yJCg==",
+    "deploy.yaml": "IyDmiafooYzlronoo4XliqjkvZwKLSBuYW1lOiDojrflj5bkuLvmnLror6bnu4bkv6Hmga8KICBzZXRfZmFjdDoKCi0gbmFtZTog5Li75py65p625p6E5Yik5patCiAgc2hlbGw6ICdlY2hvICJ1bnN1cHBvcnRlZCBhcmNoaXRlY3R1cmU6IHt7IC5hcmNoIH19IiA+JjI7IGV4aXQgMScKICB3aGVuOiAne3sgaWYgZXEgKGluY2x1ZGUgImRvY2tlci5hcmNoX2FsaWFzIiAuKSAidW5zdXBwb3J0ZWQiIH19eWVze3sgZWxzZSB9fW5ve3sgZW5kIH19JwoKLSBuYW1lOiDliJvlu7rnm67lvZUKICBmaWxlOgogICAgcGF0aDogInt7IC5pdGVtIH19IgogICAgc3RhdGU6IGRpcmVjdG9yeQogICAgbW9kZTogMDc1NQogIGxvb3A6IAogICAgLSAie3suYmluX2Rpcn19IgogICAgLSAie3suY2xpX3BsdWdpbnNfZGlyfX0iCiAgICAtICJ7ey5kYXRhX2Rpcn19IgoKLSBuYW1lOiDnprvnur/lronoo4Vkb2NrZXLkuozov5vliLYKICBpbmNsdWRlOiB0YXNrcy9vZmZsaW5lLnlhbWwKICB3aGVuOiAie3sgbm90IC5vbmxpbmVfaW5zdGFsbCB9fSIKCi0gbmFtZTog5Zyo57q/5a6J6KOFZG9ja2Vy5LqM6L+b5Yi2CiAgaW5jbHVkZTogdGFza3Mvb25saW5lLnlhbWwKICB3aGVuOiAie3sgLm9ubGluZV9pbnN0YWxsIH19IgoKLSBuYW1lOiDmuLLmn5MgZGFlbW9uLmpzb24gICAgCiAgdGVtcGxhdGU6CiAgICBzcmM6IHRlbXBsYXRlcy9kYWVtb24uanNvbi50cGwKICAgIGRlc3Q6ICIvZXRjL2RvY2tlci9kYWVtb24uanNvbiIKICAgIG1vZGU6ICIwNjQ0IgoKLSBuYW1lOiDmuLLmn5Njb25maWcudG9tbAogIHRlbXBsYXRlOgogICAgc3JjOiB0ZW1wbGF0ZXMvY29uZmlnLnRvbWwudHBsCiAgICBkZXN0OiAiL2V0Yy9jb250YWluZXJkL2NvbmZpZy50b21sIgogICAgbW9kZTogIjA2NDQiCgotIG5hbWU6IOmDqOe9siBjb250YWluZXJkIOWNleWFg+W5tuWQr+WKqAogIHN5c3RlbWRfdW5pdDoKICAgIG5hbWU6IGNvbnRhaW5lcmQuc2VydmljZQogICAgc3JjOiB0ZW1wbGF0ZXMvY29udGFpbmVyZC5zZXJ2aWNlLnRwbAogICAgc3RhdGU6IHN0YXJ0ZWQKICAgIGVuYWJsZWQ6IHRydWUKICAgIGRhZW1vbl9yZWxvYWQ6IHRydWUKCi0gbmFtZTog6YOo572yIGRvY2tlciDljZXlhYPlubblkK/liqgKICBzeXN0ZW1kX3VuaXQ6CiAgICBuYW1lOiBkb2NrZXIuc2VydmljZQogICAgc3JjOiB0ZW1wbGF0ZXMvZG9ja2VyLnNlcnZpY2UudHBsCiAgICBzdGF0ZTogc3RhcnRlZAogICAgZW5hYmxlZDogdHJ1ZQogICAgZGFlbW9uX3JlbG9hZDogdHJ1ZQo=",
+    "tasks/offline.yaml": "LSBuYW1lOiBjb3B55LqM6L+b5Yi2CiAgY29weToKICAgIHNyYzogInt7IC5pdGVtIH19IgogICAgZGVzdDogInt7IC5iaW5fZGlyIH19IgogICAgbW9kZTogMDc1NQogIGxvb3A6IAogICAgLSBjb250YWluZXJkCiAgICAtIGNvbnRhaW5lcmQtc2hpbS1ydW5jLXYyCiAgICAtIGN0cgogICAgLSBkb2NrZXIKICAgIC0gZG9ja2VyLWluaXQKICAgIC0gZG9ja2VyLXByb3h5CiAgICAtIGRvY2tlcmQKICAgIC0gcnVuYwoKLSBuYW1lOiBjb3B5IHBsdWdpbnMKICBjb3B5OgogICAgc3JjOiAie3sgLml0ZW0gfX0iCiAgICBkZXN0OiAie3sgLmNsaV9wbHVnaW5zX2RpciB9fSIKICAgIG1vZGU6IDA3NTUKICBsb29wOiAKICAgIC0gZG9ja2VyLWNvbXBvc2UKICAgIC0gZG9ja2VyLWJ1aWxkeAo=",
+    "tasks/online.yaml": "LSBuYW1lOiDkuIvovb1kb2NrZXIKICBnZXRfdXJsOgogICAgdXJsOiAie3sgLmRvd25sb2FkX2Jhc2UgfX0ve3sgLmFyY2ggfX0vZG9ja2VyLXt7IC5kb2NrZXJfdmVyc2lvbiB9fS50Z3oiCiAgICBkZXN0OiAvdG1wL2RvY2tlci50Z3oKICAgIG1vZGU6IDA2NDQKCi0gbmFtZTog5LiL6L29ZG9ja2VyLWNvbXBvc2UKICBnZXRfdXJsOgogICAgdXJsOiAie3sgLmNvbXBvc2VfZG93bmxvYWRfYmFzZSB9fS97eyAuY29tcG9zZV92ZXJzaW9uIH19L2RvY2tlci1jb21wb3NlLWxpbnV4LXt7IC5hcmNoIH19IgogICAgZGVzdDogInt7IC5jbGlfcGx1Z2luc19kaXIgfX0vZG9ja2VyLWNvbXBvc2UiCiAgICBtb2RlOiAwNzU1CgotIG5hbWU6IOS4i+i9vWRvY2tlci1idWlsZHgKICBnZXRfdXJsOgogICAgdXJsOiAne3sgLmJ1aWxkeF9kb3dubG9hZF9iYXNlIH19L3t7IC5idWlsZHhfdmVyc2lvbiB9fS9idWlsZHgte3sgLmJ1aWxkeF92ZXJzaW9uIH19LmxpbnV4LXt7IGluY2x1ZGUgImRvY2tlci5hcmNoX2FsaWFzIiAuIH19JwogICAgZGVzdDogInt7IC5jbGlfcGx1Z2luc19kaXIgfX0vZG9ja2VyLWJ1aWxkeCIKICAgIHNoYTI1NjogCiAgICBtb2RlOiAwNzU1CgotIG5hbWU6IOino+WOi2RvY2tlcgogIHVuYXJjaGl2ZToKICAgIHNyYzogL3RtcC9kb2NrZXIudGd6CiAgICBkZXN0OiAie3sgLmJpbl9kaXIgfX0iCiAgICBtZW1iZXJzOiBbY29udGFpbmVyZCwgY29udGFpbmVyZC1zaGltLXJ1bmMtdjIsIGN0ciwgZG9ja2VyLCBkb2NrZXItaW5pdCwgZG9ja2VyLXByb3h5LCBkb2NrZXJkLCBydW5jXQoKLSBuYW1lOiDliKDpmaR0Z3rljIUKICBmaWxlOgogICAgcGF0aDogL3RtcC9kb2NrZXIudGd6CiAgICBzdGF0ZTogYWJzZW50Cg==",
+    "templates/config.toml.tpl": "dmVyc2lvbiA9IDIKcm9vdCA9ICJ7eyBkaWcgImRhdGFfZGlyIiAocHJpbnRmICIlcy9jb250YWluZXJkIiAuZGF0YV9kaXIpIC4gfX0iCnN0YXRlID0gIi9ydW4vY29udGFpbmVyZCIK",
+    "templates/containerd.service.tpl": "W1VuaXRdCkRlc2NyaXB0aW9uPWNvbnRhaW5lcmQgY29udGFpbmVyIHJ1bnRpbWUKRG9jdW1lbnRhdGlvbj1odHRwczovL2NvbnRhaW5lcmQuaW8KQWZ0ZXI9bmV0d29yay50YXJnZXQKCltTZXJ2aWNlXQpVc2VyPXJvb3QKRXhlY1N0YXJ0UHJlPS9zYmluL21vZHByb2JlIG92ZXJsYXkKRXhlY1N0YXJ0PXt7IC5iaW5fZGlyIH19L2NvbnRhaW5lcmQKClR5cGU9bm90aWZ5ClJlc3RhcnQ9YWx3YXlzClJlc3RhcnRTZWM9NQpEZWxlZ2F0ZT15ZXMKS2lsbE1vZGU9cHJvY2VzcwoKTGltaXROT0ZJTEU9MTA0ODU3NgpMaW1pdE5QUk9DPWluZmluaXR5CkxpbWl0Q09SRT1pbmZpbml0eQoKVGFza3NNYXg9aW5maW5pdHkKT09NU2NvcmVBZGp1c3Q9LTk5OQoKW0luc3RhbGxdCldhbnRlZEJ5PW11bHRpLXVzZXIudGFyZ2V0",
+    "templates/daemon.json.tpl": "ewogICJkYXRhLXJvb3QiOiAie3sgZGlnICJkb2NrZXJfZGF0YV9kaXIiIC5kYXRhX2RpciAuIH19L2RvY2tlciIsCiAgImxvZy1kcml2ZXIiOiAie3sgLmxvZy5kcml2ZXIgfX0iLAogICJsb2ctbGV2ZWwiOiAie3sgLmxvZy5sZXZlbCB9fSIsCiAgImxvZy1vcHRzIjogewogICAgIm1heC1zaXplIjogInt7IC5sb2cubWF4X3NpemUgfX0iLAogICAgIm1heC1maWxlIjogInt7IC5sb2cubWF4X2ZpbGUgfCB0b1N0cmluZyB9fSIKICB9LAogICJpcHRhYmxlcyI6IHRydWUsCiAgInVzZXJsYW5kLXByb3h5IjogZmFsc2UKfQ==",
+    "templates/docker.service.tpl": "W1VuaXRdCkRlc2NyaXB0aW9uPURvY2tlciBBcHBsaWNhdGlvbiBDb250YWluZXIgRW5naW5lCkRvY3VtZW50YXRpb249aHR0cHM6Ly9kb2NzLmRvY2tlci5jb20KQWZ0ZXI9bmV0d29yay1vbmxpbmUudGFyZ2V0IHRpbWUtc2V0LnRhcmdldApXYW50cz1uZXR3b3JrLW9ubGluZS50YXJnZXQKU3RhcnRMaW1pdEJ1cnN0PTMKU3RhcnRMaW1pdEludGVydmFsU2VjPTYwCgpbU2VydmljZV0KVHlwZT1ub3RpZnkKRXhlY1N0YXJ0PXt7IC5iaW5fZGlyIH19L2RvY2tlcmQgXAogIC1IIHVuaXg6Ly8vdmFyL3J1bi9kb2NrZXIuc29jayBcCiAgLS1jb250YWluZXJkPS9ydW4vY29udGFpbmVyZC9jb250YWluZXJkLnNvY2sKRXhlY1JlbG9hZD0vYmluL2tpbGwgLXMgSFVQICRNQUlOUElEClRpbWVvdXRTdGFydFNlYz0wClJlc3RhcnQ9YWx3YXlzClJlc3RhcnRTZWM9MgpMaW1pdE5PRklMRT0xMDQ4NTc2CkxpbWl0TlBST0M9aW5maW5pdHkKTGltaXRDT1JFPWluZmluaXR5ClRhc2tzTWF4PWluZmluaXR5CkRlbGVnYXRlPXllcwpLaWxsTW9kZT1wcm9jZXNzCk9PTVNjb3JlQWRqdXN0PS01MDAKCltJbnN0YWxsXQpXYW50ZWRCeT1tdWx0aS11c2VyLnRhcmdldA==",
+    "values.yaml": "IyDniYjmnKwKZG9ja2VyX3ZlcnNpb246ICIyOS4zLjAiCmNvbXBvc2VfdmVyc2lvbjogInY1LjEuMSIKYnVpbGR4X3ZlcnNpb246ICJ2MC4zMy4wIgoKIyDpnZnmgIHkuozov5vliLbkuIvovb3pk77mjqUKZG93bmxvYWRfYmFzZTogImh0dHBzOi8vZG93bmxvYWQuZG9ja2VyLmNvbS9saW51eC9zdGF0aWMvc3RhYmxlIgpjb21wb3NlX2Rvd25sb2FkX2Jhc2U6ICJodHRwczovL2dpdGh1Yi5jb20vZG9ja2VyL2NvbXBvc2UvcmVsZWFzZXMvZG93bmxvYWQiCmJ1aWxkeF9kb3dubG9hZF9iYXNlOiAiaHR0cHM6Ly9naXRodWIuY29tL2RvY2tlci9idWlsZHgvcmVsZWFzZXMvZG93bmxvYWQiCgojIHBsdWdpbnPnm67lvZUKY2xpX3BsdWdpbnNfZGlyOiAvdXNyL2xvY2FsL2xpYi9kb2NrZXIvY2xpLXBsdWdpbnMKCiMg5pWw5o2u55uu5b2VLCDkvJrljLrliIZkb2NrZXIvY29udGFpbmVyZApkYXRhX2RpcjogL3Zhci9saWIKYmluX2RpcjogL3Vzci9iaW4KCiMgZGFlbW9uLmpzb24g5YaF5a6577yI5qih5p2/5riy5p+T77yM5pS55Yqo6Kem5Y+RIGRvY2tlciDph43lkK/vvIkKbG9nOgogIGRyaXZlcjoganNvbi1maWxlCiAgbGV2ZWw6IHdhcm4KICBtYXhfc2l6ZTogNTBtCiAgbWF4X2ZpbGU6IDUKCm9ubGluZV9pbnN0YWxsOiB0cnVlCnVuaW5zdGFsbF9yZW1vdmVfYmluYXJpZXM6IGZhbHNlIAo="
+  },
+  "payloads": null,
+  "hosts": [
+    {
+      "play_idx": 0,
+      "host": "d1",
+      "conn": {
+        "address": "d1",
+        "port": 22,
+        "user": "root",
+        "conn": "agent",
+        "host_key_check": true,
+        "connect_timeout_sec": 10
+      },
+      "values": {
+        "bin_dir": "/usr/bin",
+        "buildx_download_base": "https://github.com/docker/buildx/releases/download",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_download_base": "https://github.com/docker/compose/releases/download",
+        "compose_version": "v5.1.1",
+        "data_dir": "/var/lib",
+        "docker_version": "29.3.0",
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "online_install": true,
+        "uninstall_remove_binaries": false
+      },
+      "vars": {
+        "ansible_host": "10.20.0.11",
+        "bin_dir": "/usr/bin",
+        "buildx_download_base": "https://github.com/docker/buildx/releases/download",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_download_base": "https://github.com/docker/compose/releases/download",
+        "compose_version": "v5.1.1",
+        "data_dir": "/var/lib",
+        "docker_version": "29.3.0",
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "group_names": [
+          "docker"
+        ],
+        "groups": {
+          "all": [
+            "d1",
+            "d2"
+          ],
+          "docker": [
+            "d1",
+            "d2"
+          ]
+        },
+        "hosts": {
+          "d1": {
+            "address": "d1",
+            "conn": "agent",
+            "name": "d1"
+          },
+          "d2": {
+            "address": "d2",
+            "conn": "agent",
+            "name": "d2"
+          }
+        },
+        "hostvars": {
+          "d1": {
+            "ansible_host": "10.20.0.11",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d1"
+          },
+          "d2": {
+            "ansible_host": "10.20.0.12",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d2"
+          }
+        },
+        "inventory_hostname": "d1",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "online_install": true,
+        "play_batch": [
+          "d1",
+          "d2"
+        ],
+        "play_hosts": [
+          "d1",
+          "d2"
+        ],
+        "uninstall_remove_binaries": false
+      },
+      "play": {
+        "hosts": ""
+      },
+      "tasks": [
+        {
+          "idx": 1,
+          "label": "获取主机详细信息",
+          "module": "set_fact",
+          "rollback": "readonly"
+        },
+        {
+          "idx": 2,
+          "label": "主机架构判断",
+          "module": "shell",
+          "rollback": "none",
+          "free_form": "echo \"unsupported architecture: {{ .arch }}\" \u003e\u00262; exit 1",
+          "when": [
+            "{{ if eq (include \"docker.arch_alias\" .) \"unsupported\" }}yes{{ else }}no{{ end }}"
+          ]
+        },
+        {
+          "idx": 3,
+          "label": "创建目录",
+          "module": "file",
+          "rollback": "full",
+          "args": {
+            "mode": 493,
+            "path": "{{ .item }}",
+            "state": "directory"
+          },
+          "loop": [
+            "{{.bin_dir}}",
+            "{{.cli_plugins_dir}}",
+            "{{.data_dir}}"
+          ]
+        },
+        {
+          "idx": 4,
+          "label": "copy二进制",
+          "module": "copy",
+          "rollback": "full",
+          "args": {
+            "dest": "{{ .bin_dir }}",
+            "mode": 493,
+            "src": "{{ .item }}"
+          },
+          "when": [
+            "{{ not .online_install }}"
+          ],
+          "loop": [
+            "containerd",
+            "containerd-shim-runc-v2",
+            "ctr",
+            "docker",
+            "docker-init",
+            "docker-proxy",
+            "dockerd",
+            "runc"
+          ]
+        },
+        {
+          "idx": 5,
+          "label": "copy plugins",
+          "module": "copy",
+          "rollback": "full",
+          "args": {
+            "dest": "{{ .cli_plugins_dir }}",
+            "mode": 493,
+            "src": "{{ .item }}"
+          },
+          "when": [
+            "{{ not .online_install }}"
+          ],
+          "loop": [
+            "docker-compose",
+            "docker-buildx"
+          ]
+        },
+        {
+          "idx": 6,
+          "label": "下载docker",
+          "module": "get_url",
+          "rollback": "none",
+          "args": {
+            "dest": "/tmp/docker.tgz",
+            "mode": 420,
+            "url": "{{ .download_base }}/{{ .arch }}/docker-{{ .docker_version }}.tgz"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 7,
+          "label": "下载docker-compose",
+          "module": "get_url",
+          "rollback": "none",
+          "args": {
+            "dest": "{{ .cli_plugins_dir }}/docker-compose",
+            "mode": 493,
+            "url": "{{ .compose_download_base }}/{{ .compose_version }}/docker-compose-linux-{{ .arch }}"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 8,
+          "label": "下载docker-buildx",
+          "module": "get_url",
+          "rollback": "none",
+          "args": {
+            "dest": "{{ .cli_plugins_dir }}/docker-buildx",
+            "mode": 493,
+            "sha256": null,
+            "url": "{{ .buildx_download_base }}/{{ .buildx_version }}/buildx-{{ .buildx_version }}.linux-{{ include \"docker.arch_alias\" . }}"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 9,
+          "label": "解压docker",
+          "module": "unarchive",
+          "rollback": "partial",
+          "args": {
+            "dest": "{{ .bin_dir }}",
+            "members": [
+              "containerd",
+              "containerd-shim-runc-v2",
+              "ctr",
+              "docker",
+              "docker-init",
+              "docker-proxy",
+              "dockerd",
+              "runc"
+            ],
+            "src": "/tmp/docker.tgz"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 10,
+          "label": "删除tgz包",
+          "module": "file",
+          "rollback": "full",
+          "args": {
+            "path": "/tmp/docker.tgz",
+            "state": "absent"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 11,
+          "label": "渲染 daemon.json",
+          "module": "template",
+          "rollback": "full",
+          "args": {
+            "dest": "/etc/docker/daemon.json",
+            "mode": "0644",
+            "src": "templates/daemon.json.tpl"
+          }
+        },
+        {
+          "idx": 12,
+          "label": "渲染config.toml",
+          "module": "template",
+          "rollback": "full",
+          "args": {
+            "dest": "/etc/containerd/config.toml",
+            "mode": "0644",
+            "src": "templates/config.toml.tpl"
+          }
+        },
+        {
+          "idx": 13,
+          "label": "部署 containerd 单元并启动",
+          "module": "systemd_unit",
+          "rollback": "none",
+          "args": {
+            "daemon_reload": true,
+            "enabled": true,
+            "name": "containerd.service",
+            "src": "templates/containerd.service.tpl",
+            "state": "started"
+          }
+        },
+        {
+          "idx": 14,
+          "label": "部署 docker 单元并启动",
+          "module": "systemd_unit",
+          "rollback": "none",
+          "args": {
+            "daemon_reload": true,
+            "enabled": true,
+            "name": "docker.service",
+            "src": "templates/docker.service.tpl",
+            "state": "started"
+          }
+        }
+      ]
+    },
+    {
+      "play_idx": 0,
+      "host": "d2",
+      "conn": {
+        "address": "d2",
+        "port": 22,
+        "user": "root",
+        "conn": "agent",
+        "host_key_check": true,
+        "connect_timeout_sec": 10
+      },
+      "values": {
+        "bin_dir": "/usr/bin",
+        "buildx_download_base": "https://github.com/docker/buildx/releases/download",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_download_base": "https://github.com/docker/compose/releases/download",
+        "compose_version": "v5.1.1",
+        "data_dir": "/var/lib",
+        "docker_version": "29.3.0",
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "online_install": true,
+        "uninstall_remove_binaries": false
+      },
+      "vars": {
+        "ansible_host": "10.20.0.12",
+        "bin_dir": "/usr/bin",
+        "buildx_download_base": "https://github.com/docker/buildx/releases/download",
+        "buildx_version": "v0.33.0",
+        "cli_plugins_dir": "/usr/local/lib/docker/cli-plugins",
+        "compose_download_base": "https://github.com/docker/compose/releases/download",
+        "compose_version": "v5.1.1",
+        "data_dir": "/var/lib",
+        "docker_version": "29.3.0",
+        "download_base": "https://download.docker.com/linux/static/stable",
+        "group_names": [
+          "docker"
+        ],
+        "groups": {
+          "all": [
+            "d1",
+            "d2"
+          ],
+          "docker": [
+            "d1",
+            "d2"
+          ]
+        },
+        "hosts": {
+          "d1": {
+            "address": "d1",
+            "conn": "agent",
+            "name": "d1"
+          },
+          "d2": {
+            "address": "d2",
+            "conn": "agent",
+            "name": "d2"
+          }
+        },
+        "hostvars": {
+          "d1": {
+            "ansible_host": "10.20.0.11",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d1"
+          },
+          "d2": {
+            "ansible_host": "10.20.0.12",
+            "group_names": [
+              "docker"
+            ],
+            "inventory_hostname": "d2"
+          }
+        },
+        "inventory_hostname": "d2",
+        "log": {
+          "driver": "json-file",
+          "level": "warn",
+          "max_file": 5,
+          "max_size": "50m"
+        },
+        "online_install": true,
+        "play_batch": [
+          "d1",
+          "d2"
+        ],
+        "play_hosts": [
+          "d1",
+          "d2"
+        ],
+        "uninstall_remove_binaries": false
+      },
+      "play": {
+        "hosts": ""
+      },
+      "tasks": [
+        {
+          "idx": 1,
+          "label": "获取主机详细信息",
+          "module": "set_fact",
+          "rollback": "readonly"
+        },
+        {
+          "idx": 2,
+          "label": "主机架构判断",
+          "module": "shell",
+          "rollback": "none",
+          "free_form": "echo \"unsupported architecture: {{ .arch }}\" \u003e\u00262; exit 1",
+          "when": [
+            "{{ if eq (include \"docker.arch_alias\" .) \"unsupported\" }}yes{{ else }}no{{ end }}"
+          ]
+        },
+        {
+          "idx": 3,
+          "label": "创建目录",
+          "module": "file",
+          "rollback": "full",
+          "args": {
+            "mode": 493,
+            "path": "{{ .item }}",
+            "state": "directory"
+          },
+          "loop": [
+            "{{.bin_dir}}",
+            "{{.cli_plugins_dir}}",
+            "{{.data_dir}}"
+          ]
+        },
+        {
+          "idx": 4,
+          "label": "copy二进制",
+          "module": "copy",
+          "rollback": "full",
+          "args": {
+            "dest": "{{ .bin_dir }}",
+            "mode": 493,
+            "src": "{{ .item }}"
+          },
+          "when": [
+            "{{ not .online_install }}"
+          ],
+          "loop": [
+            "containerd",
+            "containerd-shim-runc-v2",
+            "ctr",
+            "docker",
+            "docker-init",
+            "docker-proxy",
+            "dockerd",
+            "runc"
+          ]
+        },
+        {
+          "idx": 5,
+          "label": "copy plugins",
+          "module": "copy",
+          "rollback": "full",
+          "args": {
+            "dest": "{{ .cli_plugins_dir }}",
+            "mode": 493,
+            "src": "{{ .item }}"
+          },
+          "when": [
+            "{{ not .online_install }}"
+          ],
+          "loop": [
+            "docker-compose",
+            "docker-buildx"
+          ]
+        },
+        {
+          "idx": 6,
+          "label": "下载docker",
+          "module": "get_url",
+          "rollback": "none",
+          "args": {
+            "dest": "/tmp/docker.tgz",
+            "mode": 420,
+            "url": "{{ .download_base }}/{{ .arch }}/docker-{{ .docker_version }}.tgz"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 7,
+          "label": "下载docker-compose",
+          "module": "get_url",
+          "rollback": "none",
+          "args": {
+            "dest": "{{ .cli_plugins_dir }}/docker-compose",
+            "mode": 493,
+            "url": "{{ .compose_download_base }}/{{ .compose_version }}/docker-compose-linux-{{ .arch }}"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 8,
+          "label": "下载docker-buildx",
+          "module": "get_url",
+          "rollback": "none",
+          "args": {
+            "dest": "{{ .cli_plugins_dir }}/docker-buildx",
+            "mode": 493,
+            "sha256": null,
+            "url": "{{ .buildx_download_base }}/{{ .buildx_version }}/buildx-{{ .buildx_version }}.linux-{{ include \"docker.arch_alias\" . }}"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 9,
+          "label": "解压docker",
+          "module": "unarchive",
+          "rollback": "partial",
+          "args": {
+            "dest": "{{ .bin_dir }}",
+            "members": [
+              "containerd",
+              "containerd-shim-runc-v2",
+              "ctr",
+              "docker",
+              "docker-init",
+              "docker-proxy",
+              "dockerd",
+              "runc"
+            ],
+            "src": "/tmp/docker.tgz"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 10,
+          "label": "删除tgz包",
+          "module": "file",
+          "rollback": "full",
+          "args": {
+            "path": "/tmp/docker.tgz",
+            "state": "absent"
+          },
+          "when": [
+            "{{ .online_install }}"
+          ]
+        },
+        {
+          "idx": 11,
+          "label": "渲染 daemon.json",
+          "module": "template",
+          "rollback": "full",
+          "args": {
+            "dest": "/etc/docker/daemon.json",
+            "mode": "0644",
+            "src": "templates/daemon.json.tpl"
+          }
+        },
+        {
+          "idx": 12,
+          "label": "渲染config.toml",
+          "module": "template",
+          "rollback": "full",
+          "args": {
+            "dest": "/etc/containerd/config.toml",
+            "mode": "0644",
+            "src": "templates/config.toml.tpl"
+          }
+        },
+        {
+          "idx": 13,
+          "label": "部署 containerd 单元并启动",
+          "module": "systemd_unit",
+          "rollback": "none",
+          "args": {
+            "daemon_reload": true,
+            "enabled": true,
+            "name": "containerd.service",
+            "src": "templates/containerd.service.tpl",
+            "state": "started"
+          }
+        },
+        {
+          "idx": 14,
+          "label": "部署 docker 单元并启动",
+          "module": "systemd_unit",
+          "rollback": "none",
+          "args": {
+            "daemon_reload": true,
+            "enabled": true,
+            "name": "docker.service",
+            "src": "templates/docker.service.tpl",
+            "state": "started"
+          }
+        }
+      ]
+    }
+  ]
+}
