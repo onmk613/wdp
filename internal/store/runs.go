@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 
 	_ "modernc.org/sqlite"
@@ -187,6 +188,99 @@ func (s *Store) ActiveRunsByApp(appIDs []int64) ([]ActiveRun, error) {
 		args = append(args, id)
 	}
 	rows, err := s.db.Query(`SELECT id, app_id, app_name, phase, status, user FROM runs WHERE status IN ('queued','running') AND app_id IN (`+ph+`) ORDER BY id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActiveRun
+	for rows.Next() {
+		var r ActiveRun
+		if err := rows.Scan(&r.ID, &r.AppID, &r.AppName, &r.Phase, &r.Status, &r.User); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// RunConflictError 由 CreateRunsExclusive 返回：事务内发现目标应用已有
+// queued/running 的执行（准入拒绝）。Active 携带冲突方明细供 409 反馈。
+type RunConflictError struct {
+	Active []ActiveRun
+}
+
+func (e *RunConflictError) Error() string {
+	return fmt.Sprintf("active run exists (%d)", len(e.Active))
+}
+
+// CreateRunsExclusive 在单个事务内完成「应用级准入检查 + 逐条插入」。
+// 先查后插分两步执行时，两个并发请求可同时通过检查并同时创建——
+// 单连接只串行化单条语句，串行化不了两条语句之间的窗口；事务内
+// 检查+插入才构成真正的互斥（SQLite 单写者，BEGIN 后写锁到手）。
+// 返回的 ids 与 items 等长，逐条对应插入的 run ID。
+func (s *Store) CreateRunsExclusive(items []RunInput) (ids []int64, err error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	appIDs := make([]int64, 0, len(items))
+	for _, it := range items {
+		appIDs = append(appIDs, it.AppID)
+	}
+	var conflict []ActiveRun
+	txErr := s.tx(func(q execer) error {
+		active, err := activeRunsByApp(q, appIDs)
+		if err != nil {
+			return err
+		}
+		if len(active) > 0 {
+			conflict = active
+			return errConflict
+		}
+		ids = make([]int64, 0, len(items))
+		for _, it := range items {
+			res, err := q.Exec(`INSERT INTO runs (kind, app_id, app_name, version, phase, seq, status, selector, user, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				it.Kind, it.AppID, it.AppName, it.Version, it.Phase, it.Seq, it.Status, it.Selector, it.User, nowUTC())
+			if err != nil {
+				return err
+			}
+			id, err := res.LastInsertId()
+			if err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		return nil
+	})
+	if errors.Is(txErr, errConflict) {
+		return nil, &RunConflictError{Active: conflict}
+	}
+	return ids, txErr
+}
+
+// errConflict 是事务内部 sentinel：回滚插入并以 RunConflictError 对外交付。
+var errConflict = errors.New("active run exists")
+
+// RunInput 是 CreateRunsExclusive 的入参（CreateRun 的结构化形态）。
+type RunInput struct {
+	Kind     string
+	AppID    int64
+	AppName  string
+	Version  string
+	Phase    string
+	Seq      int
+	Status   string
+	Selector string
+	User     string
+}
+
+// activeRunsByApp 是 ActiveRunsByApp 的事务内版本（复用准入查询口径）。
+func activeRunsByApp(q execer, appIDs []int64) ([]ActiveRun, error) {
+	ph := strings.TrimSuffix(strings.Repeat("?,", len(appIDs)), ",")
+	args := make([]any, 0, len(appIDs))
+	for _, id := range appIDs {
+		args = append(args, id)
+	}
+	rows, err := q.Query(`SELECT id, app_id, app_name, phase, status, user FROM runs WHERE status IN ('queued','running') AND app_id IN (`+ph+`) ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}

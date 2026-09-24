@@ -28,6 +28,11 @@ import (
 const maxCertBodyBytes = 64 << 10
 
 func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
+	// 校验与提交整体持锁：并发推送时两个请求各自基于同一快照校验后
+	// 交错 Store/写文件，会让内存材料与磁盘短暂不一致（后写者覆盖）。
+	// 三道闸（mTLS 模式 / 公钥配对 / 链可验证）基于同一临界区内的快照。
+	s.certMu.Lock()
+	defer s.certMu.Unlock()
 	old := s.material.Load()
 	if old == nil {
 		http.Error(w, "certificate hot-swap requires mTLS mode", http.StatusBadRequest)
@@ -76,8 +81,6 @@ func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.certMu.Lock()
-	defer s.certMu.Unlock()
 	if s.tlsCertFile == "" {
 		http.Error(w, "no certificate file path configured", http.StatusBadRequest)
 		return

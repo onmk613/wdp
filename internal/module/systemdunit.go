@@ -115,7 +115,11 @@ func (m *SystemdUnitModule) Run(rc *RunContext, args map[string]any, _ string) *
 	if hasContent {
 		data = []byte(content)
 	} else if hasSrc {
-		raw, err := os.ReadFile(resolveLocal(rc, src))
+		local, lerr := resolveLocal(rc, src)
+		if lerr != nil {
+			return Fail("%v", lerr)
+		}
+		raw, err := os.ReadFile(local)
 		if err != nil {
 			return Fail("failed to read unit template: %v", err)
 		}

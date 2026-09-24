@@ -7,22 +7,30 @@
 // 授权：受限路由带 meta.perm（与后端权限点字符串一致）；守卫只验「有该
 // verb」（作用域裁剪由 API 按资源把关），不满足 → 跳 /hosts 并提示。
 import { createRouter, createWebHistory } from 'vue-router'
+
+export { safeRedirect }
 import { ElMessage } from 'element-plus'
 import { can, ensureAuthed } from './auth'
+import { safeRedirect } from './redirect'
+
+// 视图全部按需加载：此前全部静态 import，首屏会把所有页面（含 Chart IDE
+// 的 monaco 依赖图）一起拉下来；登录页也要付这份代价。
+// 登录页与外壳保留静态（首屏必然用到），其余路由在导航到时才取。
 import Login from './views/Login.vue'
 import Console from './views/Console.vue'
-import HostsPage from './views/HostsPage.vue'
-import HostDetail from './views/HostDetail.vue'
-import ExecPage from './views/ExecPage.vue'
-import AppsPage from './views/AppsPage.vue'
-import AppIDE from './views/AppIDE.vue'
-import AppNew from './views/AppNew.vue'
-import AppRunPage from './views/AppRunPage.vue'
-import PlaybookPage from './views/PlaybookPage.vue'
-import RunsPage from './views/RunsPage.vue'
-import AuditPage from './views/AuditPage.vue'
-import ScopePage from './views/ScopePage.vue'
-import UsersPage from './views/UsersPage.vue'
+
+const HostsPage = () => import('./views/HostsPage.vue')
+const HostDetail = () => import('./views/HostDetail.vue')
+const ExecPage = () => import('./views/ExecPage.vue')
+const AppsPage = () => import('./views/AppsPage.vue')
+const AppIDE = () => import('./views/AppIDE.vue')
+const AppNew = () => import('./views/AppNew.vue')
+const AppRunPage = () => import('./views/AppRunPage.vue')
+const PlaybookPage = () => import('./views/PlaybookPage.vue')
+const RunsPage = () => import('./views/RunsPage.vue')
+const AuditPage = () => import('./views/AuditPage.vue')
+const ScopePage = () => import('./views/ScopePage.vue')
+const UsersPage = () => import('./views/UsersPage.vue')
 
 export const router = createRouter({
   history: createWebHistory(),
@@ -85,7 +93,7 @@ router.beforeEach(async (to) => {
   }
   if (to.path === '/user/login') {
     // 已登录再访问登录页 → 回控制台（honor 深链 redirect）
-    if (user) return (to.query.redirect as string) || '/hosts'
+    if (user) return safeRedirect(to.query.redirect)
     return true
   }
   if (!user) {

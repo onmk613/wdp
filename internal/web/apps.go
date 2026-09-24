@@ -147,8 +147,16 @@ func (s *Server) moveTgz(tmpPath, name, version string) (string, error) {
 	}
 	dst := filepath.Join(dir, version+".tgz")
 	if err := os.Rename(tmpPath, dst); err != nil {
-		// 跨设备回退：复制
-		if err := copyFile(tmpPath, dst); err != nil {
+		// 跨设备回退（/tmp 为 tmpfs 的部署形态）：先复制到目标侧 .part
+		// 再原子改名——直接 O_TRUNC 写最终路径，复制中途失败/崩溃会留下
+		// 半截制品永久占坑该版本号
+		part := dst + ".part"
+		if err := copyFile(tmpPath, part); err != nil {
+			os.Remove(part)
+			return "", err
+		}
+		if err := os.Rename(part, dst); err != nil {
+			os.Remove(part)
 			return "", err
 		}
 	}

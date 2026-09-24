@@ -190,6 +190,15 @@ CREATE TABLE app_drafts ( -- 编辑器草稿（按用户隔离；app_key = '<app
   updated_at   TEXT NOT NULL,
   UNIQUE(user_id, app_key)
 );
+`, `
+-- 明文通道显式声明：CA 启用时控制台→agent 默认走 mTLS（证书校验含主机名），
+-- 只有明确标记的主机才允许明文 HTTP。此前"探活失败即回落明文"是可被中间人
+-- 主动触发的降级（阻断 TLS 后自行应答即可拿到脚本/become 密码/制品）。
+ALTER TABLE hosts ADD COLUMN allow_plaintext INTEGER NOT NULL DEFAULT 0;
+-- 逐主机私钥交付标记：私钥只在"证书尚未交付"的窗口内可取，取走一次即
+-- 作废该路径（纳管 token 会经 URL 进反代日志/shell 历史，仅靠 TTL 与
+-- 来源 IP 绑定仍嫌宽）
+ALTER TABLE enroll_tokens ADD COLUMN key_delivered_at TEXT NOT NULL DEFAULT '';
 `}
 
 // Open 打开（必要时创建）数据库并执行增量迁移。
@@ -251,9 +260,12 @@ func (s *Store) migrate() error {
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // execer 是写操作的最小接口：*sql.DB 与 *sql.Tx 都满足，辅助函数在
-// 事务内外共用同一份实现。
+// 事务内外共用同一份实现。Query 供事务内「先查后写」类互斥使用
+// （如 CreateRunsExclusive）——必须走 q 自身（事务连接），事务内再走
+// s.db 查询单连接会被占住而死锁。
 type execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
 }
 
 // tx 把多语句变更收进单事务：任一步失败整体回滚，杜绝半状态（如
@@ -320,6 +332,11 @@ func validScopeNames(what string, list []string) error {
 func isUniqueErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }
+
+// IsUniqueErr 是 isUniqueErr 的导出形态：web 层用它区分"用户可见的
+// 重名冲突"（400 + 可读文案）与基础设施错误（500 脱敏）——裸 SQL 错误
+// 串（如 "UNIQUE constraint failed: hosts.name"）会暴露内部表结构。
+func IsUniqueErr(err error) bool { return isUniqueErr(err) }
 
 // dupErr 把 SQLite 唯一约束错误翻译为可读的"已存在"语义。
 func dupErr(err error, what, name string) error {

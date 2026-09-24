@@ -213,6 +213,11 @@ func (s *Store) AddVersion(appID int64, version, tgzPath, sha string, size int64
 	if labels == "" {
 		labels = "{}"
 	}
+	// 与 CreateApp/UpdateAppScopes 同口径：非法 JSON 的 labels 一旦落库，
+	// 权限层 labelKeys 解析失败返回空集，label 作用域限制会静默失效
+	if err := validLabels(labels); err != nil {
+		return err
+	}
 	// 版本落库与 latest 指针同事务：否则 latest 更新失败会留下"有新版本
 	// 但默认版本还指向旧的"不一致
 	return s.tx(func(q execer) error {

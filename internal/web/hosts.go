@@ -5,7 +5,9 @@ package web
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+
 	"wdp/internal/store"
 )
 
@@ -27,7 +29,13 @@ func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.st.CreateHost(&h)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		// 重名是用户可见的 400；其余（DB/IO）走 500 脱敏——裸 SQL 错误串
+		// 会暴露内部表结构
+		if store.IsUniqueErr(err) {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("主机 %q 已存在", h.Name))
+			return
+		}
+		s.writeInternal(w, err)
 		return
 	}
 	h.ID = id
@@ -85,7 +93,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	result := probeHost(r.Context(), h, s.mtlsProbeClient())
+	result := probeHost(r.Context(), h, s.probeClientFor(h))
 	_ = s.st.SetHostStatus(h.ID, result.Status)
 	writeJSON(w, http.StatusOK, result)
 }

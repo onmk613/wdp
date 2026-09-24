@@ -229,5 +229,5 @@ func truncate(s string, n int) string {
 // agentHostModelWithScheme 是 ExecService 的 HostModel 注入：台账行 →
 // executor 连接模型（探活定 mTLS/明文 scheme，与远程命令同一条路）。
 func (s *Server) agentHostModelWithScheme(ctx context.Context, h *store.Host) *model.Host {
-	return s.agentHostModel(h, s.agentScheme(ctx, h))
+	return s.agentHostModel(h)
 }

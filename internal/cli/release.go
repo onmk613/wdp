@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -175,7 +176,7 @@ func newReleaseDelCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bulk := byPrefix || byRegex
 			if byPrefix && byRegex {
-				return fmt.Errorf("%s", "--prefix and --regex are mutually exclusive")
+				return errors.New("--prefix and --regex are mutually exclusive")
 			}
 			recs, err := release.List("")
 			if err != nil {

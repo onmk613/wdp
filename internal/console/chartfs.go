@@ -96,6 +96,12 @@ func CopyDir(src, dst string) error {
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
 		}
+		// 只复制普通文件：符号链接会被 os.Open 跟随，等于把链接目标的
+		// 内容抄进新版本制品（可再经下载端点外带）；其 Lstat 权限位还是
+		// 0777。解包侧已拒绝越界链接，这里独立挡一层。
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		fi, ferr := d.Info()
 		if ferr != nil {
 			return ferr

@@ -60,8 +60,13 @@ func Split(s string) ([]string, error) {
 			closed := false
 			for i < len(s) {
 				if s[i] == '\\' && i+1 < len(s) {
+					if s[i+1] == '\n' {
+						// POSIX：双引号内 \<newline> 是行拼接，两字节一起删除
+						i += 2
+						continue
+					}
 					switch s[i+1] {
-					case '"', '\\', '$', '`', '\n':
+					case '"', '\\', '$', '`':
 						cur.WriteByte(s[i+1])
 						i += 2
 						continue

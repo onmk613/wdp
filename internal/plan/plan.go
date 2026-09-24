@@ -140,8 +140,13 @@ type ResolvedTask struct {
 	ChartRef  string         `json:"chart_ref,omitempty"` // 子 chart 引用（执行侧按计划内 chart 树展开）
 	TasksFrom string         `json:"tasks_from,omitempty"`
 	ChartVars map[string]any `json:"chart_vars,omitempty"`
-	Args      map[string]any `json:"args,omitempty"`
-	FreeForm  string         `json:"free_form,omitempty"`
+	// ChartHosts/ChartValuesFrom 是 chart 引用上的 hosts: 过滤选择器与
+	// values_from 覆盖文件——执行侧展开子 chart 时消费，缺了会导致 run 与
+	// apply 行为分叉（apply 不过滤、不覆盖），必须在计划镜像中原样保留。
+	ChartHosts      string         `json:"chart_hosts,omitempty"`
+	ChartValuesFrom []string       `json:"chart_values_from,omitempty"`
+	Args            map[string]any `json:"args,omitempty"`
+	FreeForm        string         `json:"free_form,omitempty"`
 
 	When         []string          `json:"when,omitempty"`
 	Loop         []any             `json:"loop,omitempty"`

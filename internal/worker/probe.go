@@ -44,22 +44,32 @@ type ProbeResult struct {
 	CheckedAt    string `json:"checked_at"`
 }
 
-// ProbeHost 对台账主机做一次 /health 探测。纳管装好的 agent 以 mTLS
-// 监听：优先用控制端客户端证书走 https；手工台账的明文 agent 回退
-// http。agent 的 /health 免认证（不进入空闲计数），证书链校验由
-// mTLS 客户端的 RootCAs 保证。
+// ProbeHost 对台账主机做一次 /health 探测。
+//
+// 语义：mtls != nil 表示"该主机由本控制台纳管（mTLS）"——只走 https，
+// 失败即离线，**不回落明文**。回落是主动可触发的降级：中间人只要阻断
+// TLS 握手再自己以明文应答，控制台就会把该主机判为 http 通道，随后把
+// 脚本、become 密码、制品乃至新 agent 二进制全部明文送出去（且无告警）。
+// mtls == nil 表示手工台账的明文 agent，走 http。
+//
+// 证书校验由客户端的 RootCAs + ServerName 共同保证（见 web 侧
+// probeClientFor：ServerName 取台账地址，比自己"只验链不验名"强）。
 func ProbeHost(ctx context.Context, h *store.Host, mtls *http.Client) ProbeResult {
 	if mtls != nil {
-		if res, ok := probeOnce(ctx, h, "https", mtls); ok {
-			return res
+		res, _ := probeOnce(ctx, h, "https", mtls)
+		if res.Status != "online" {
+			// 控制台按住 mTLS 探测（台账未声明明文），失败时给出可操作的
+			// 出路：真未启用 mTLS 的 agent 需要在主机台账里显式勾选明文，
+			// 而不是让控制台自动降级（自动降级可被中间人触发）
+			res.Error += "（若该 agent 确未启用 mTLS，请在主机设置里勾选「明文通道」）"
 		}
+		return res
 	}
 	res, _ := probeOnce(ctx, h, "http", probeClient)
 	return res
 }
 
-// probeOnce 以指定 scheme 探测一次；返回 ok=false 表示该通道不可用
-// （供 https→http 回退）。
+// probeOnce 以指定 scheme 探测一次；ok=false 表示该通道不可用。
 func probeOnce(ctx context.Context, h *store.Host, scheme string, client *http.Client) (ProbeResult, bool) {
 	res := ProbeResult{Status: "offline", Scheme: scheme, CheckedAt: time.Now().UTC().Format(time.RFC3339)}
 	url := fmt.Sprintf("%s://%s/health", scheme, net.JoinHostPort(h.Address, fmt.Sprint(h.AgentPort)))

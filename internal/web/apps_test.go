@@ -348,7 +348,9 @@ func newAppServer(t *testing.T, agentPort int) (*Server, *store.Store) {
 	srv.Listener = mustListen(t, agentPort)
 	srv.Start()
 	t.Cleanup(srv.Close)
-	if _, err := st.CreateHost(&store.Host{Name: "e2e-local", Address: "127.0.0.1", AgentPort: agentPort, Pools: []string{"e2e-pool"}}); err != nil {
+	// 该 fixture 起的是明文 loopback agent（未配 mTLS）：台账必须显式声明
+	// allow_plaintext——CA 启用时控制台默认按 mTLS 建连，不做静默降级
+	if _, err := st.CreateHost(&store.Host{Name: "e2e-local", Address: "127.0.0.1", AgentPort: agentPort, Pools: []string{"e2e-pool"}, AllowPlaintext: true}); err != nil {
 		t.Fatal(err)
 	}
 	return s, st
@@ -481,6 +483,7 @@ func TestAppUploadAndRunE2E(t *testing.T) {
 	for _, v := range versions {
 		if v.Version == "1.0.1" {
 			req = httptest.NewRequest("DELETE", fmt.Sprintf("/api/apps/%d/versions/%d", app.ID, v.ID), nil)
+			req.Header.Set("Content-Type", "application/json") // 空 CT 的变更请求被 requireAuth 拒绝
 			addCookie(req, token)
 			rec = httptest.NewRecorder()
 			h.ServeHTTP(rec, req)

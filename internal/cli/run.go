@@ -124,6 +124,7 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		WdpVersion:       Version,
 		FactCachePath:    opts.factCache,
 		MaxDownloadBytes: maxDownloadBytes(),
+		MaxUploadBytes:   maxUploadBytes(),
 	}
 	var plays []*model.Play
 	// spec 决定相位语义（是否部署事件/是否留部署记录）；无 chart 上下文
@@ -140,6 +141,13 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		defer ch.Close()
 		plays, spec = loaded.plays, loaded.spec
 	} else {
+		// 裸 playbook 没有 phase 语义（任务不按相位过滤，--phase 不参与
+		// 任务选择）：显式传非 deploy 相位直接报错，而非静默无效——否则
+		// 相位名还会落进部署记录，污染审计语义（与 apply 对脱离上下文
+		// flag 的显式报错同一原则）
+		if opts.phase != "" && opts.phase != "deploy" {
+			return fmt.Errorf("--phase %q requires a chart target (bare playbooks have no phases); did you mean to run a chart package?", opts.phase)
+		}
 		plays, err = playbook.Load(target)
 		if err != nil {
 			return err
@@ -211,11 +219,17 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	if eopts.Chart != nil {
 		rec.Chart, rec.Version, rec.Values = eopts.Chart.Meta.Name, eopts.Chart.Meta.Version, eopts.Values
 		// marker 来源相位的 values 按主机还原（eopts.Values 为 nil）：审计
-		// 记录取代表性 values（各主机通常一致，逐主机差异在 marker 里）
+		// 记录取代表性 values——字典序首台主机（map 迭代随机，取随机首个
+		// 会让同一部署每次运行记录的来源主机不确定；plan 编译路径同口径）
 		if rec.Values == nil {
-			for _, v := range eopts.HostValues {
-				rec.Values = v
-				break
+			firstHost := ""
+			for h := range eopts.HostValues {
+				if firstHost == "" || h < firstHost {
+					firstHost = h
+				}
+			}
+			if firstHost != "" {
+				rec.Values = eopts.HostValues[firstHost]
 			}
 		}
 		// 审计记录与 marker 同一脱敏口径：chart 声明的 sensitive_values

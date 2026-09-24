@@ -5,8 +5,10 @@ package agent
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,6 +108,42 @@ func TestExtractArchiveRejectsEscapingSymlink(t *testing.T) {
 	}
 }
 
+// TestExtractArchiveRejectsHardlinkThroughSymlink 硬链接源路径经由指向
+// dest 外的符号链接解析时必须拒绝：os.Link 跟随符号链接，否则硬链接
+// 落在外部 inode 上，随后同名文件条目经它写穿 dest 之外。
+func TestExtractArchiveRejectsHardlinkThroughSymlink(t *testing.T) {
+	parent := t.TempDir()
+	dest := filepath.Join(parent, "dest")
+	outside := filepath.Join(parent, "outside")
+	for _, d := range []string{dest, outside} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("do-not-touch"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// 预置符号链接 dest/d -> outside（模拟历史残留），归档内硬链接
+	// target 写成 d/secret.txt
+	if err := os.Symlink(outside, filepath.Join(dest, "d")); err != nil {
+		t.Fatal(err)
+	}
+	raw := buildTar(t,
+		[]tar.Header{{Name: "x", Typeflag: tar.TypeLink, Linkname: "d/secret.txt", Mode: 0o644}},
+		nil)
+	if _, err := ExtractArchive(writeTarGz(t, raw), dest); err == nil {
+		t.Fatal("经符号链接解析的硬链接应被拒绝")
+	}
+	// dest 内不得出现指向 secret inode 的硬链接条目
+	if _, err := os.Lstat(filepath.Join(dest, "x")); !os.IsNotExist(err) {
+		t.Fatal("硬链接条目不应落盘")
+	}
+	if b, err := os.ReadFile(secret); err != nil || string(b) != "do-not-touch" {
+		t.Fatalf("外部文件不应被触碰: %q %v", b, err)
+	}
+}
+
 // TestExtractArchiveByteLimit 解压总量超限必须失败（解压炸弹防护）。
 func TestExtractArchiveByteLimit(t *testing.T) {
 	oldBytes, oldEntries := maxExtractBytes, maxExtractEntries
@@ -136,5 +174,74 @@ func TestExtractArchiveEntryLimit(t *testing.T) {
 	if _, err := ExtractArchive(writeTarGz(t, raw), t.TempDir()); err == nil ||
 		!strings.Contains(err.Error(), "entry limit") {
 		t.Fatalf("超条目数应报错: %v", err)
+	}
+}
+
+// TestExtractZipLyingSizeRejected：zip 中央目录声明的未压大小可伪造
+// （声明 1 字节、deflate 流实际展开 256 字节）。Go 标准库（go1.22.7+
+// 的 zip 加固）会在读取超过声明量时返回 ErrFormat——本测试锁定整条
+// 防线：伪造声明大小的 zip 绝不能解压成功（无论由哪一层拦截）；
+// 预算按实际写入字节计（writeFileLimited）是同方向的纵深防御。
+func TestExtractZipLyingSizeRejected(t *testing.T) {
+	// 正常构造 zip，再改写中央目录记录的未压大小字段（偏移 24）为 1
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: "lie.bin", Method: zip.Deflate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(strings.Repeat("x", 256))); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+	sig := []byte{0x50, 0x4b, 0x01, 0x02} // 中央目录记录签名（单条目，唯一）
+	i := bytes.LastIndex(data, sig)
+	if i < 0 {
+		t.Fatal("central directory record not found")
+	}
+	binary.LittleEndian.PutUint32(data[i+24:i+28], 1)
+
+	src := filepath.Join(t.TempDir(), "lie.zip")
+	if err := os.WriteFile(src, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := t.TempDir()
+	if _, err := ExtractArchive(src, dest); err == nil {
+		t.Fatal("伪造声明大小的 zip 必须解压失败")
+	}
+	if _, err := os.Stat(filepath.Join(dest, "lie.bin")); !os.IsNotExist(err) {
+		t.Fatal("失败时不应残留半截文件")
+	}
+}
+
+// TestExtractZipByteLimitActual：zip 分支的解压预算按实际写入字节累计
+// （诚实声明大小的多文件场景，writeFileLimited 的记账路径）。
+func TestExtractZipByteLimitActual(t *testing.T) {
+	oldBytes := maxExtractBytes
+	defer func() { maxExtractBytes = oldBytes }()
+	maxExtractBytes = 32
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: "big.bin", Method: zip.Deflate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte(strings.Repeat("x", 256))); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), "big.zip")
+	if err := os.WriteFile(src, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ExtractArchive(src, t.TempDir()); err == nil ||
+		!strings.Contains(err.Error(), "extraction limit") {
+		t.Fatalf("实际写入超预算应报错: %v", err)
 	}
 }

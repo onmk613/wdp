@@ -159,7 +159,9 @@ function gotoHost(name: string) {
   void router.push({ path: '/hosts', query: { search: name } })
 }
 function gotoApp(app: App) {
-  void router.push(`/apps/${app.ID}/edit`)
+  // 应用编辑器路由是 /apps/ide（query 传 app id）——此前误写 /apps/:id/edit，
+  // 该路由不存在，会被兜底路由甩到主机列表
+  void router.push({ path: '/apps/ide', query: { app: String(app.ID) } })
 }
 </script>
 

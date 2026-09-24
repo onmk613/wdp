@@ -108,6 +108,27 @@ func HookNameFor(phase string) string {
 	return phase
 }
 
+// SplitHookTasks 按生命周期相位切分任务列表：hook 标记 pre_<词干>/
+// post_<词干> 的任务归 pre/post，无 hook 的归主列表，其它相位的 hook
+// 任务跳过（uninstall 时不跑 install hook）。executor（运行期）与
+// plan（编译期）共用此实现——此前两份逐字相同的副本靠人肉同步，
+// 漏改一处即产生执行语义与编译产物的口径漂移。
+func SplitHookTasks(tasks []*model.Task, phase string) (pre, post, main []*model.Task) {
+	preHook := "pre_" + HookNameFor(phase)
+	postHook := "post_" + HookNameFor(phase)
+	for _, t := range tasks {
+		switch t.Hook {
+		case preHook:
+			pre = append(pre, t)
+		case postHook:
+			post = append(post, t)
+		case "":
+			main = append(main, t)
+		}
+	}
+	return pre, post, main
+}
+
 // PhasePlays 返回指定生命周期相位对应的 play 清单。相位 = chart 根目录的
 // <phase>.yaml 文件：deploy.yaml 必需，uninstall/status/自定义相位可选
 // （空串按 deploy）。未知相位报错并列出 chart 实际提供的相位。

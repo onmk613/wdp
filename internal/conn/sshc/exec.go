@@ -41,12 +41,8 @@ func (c *Conn) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult,
 	}
 	defer sess.Close()
 
-	switch {
-	case sudoPW != "":
-		sess.Stdin = strings.NewReader(sudoPW + "\n" + req.Stdin)
-	case req.Stdin != "":
-		sess.Stdin = strings.NewReader(req.Stdin)
-	}
+	// 脚本体 + 任务 stdin 一起经会话 stdin 投递（不进 argv，见 WrapScript）
+	sess.Stdin = strings.NewReader(WrapStdin(req, sudoPW))
 	var stdout, stderr bytes.Buffer
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
@@ -71,20 +67,23 @@ func (c *Conn) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult,
 	}
 }
 
-// WrapScript 生成实际下发脚本：env 导出 + base64 解码落盘 + 执行 + 清理。
-// sudoPW 非空时（become + 密码提权）：从会话 stdin 首行读取密码并在同一
-// 会话内 sudo -S -v 预热凭证（sudo 凭证缓存按会话/ppid 隔离，跨会话不
-// 共享），密码不进命令行（ps 不可见），预热后立即 unset。
+// WrapScript 生成实际下发脚本：env 导出 + 脚本体落盘 + 执行 + 清理。
+//
+// 脚本体经 **stdin** 投递（base64 + 哨兵行），绝不进 argv：远端 `sh -c`
+// 的实参在整个任务执行期间对同机任意用户可见（ps、/proc/<pid>/cmdline），
+// 而脚本通常内嵌 `export TOKEN=…`、数据库口令等敏感值——旧实现把整段
+// base64 拼进命令行，等于把这些值广播给同机所有用户。
+//
+// stdin 布局（按序，由调用方按同一顺序拼接）：
+//  1. become 密码行（仅 become 且非免密；sudoPW 非空时由 `sudo -S -v` 读取）
+//  2. base64 脚本体，直到哨兵行 payloadSentinel
+//  3. 余下字节 = 任务 stdin（原样落 $I，执行时重定向给脚本，字节精确）
+//
+// 落盘权限：一律 0700。become 到其它用户时用 `sudo -n -- chown` 收敛属主
+// （先 chmod 再 chown：chown 之后属主已不是登录用户，再 chmod 会失败）。
+// 旧实现在 chown 失败时把脚本放宽到 **0644**，等于把内嵌的口令暴露给
+// 同机所有用户；现在失败即失败，不静默降级。
 func WrapScript(req conn.ExecRequest, sudoPW string) string {
-	var sb strings.Builder
-	for k, v := range req.Env {
-		if envKeyRe.MatchString(k) {
-			fmt.Fprintf(&sb, "export %s=%s\n", k, shellquote.Quote(v))
-		}
-	}
-	sb.WriteString(req.Script)
-	b64 := base64.StdEncoding.EncodeToString([]byte(sb.String()))
-
 	warm := ""
 	if sudoPW != "" {
 		warm = `IFS= read -r WDP_SUDO_PW || exit 97
@@ -92,22 +91,61 @@ printf '%s\n' "$WDP_SUDO_PW" | sudo -S -p '' -v >/dev/null 2>&1 || { unset WDP_S
 unset WDP_SUDO_PW
 `
 	}
-	runner := `sh "$T"`
+	runner := `sh "$T" < "$I"`
 	setPerm := `chmod 700 "$T"`
 	if req.BecomeUser != "" {
-		runner = fmt.Sprintf("sudo -n -u %s -- sh \"$T\"", shellquote.Quote(req.BecomeUser))
-		// 优先把脚本属主收敛到目标用户后保持 0700（root 登录可 chown，
-		// 敏感 env 不暴露给同机其他用户）；无 chown 权限时回退 0644（目标用户需可读）
-		setPerm = fmt.Sprintf("chown %s \"$T\" 2>/dev/null && chmod 700 \"$T\" || chmod 644 \"$T\"",
-			shellquote.Quote(req.BecomeUser))
+		runner = fmt.Sprintf("sudo -n -u %s -- sh \"$T\" < \"$I\"", shellquote.Quote(req.BecomeUser))
+		// 先 chmod（此时属主还是登录用户）再用 sudo 收敛属主；chown 失败
+		// 即整条失败——不回落 0644（会泄露脚本内的敏感 env 给同机用户）
+		setPerm = fmt.Sprintf("chmod 700 \"$T\" && sudo -n -- chown %s \"$T\" || { echo 'wdp: cannot hand the script to %s (passwordless sudo to root required)' >&2; exit 95; }",
+			shellquote.Quote(req.BecomeUser), req.BecomeUser)
 	}
 	return fmt.Sprintf(`T=$(mktemp /tmp/.wdp.XXXXXX) || exit 99
-%sprintf '%%s' '%s' | base64 -d > "$T" || { rm -f "$T"; exit 98; }
+B=$(mktemp /tmp/.wdp.XXXXXX) || exit 99
+I=$(mktemp /tmp/.wdp.XXXXXX) || exit 99
+trap 'rm -f "$T" "$B" "$I"' EXIT
+%s
+# 2) 脚本体：base64 直到哨兵行（行式读取不越过哨兵，余下字节留给 3)）
+while IFS= read -r WDP_L; do
+  [ "$WDP_L" = %s ] && break
+  printf '%%s\n' "$WDP_L"
+done > "$B" || exit 98
+base64 -d < "$B" > "$T" || { echo 'wdp: payload decode failed' >&2; exit 98; }
+# 3) 余下 stdin 是任务 stdin（cat 字节精确，不做行处理）
+cat > "$I"
 %s
 %s
 rc=$?
-rm -f "$T"
-exit $rc`, warm, b64, setPerm, runner)
+rm -f "$T" "$B" "$I"
+trap - EXIT
+exit $rc`, warm, shellquote.Quote(payloadSentinel), setPerm, runner)
+}
+
+// payloadSentinel 是 stdin 中"脚本体结束"的哨兵行。base64 字母表不含下划线，
+// 故与合法 payload 不可能撞行。
+const payloadSentinel = "__WDP_PAYLOAD_EOF__"
+
+// WrapStdin 构造与 WrapScript 配套的 stdin 流：可选 sudo 密码行 +
+// base64 脚本体 + 哨兵行 + 任务 stdin。
+func WrapStdin(req conn.ExecRequest, sudoPW string) string {
+	var sb strings.Builder
+	if sudoPW != "" {
+		sb.WriteString(sudoPW)
+		sb.WriteString("\n")
+	}
+	var body strings.Builder
+	for k, v := range req.Env {
+		if envKeyRe.MatchString(k) {
+			fmt.Fprintf(&body, "export %s=%s\n", k, shellquote.Quote(v))
+		}
+	}
+	body.WriteString(req.Script)
+	sb.WriteString(base64.StdEncoding.EncodeToString([]byte(body.String())))
+	sb.WriteString("\n")
+	sb.WriteString(payloadSentinel)
+	sb.WriteString("\n")
+	sb.WriteString(req.Stdin)
+	return sb.String()
 }
 
 var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

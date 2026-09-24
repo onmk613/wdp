@@ -42,6 +42,8 @@ func (s *Server) handleCreatePool(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.st.CreatePool(req.Name, req.Note, req.HostIDs)
 	if err != nil {
+		// store 层已把重名/命名校验翻译为可读错误（dupErr/validScopeName），
+		// 均为用户输入问题，直接 400
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -325,7 +327,7 @@ func (s *Server) handleBatchHosts(w http.ResponseWriter, r *http.Request) {
 		res := BatchResult{ID: id, Name: h.Name}
 		switch req.Action {
 		case "probe":
-			pr := probeHost(r.Context(), h, s.mtlsProbeClient())
+			pr := probeHost(r.Context(), h, s.probeClientFor(h))
 			_ = s.st.SetHostStatus(id, pr.Status)
 			res.OK = pr.Status == "online"
 			res.Detail = pr.Status + " " + pr.Error

@@ -83,11 +83,20 @@ func newPlanShowCmd() *cobra.Command {
 	return cmd
 }
 
-// printPlanTask 打印计划任务行（block/rescue/always 缩进递归）。
+// printPlanTask 打印计划任务行（block/rescue/always 缩进递归）。chart 引用
+// 附带 hosts 过滤与 values_from 覆盖——它们改变实际执行范围，评审必须可见。
 func printPlanTask(out io.Writer, t *plan.ResolvedTask, prefix, indent string) {
 	fmt.Fprintf(out, "%s%s#%d %s (%s", indent, prefix, t.Idx, t.Label, t.Module)
 	if t.Rollback == "full" || t.Rollback == "partial" {
 		fmt.Fprintf(out, ", rollback:%s", t.Rollback)
+	}
+	if t.ChartRef != "" {
+		if t.ChartHosts != "" {
+			fmt.Fprintf(out, ", hosts:%s", t.ChartHosts)
+		}
+		if n := len(t.ChartValuesFrom); n > 0 {
+			fmt.Fprintf(out, ", values_from:%s", strings.Join(t.ChartValuesFrom, ","))
+		}
 	}
 	fmt.Fprintln(out, ")")
 	for _, b := range t.Block {
@@ -233,7 +242,14 @@ func taskLines(p *plan.Plan, host string) []string {
 	var walk func(ts []*plan.ResolvedTask, tag string)
 	walk = func(ts []*plan.ResolvedTask, tag string) {
 		for _, t := range ts {
-			out = append(out, fmt.Sprintf("%s#%d %s (%s)", tag, t.Idx, t.Label, t.Module))
+			line := fmt.Sprintf("%s#%d %s (%s)", tag, t.Idx, t.Label, t.Module)
+			if t.ChartHosts != "" {
+				line += fmt.Sprintf(" hosts:%s", t.ChartHosts)
+			}
+			if len(t.ChartValuesFrom) > 0 {
+				line += fmt.Sprintf(" values_from:%s", strings.Join(t.ChartValuesFrom, ","))
+			}
+			out = append(out, line)
 			walk(t.Block, tag+"block.")
 			walk(t.Rescue, tag+"rescue.")
 			walk(t.Always, tag+"always.")

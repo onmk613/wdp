@@ -115,6 +115,12 @@ func ReadSpecFromDir(dir, name, version, description string) (*AppSpec, error) {
 		if d.IsDir() {
 			return nil
 		}
+		// 只处理普通文件：符号链接在 WalkDir 里 d.IsDir() 为 false，
+		// 但 os.ReadFile 会跟随它。解包侧（chart/tgz.go）已拒绝指向归档
+		// 外的链接，这里再挡一层——非普通文件一律不读内容。
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		rel, rerr := filepath.Rel(dir, path)
 		if rerr != nil {
 			return rerr
@@ -355,11 +361,14 @@ func (a *AppService) PrepareWorkspace(appID int64, baseVersion, name string, req
 			os.RemoveAll(workDir)
 			return "", err
 		}
-		// 底本解包 → 复制到自有工作目录（ch.Close 会清理其临时目录）
+		// 底本解包 → 复制到自有工作目录（ch.Close 会清理其临时目录）。
+		// LoadWithLimits 失败时返回 nil，必须先判错再解引用。
 		ch, lerr := chart.LoadWithLimits(baseTgz, chart.Limits{})
-		if lerr == nil {
-			lerr = CopyDir(ch.Dir, workDir)
+		if lerr != nil {
+			os.RemoveAll(workDir)
+			return "", fmt.Errorf("prepare workspace: load base chart: %w", lerr)
 		}
+		lerr = CopyDir(ch.Dir, workDir)
 		ch.Close()
 		if lerr != nil {
 			os.RemoveAll(workDir)
@@ -388,13 +397,16 @@ func (a *AppService) PackAndStore(workDir, name, version string) (string, string
 	}
 	fi, err := os.Stat(tmp)
 	if err != nil {
+		os.Remove(tmp)
 		return "", "", 0, err
 	}
 	sha, err := FileSha256(tmp)
 	if err != nil {
+		os.Remove(tmp)
 		return "", "", 0, err
 	}
 	if err := os.Rename(tmp, dst); err != nil {
+		os.Remove(tmp)
 		return "", "", 0, err
 	}
 	return dst, sha, fi.Size(), nil

@@ -29,8 +29,12 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 	}
 	// 主机过滤（hosts: 选择器）：当前 play 批次 ∩ 选择器，不在集合的主机
 	// 跳过该引用。不跨 play 重选主机——批次/串行/回滚语义保持在 play 级。
+	// Select 裸读 inv.Groups/inv.Hosts：与 add_host/group_by 的并发写
+	//（exec.go 持 invMu）可在同一 fanOut 波内并发，读侧同样必须持锁。
 	if task.ChartHosts != "" {
+		e.invMu.Lock()
 		sel, herr := e.Inv.Select(task.ChartHosts)
+		e.invMu.Unlock()
 		if herr != nil {
 			res.Failed = true
 			res.Msg = fmt.Sprintf("chart %s: invalid hosts selector %q: %v", task.ChartRef, task.ChartHosts, herr)
@@ -193,12 +197,27 @@ func sortedRefNames(refs map[string]*chart.Chart) string {
 // ——与 chart 模式 -f values 文件同口径。
 func (e *Executor) loadRefValuesFiles(baseDir string, files []string) (map[string]any, error) {
 	merged := map[string]any{}
+	absBase, aerr := filepath.Abs(baseDir)
+	if aerr != nil {
+		return nil, fmt.Errorf("resolve chart dir %q: %w", baseDir, aerr)
+	}
 	for _, f := range files {
 		path := f
 		if !filepath.IsAbs(path) {
-			path = filepath.Join(baseDir, f)
+			path = filepath.Join(absBase, f)
 		}
-		data, err := os.ReadFile(path)
+		// 路径必须落在 chart 目录内：chart 由 operator 级账号上传/编辑，
+		// 放行绝对路径与 .. 就能让 chart 读控制端任意 YAML（如
+		// ~/.wdp/releases/*.json）当 values 合并进变量域再外带
+		abs, aerr := filepath.Abs(path)
+		if aerr != nil {
+			return nil, fmt.Errorf("chart values_from %s: %w", f, aerr)
+		}
+		rel, rerr := filepath.Rel(absBase, abs)
+		if rerr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("chart values_from %s: path escapes the chart directory %s (absolute paths and .. escapes are refused)", f, absBase)
+		}
+		data, err := os.ReadFile(abs)
 		if err != nil {
 			return nil, fmt.Errorf("chart values_from %s: %w", f, err)
 		}
@@ -241,7 +260,11 @@ func effSubPlay(p *model.Play, subPlay *model.Play) model.Play {
 // host 基础变量 + 子作用域 values + 子 play vars + 内置变量/facts 穿透 + item。
 func (e *Executor) chartItemVars(hr *hostRun, scope map[string]any, subPlay *model.Play, savedVars map[string]any, item any, loopVar string) map[string]any {
 	vars := map[string]any{}
+	// host.Vars 裸读：add_host 对同名主机的变量合并（exec.go 持 invMu）
+	// 可能在同一 fanOut 波内并发，读侧同样必须持锁
+	e.invMu.Lock()
 	maps.Copy(vars, hr.host.Vars)
+	e.invMu.Unlock()
 	maps.Copy(vars, scope)
 	maps.Copy(vars, subPlay.Vars)
 	// 主机 facts（setup/stat 等运行时数据）同样穿透：属于主机而非 chart 作用域

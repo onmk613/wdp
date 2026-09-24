@@ -33,7 +33,7 @@ func (s *Server) handleHostFacts(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	resp := HostFactsResponse{Probe: probeHost(r.Context(), h, s.mtlsProbeClient())}
+	resp := HostFactsResponse{Probe: probeHost(r.Context(), h, s.probeClientFor(h))}
 	if resp.Probe.Status != "online" {
 		resp.Error = "agent 不可达：" + resp.Probe.Error
 		writeJSON(w, http.StatusOK, resp)
@@ -46,7 +46,7 @@ func (s *Server) handleHostFacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dc := &conn.Defaults{Conn: "agent"}
-	ac := agentc.New(s.agentHostModel(h, resp.Probe.Scheme), dc)
+	ac := agentc.New(s.agentHostModel(h), dc)
 	defer ac.Close()
 	cctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()

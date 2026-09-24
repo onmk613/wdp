@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pkg/sftp"
@@ -28,7 +29,13 @@ func init() {
 type Conn struct {
 	host   *model.Host
 	client *ssh.Client
-	sftp   *sftp.Client
+
+	// sftpMu 保护 sftp/sftpDead：delegate_to 会让多个源主机的传输 goroutine
+	// 共享同一目标主机的 Conn，取消路径要关闭 SFTP 通道解除阻塞——没有
+	// 锁的话该写与其他 goroutine 的裸读构成数据竞争与 TOCTOU nil 解引用。
+	sftpMu   sync.Mutex
+	sftp     *sftp.Client
+	sftpDead bool // 通道曾被取消路径关闭：永久降级 exec 流式，不重建
 }
 
 // New 创建 SSH 连接（未建连）。
@@ -65,23 +72,52 @@ func (c *Conn) Connect(_ context.Context) error {
 	c.client = client
 	// SFTP 可选（失败时回退 exec 传输）
 	if sc, err := sftp.NewClient(c.client); err == nil {
+		c.sftpMu.Lock()
 		c.sftp = sc
+		c.sftpMu.Unlock()
 	}
 	return nil
 }
 
 // Close 关闭连接。
 func (c *Conn) Close() error {
+	c.sftpMu.Lock()
 	if c.sftp != nil {
 		c.sftp.Close()
 		c.sftp = nil
 	}
+	c.sftpMu.Unlock()
 	if c.client != nil {
 		err := c.client.Close()
 		c.client = nil
 		return err
 	}
 	return nil
+}
+
+// sftpClient 返回当前可用的 SFTP 客户端快照；通道从未建立或已被取消
+// 路径关闭时返回 nil（调用方降级 exec 流式——streamUpload 原生响应 ctx）。
+func (c *Conn) sftpClient() *sftp.Client {
+	c.sftpMu.Lock()
+	defer c.sftpMu.Unlock()
+	if c.sftpDead || c.sftp == nil {
+		return nil
+	}
+	return c.sftp
+}
+
+// killSftp 关闭 SFTP 通道解除阻塞中的传输（SFTP 协议无 deadline）并标记
+// 永久降级。只关闭不置 nil：共享该连接的其他传输 goroutine 持有的指针
+// 仍可安全调用（对已关闭通道的操作返回错误而非 panic）；后续新传输经
+// sftpClient 看到 sftpDead 后走 exec 流式。
+func (c *Conn) killSftp() {
+	c.sftpMu.Lock()
+	defer c.sftpMu.Unlock()
+	if c.sftpDead || c.sftp == nil {
+		return
+	}
+	c.sftpDead = true
+	_ = c.sftp.Close()
 }
 
 // Hostname 返回主机名。

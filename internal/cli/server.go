@@ -36,6 +36,9 @@ const serverHelp = `
 监听默认 127.0.0.1:7603——目标机需要回连时用 --addr 0.0.0.0 并配
 --advertise 指定外部可达基址；公网暴露请置于反向代理 TLS 之后，或用
 --tls-cert/--tls-key 启用控制台原生 TLS（证书可用 wdp ca issue 签发）。
+下发的纳管脚本以 root 执行，故**默认拒绝在明文 HTTP 下生成一键命令**
+（脚本内嵌的 CA 指纹与脚本同源，挡不住主动中间人）；确需在可信内网
+明文引导时显式加 --allow-plaintext-enroll。
 
 --data 建议绝对路径（默认相对路径 wdp-data 随启动目录漂移）；
 --admin-pass 经命令行传参对同机用户可见（ps）且会进 shell 历史，建议改用
@@ -58,6 +61,7 @@ func newServerCmd() *cobra.Command {
 		adminPassEn string
 		advertise   string
 		caDays      int
+		plainEnroll bool
 		trustProxy  []string
 		tlsCert     string
 		tlsKey      string
@@ -96,8 +100,11 @@ func newServerCmd() *cobra.Command {
 				CADays:         caDays,
 				AdvertiseURL:   advertise,
 				TrustedProxies: trustProxy,
-				TLSCert:        tlsCert,
-				TLSKey:         tlsKey,
+				// 明文引导默认关闭：脚本以 root 执行，明文通道下中间人
+				// 替换脚本即等于目标机 root
+				AllowPlaintextEnroll: plainEnroll,
+				TLSCert:              tlsCert,
+				TLSKey:               tlsKey,
 			}, nil)
 			if err != nil {
 				return err
@@ -113,7 +120,8 @@ func newServerCmd() *cobra.Command {
 	f.StringVar(&adminUser, "admin-user", "admin", "console admin account name")
 	f.StringVar(&adminPass, "admin-pass", "", "admin password: ensures the account matches this value on every start (prefer -env)")
 	f.StringVar(&adminPassEn, "admin-pass-env", "", "environment variable holding the admin password")
-	f.StringVar(&advertise, "advertise", "", "externally reachable base URL for enrollment scripts (empty = derive from the request Host)")
+	f.StringVar(&advertise, "advertise", "", "externally reachable base URL for enrollment scripts (empty = derive from the request Host; must be https://)")
+	f.BoolVar(&plainEnroll, "allow-plaintext-enroll", false, "allow handing out enroll commands over plaintext HTTP (trusted networks only; the script runs as root on the target)")
 	f.IntVar(&caDays, "ca-days", 3650, "enrollment CA validity in days (first-start bootstrap only)")
 	f.StringSliceVar(&trustProxy, "trust-proxy", nil, "reverse-proxy IPs/CIDRs whose X-Forwarded-For is honored for audit/client IP (loopback is always trusted; direct clients cannot spoof it)")
 	f.StringVar(&tlsCert, "tls-cert", "", "console TLS certificate file (native TLS instead of a reverse proxy; pair with --tls-key)")

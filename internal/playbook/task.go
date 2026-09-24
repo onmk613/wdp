@@ -354,9 +354,13 @@ func resolveTaskModule(m map[string]any, t *model.Task) (*model.Task, error) {
 
 // chartRefKeys 是 chart 引用任务的专属键（不进通用控制键白名单——
 // 普通模块任务携带这些键应报"未知模块"而非静默吞掉）。
-var chartRefKeys = map[string]bool{
-	"chart": true, "values": true, "values_from": true, "hosts": true, "phase": true,
-}
+// 派生自 chartRefOnlyKeys + 引用键本身：两份字面量并存时新增键漏改
+// 一处即产生文档/解析口径漂移。
+var chartRefKeys = func() map[string]bool {
+	m := maps.Clone(chartRefOnlyKeys)
+	m["chart"] = true
+	return m
+}()
 
 // parseChartRefTask 解析 chart 引用任务（唯一形态——map 集中配置）：
 //

@@ -13,6 +13,8 @@ export interface Host {
   LastSeenAt: string
   CreatedAt: string
   UpdatedAt: string
+  // 明文通道：agent 未启用 mTLS 时需显式打开（默认按 mTLS 建连并校验身份）
+  AllowPlaintext?: boolean
 }
 
 export interface Pool {
@@ -88,9 +90,13 @@ export interface HostFactsResponse {
 }
 
 export async function api<T>(method: string, url: string, body?: unknown): Promise<T> {
-  const opt: RequestInit = { method, headers: { Accept: 'application/json' } as Record<string, string> }
+  // Content-Type 恒带（含空体 POST）：后端对变更类请求拒绝空 Content-Type
+  // （CSRF 纵深防御），无体调用（probe/latest 等）不带会被 415 挡下
+  const opt: RequestInit = {
+    method,
+    headers: { Accept: 'application/json', 'Content-Type': 'application/json' } as Record<string, string>,
+  }
   if (body !== undefined) {
-    ;(opt.headers as Record<string, string>)['Content-Type'] = 'application/json'
     opt.body = JSON.stringify(body)
   }
   const resp = await fetch(url, opt)
@@ -241,8 +247,9 @@ export interface ExecHostResult {
   err?: string
 }
 
-// multipart 上传（应用 tgz）
-export async function upload(url: string, fields: Record<string, string>, file: File): Promise<any> {
+// multipart 上传（应用 tgz）。泛型返回值：此前 Promise<any> 已传染到
+// 调用方（AppNew 需要 as App 断言），改为调用方显式声明响应类型。
+export async function upload<T = unknown>(url: string, fields: Record<string, string>, file: File): Promise<T> {
   const fd = new FormData()
   for (const [k, v] of Object.entries(fields)) fd.append(k, v)
   fd.append('tgz', file)
@@ -251,7 +258,7 @@ export async function upload(url: string, fields: Record<string, string>, file: 
     window.dispatchEvent(new Event('wdp-unauthorized'))
     throw new Error('登录已失效')
   }
-  const data = await resp.json().catch(() => ({}))
+  const data = (await resp.json().catch(() => ({}))) as T & { error?: string }
   if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`)
   return data
 }
@@ -398,12 +405,16 @@ export interface RunEvent {
   summary?: string
 }
 
-export function subscribeRuns(onEvent: (e: RunEvent) => void): () => void {
+export function subscribeRuns(onEvent: (e: RunEvent) => void, onError?: () => void): () => void {
   const es = new EventSource('/api/runs/stream')
   es.addEventListener('run', (ev) => {
     try {
       onEvent(JSON.parse((ev as MessageEvent).data) as RunEvent)
     } catch { /* 坏载荷忽略：兜底轮询会补 */ }
   })
+  // HTTP 错误（server 重启期间的 502、反代超时）会让 EventSource fail 且
+  // 不再自动重连——不通知调用方的话，它把"收到过事件"当永久状态，兜底
+  // 轮询从此卡在慢档
+  if (onError) es.onerror = () => onError()
   return () => es.close()
 }

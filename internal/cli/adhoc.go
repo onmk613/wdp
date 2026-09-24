@@ -111,6 +111,7 @@ func runAdhoc(ctx context.Context, pattern string, opts adhocOptions) error {
 		CheckMode:        opts.check,
 		DiffMode:         opts.diff,
 		MaxDownloadBytes: maxDownloadBytes(),
+		MaxUploadBytes:   maxUploadBytes(),
 	})
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

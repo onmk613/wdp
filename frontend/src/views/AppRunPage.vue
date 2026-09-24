@@ -156,6 +156,7 @@ async function run() {
     submitted.value = true
     awaitingFirstPoll.value = true
     activeRuns.value = []
+    trackedRunIDs = r.run_ids
     for (const k of Object.keys(activeTasks)) delete activeTasks[Number(k)]
     await pollActive(r.run_ids)
   } catch (e) {
@@ -167,28 +168,42 @@ async function run() {
 
 // pollActive 拉取本次提交的 run 与任务明细（逐条出现）。
 // - in-flight 防重入：2s 定时器与 run() 的首轮拉取重叠时只跑一份；
+// - 合并式更新：单个 run 请求瞬时失败（网络抖动/500）时保留上一轮的
+//   条目——用成功子集整体替换会把该 run 从清单里挤掉，且后续轮询只认
+//   activeRuns 里的 ID，丢掉的 run 即使还在 running 也永远不再拉取，
+//   用户看到"已完成"却缺了一段输出；
 // - 本轮全部请求失败（网络抖动）时保留旧状态且不算完成——否则首轮全败
 //   会把 activeRuns 置空，anyRunning() 误判已完成、轮询停摆
 let pollInFlight = false
 // 提交后尚未成功拿到任何 run 状态：此期间视为进行中（防首轮全败误判）
 const awaitingFirstPoll = ref(false)
+// 本次提交的 run 全集（轮询固定拉全集，不随展示清单丢失）
+let trackedRunIDs: number[] = []
 
 async function pollActive(runIDs: number[]) {
   if (pollInFlight) return
   pollInFlight = true
   try {
+    // 逐 run 并行拉取：串行 for-await 时 5 个应用就是 5 倍串行延迟，
+    // 且每 2s 一轮持续放大
+    const results = await Promise.allSettled(
+      runIDs.map((id) => api<{ run: Run; tasks: RunTask[] }>('GET', `/api/runs/${id}`)),
+    )
+    const prev = new Map(activeRuns.value.map((r) => [r.ID, r]))
     const out: Run[] = []
     let ok = 0
-    for (const id of runIDs) {
-      try {
-        const d = await api<{ run: Run; tasks: RunTask[] }>('GET', `/api/runs/${id}`)
-        out.push(d.run)
-        activeTasks[id] = d.tasks || []
-        ok++
-      } catch {
-        /* 单个失败跳过，本轮结束按成功数判断 */
+    results.forEach((r, i) => {
+      const id = runIDs[i]
+      if (r.status !== 'fulfilled') {
+        // 单个失败：沿用上一轮数据（若有），没有就只能缺席到下一轮
+        const old = prev.get(id)
+        if (old) out.push(old)
+        return
       }
-    }
+      out.push(r.value.run)
+      activeTasks[id] = r.value.tasks || []
+      ok++
+    })
     if (ok === 0) return // 全败：不更新 activeRuns，也不解除 awaiting
     awaitingFirstPoll.value = false
     activeRuns.value = out
@@ -198,7 +213,11 @@ async function pollActive(runIDs: number[]) {
 }
 
 function anyRunning(): boolean {
-  return awaitingFirstPoll.value || activeRuns.value.some((r) => r.Status === 'running' || r.Status === 'queued')
+  if (awaitingFirstPoll.value) return true
+  if (activeRuns.value.some((r) => r.Status === 'running' || r.Status === 'queued')) return true
+  // 有跟踪但从未成功拿到状态的 run（每轮都失败）：视为进行中继续轮询，
+  // 否则其余 run 全部终态后轮询停摆，该 run 的输出与终态永远缺失
+  return trackedRunIDs.some((id) => !activeRuns.value.some((r) => r.ID === id))
 }
 
 function runStatus(s: string): 'success' | 'danger' | 'info' | 'warning' {
@@ -216,8 +235,9 @@ let unsubRuns: (() => void) | undefined
 let sseAlive = false
 
 function pollSoon() {
+  // 拉全集而非 activeRuns：展示清单某轮缺一个（瞬时失败）也不丢跟踪
   if (submitted.value && anyRunning()) {
-    void pollActive(activeRuns.value.map((r) => r.ID))
+    void pollActive(trackedRunIDs)
   }
 }
 
@@ -230,10 +250,17 @@ function schedulePoll() {
 
 onMounted(() => {
   load()
-  unsubRuns = subscribeRuns(() => {
-    sseAlive = true
-    pollSoon()
-  })
+  unsubRuns = subscribeRuns(
+    () => {
+      sseAlive = true
+      pollSoon()
+    },
+    () => {
+      // 连接失败（server 重启/502）后 EventSource 不再自动重连：回落快档
+      // 轮询，执行输出的实时性不受影响
+      sseAlive = false
+    },
+  )
   schedulePoll()
 })
 onUnmounted(() => {

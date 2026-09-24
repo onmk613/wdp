@@ -106,6 +106,7 @@ func runDrift(ctx context.Context, target, pattern, limit string, valuesFiles, s
 		TaskTimeout: config.Current().Run.TaskTimeout,
 
 		MaxDownloadBytes: maxDownloadBytes(),
+		MaxUploadBytes:   maxUploadBytes(),
 	})
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

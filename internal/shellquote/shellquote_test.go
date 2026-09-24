@@ -74,6 +74,9 @@ func TestSplit(t *testing.T) {
 		{`"it\"s"`, []string{`it"s`}},
 		{`"a\b"`, []string{`a\b`}}, // 双引号内 \b 非特殊，保持字面
 		{`'a\nb'`, []string{`a\nb`}},
+		// POSIX：双引号内 \<newline> 是行拼接，两字节删除（/bin/sh 实测语义）
+		{"\"a\\\nb\"", []string{"ab"}},
+		{"\"a\\\n b\"", []string{"a b"}}, // 引号内的空格不切词
 		{`$HOME ;|&&`, []string{"$HOME", ";|&&"}},
 	}
 	for _, c := range cases {

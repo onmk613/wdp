@@ -10,7 +10,6 @@ import { upload, listAppDrafts, deleteAppDraft, type App, type AppDraftItem } fr
 
 const router = useRouter()
 const dialogVisible = ref(false)
-const creating = ref(false)
 
 const appNameRe = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 const form = reactive({ name: '', version: '1.0.0', description: '' })
@@ -47,7 +46,7 @@ async function onChartPicked(e: Event) {
   if (!file) return
   uploading.value = true
   try {
-    const app = (await upload('/api/apps/upload', {}, file)) as App
+    const app = await upload<App>('/api/apps/upload', {}, file)
     ElMessage.success(`应用 ${app.Name}@${app.LatestVersion} 已入库`)
     void router.push({ path: '/apps/ide', query: { app: String(app.ID) } })
   } catch (err) {
@@ -184,7 +183,7 @@ function fmtTime(iso: string): string {
       </el-form>
       <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :disabled="!!nameErr()" :loading="creating" @click="goIDE">确定，进入编辑器</el-button>
+        <el-button type="primary" :disabled="!!nameErr()" @click="goIDE">确定，进入编辑器</el-button>
       </template>
     </el-dialog>
 

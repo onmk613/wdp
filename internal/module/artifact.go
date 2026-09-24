@@ -1,7 +1,9 @@
 package module
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,7 +103,10 @@ func (m *ArtifactModule) Run(rc *RunContext, args map[string]any, _ string) *Res
 		forcedMode = 0o755 // 制品以可执行文件为主，缺省 0755（members 沿用归档权限）
 	}
 
-	cachePath := resolveLocal(rc, cache)
+	cachePath, cerr := resolveLocal(rc, cache)
+	if cerr != nil {
+		return Fail("%v", cerr)
+	}
 	data, cacheHit, res := m.loadCache(rc, cachePath, url, wantSum, headers, timeoutSecs)
 	if res != nil {
 		return res
@@ -122,7 +127,10 @@ func (m *ArtifactModule) Run(rc *RunContext, args map[string]any, _ string) *Res
 // loadCache 解析制品来源：cache 命中（含 sha256 校验通过）直接用；未命中
 // 或校验失败时经 url 下载并原子落缓存。check 模式不产生控制端写入，只预估。
 func (m *ArtifactModule) loadCache(rc *RunContext, cachePath, url, wantSum string, headers map[string]string, timeoutSecs int) ([]byte, bool, *Result) {
-	if data, err := os.ReadFile(cachePath); err == nil && len(data) > 0 {
+	// 读缓存走上限口径：裸 os.ReadFile 会让被替换/超大的缓存文件直接把
+	// 控制端内存吃满（缓存目录可写者等于控制端 OOM 开关）
+	data, rerr := readLocalCap(rc, cachePath, rc.MaxUploadBytes)
+	if rerr == nil && len(data) > 0 {
 		if wantSum == "" || sha256hex(data) == wantSum {
 			return data, true, nil
 		}
@@ -130,6 +138,9 @@ func (m *ArtifactModule) loadCache(rc *RunContext, cachePath, url, wantSum strin
 		if url == "" {
 			return nil, false, Fail("cached artifact %s fails the sha256 check and no url is set to refresh it", cachePath)
 		}
+	} else if rerr != nil && !errors.Is(rerr, fs.ErrNotExist) && url == "" {
+		// 存在但读不了（含超限）：无 url 可自愈时报真实原因，别伪装成"缺包"
+		return nil, false, Fail("failed to read cached artifact %s: %v", cachePath, rerr)
 	}
 	if rc.CheckMode {
 		// check 只读：不下载不落缓存（下载落盘是控制端变更）
@@ -155,7 +166,7 @@ func (m *ArtifactModule) loadCache(rc *RunContext, cachePath, url, wantSum strin
 // 命中；权限沿用归档条目，mode 参数显式给出时强制覆盖）。
 func (m *ArtifactModule) distributeMembers(rc *RunContext, data []byte, cacheHit bool, cache, dest string, members []string, forcedMode int64, hasMode bool) *Result {
 	kind := archiveKind(cache)
-	sel, err := selectArchiveMembers(kind, data, members)
+	sel, err := selectArchiveMembers(kind, data, members, rc.MaxUploadBytes)
 	if err != nil {
 		return Fail("artifact %s: %v", cache, err)
 	}
@@ -212,9 +223,14 @@ func writeCache(path string, data []byte) error {
 	}
 	tmp := path + ".tmp-" + tempSuffix()
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		os.Remove(tmp) // 磁盘满等失败不留半截 tmp（会随时间在缓存目录累积）
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // msg 组装来源说明（cache 命中 = 离线复用；未命中 = 在线下载落缓存）。

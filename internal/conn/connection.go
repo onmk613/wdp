@@ -27,6 +27,15 @@ type NativeExtractor interface {
 	NativeExtract(ctx context.Context, src, dest string) error
 }
 
+// PrivilegedUploader 是可选的连接能力：以指定用户身份写入远端文件。
+// UploadFile 本身没有提权参数（以登录用户落盘），非 root 登录 + become 的
+// 场景下写 /etc 之类的目录必然 permission denied——become 此前只作用于
+// 命令执行，对文件分发无效。模块以类型断言探测；未实现时回退
+// UploadFile（等同于旧行为）。
+type PrivilegedUploader interface {
+	UploadFileAs(ctx context.Context, dst string, r io.Reader, mode fs.FileMode, becomeUser string) error
+}
+
 // Timeout 将时长转为毫秒值（<=0 表示不限）。
 func Timeout(d time.Duration) int64 {
 	if d <= 0 {

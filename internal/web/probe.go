@@ -24,7 +24,7 @@ func (s *Server) startProber(ctx context.Context) {
 		Logger: s.logger,
 		Every:  s.opts.ProbeEvery,
 		Probe: func(ctx context.Context, h *store.Host) worker.ProbeResult {
-			return worker.ProbeHost(ctx, h, s.mtlsProbeClient())
+			return worker.ProbeHost(ctx, h, s.probeClientFor(h))
 		},
 	}
 	go p.Run(ctx)

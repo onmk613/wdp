@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func init() {
@@ -45,8 +46,11 @@ func (m *CopyModule) Run(rc *RunContext, args map[string]any, _ string) *Result 
 	var data []byte
 	mode := int64(0o644) // 缺省 0644；src 未显式给 mode 时沿用本地文件权限
 	if src != "" {
-		local := resolveLocal(rc, src)
-		b, err := os.ReadFile(local)
+		local, lerr := resolveLocal(rc, src)
+		if lerr != nil {
+			return Fail("%v", lerr)
+		}
+		b, err := readLocalSrc(rc, local)
 		if err != nil {
 			return Fail("failed to read local file: %v", err)
 		}
@@ -74,12 +78,37 @@ func (m *CopyModule) Run(rc *RunContext, args map[string]any, _ string) *Result 
 	return &Result{Changed: changed, Msg: msg}
 }
 
-// resolveLocal 解析 playbook 相对路径。
-func resolveLocal(rc *RunContext, p string) string {
-	if filepath.IsAbs(p) {
-		return p
+// resolveLocal 解析 chart/playbook 引用的控制端本地路径，并把它约束在
+// BaseDir（chart 目录 / playbook 所在目录）之内。
+//
+// 为什么不许绝对路径与 .. 逃逸：chart 由 operator 级账号上传或编辑
+// （app:create / app:upload），若 src/cache 可以是任意控制端路径，一句
+// `copy: {src: ../../../../home/u/.ssh/id_rsa, dest: /tmp/x}` 就能把控制端
+// 私钥、~/.wdp/releases/*.json（含 values 明文）分发到目标机；artifact 的
+// cache 落盘方向还能反过来**写**控制端任意文件。相对路径、以及 chart 内
+// 的 packages/ 制品目录照常可用（docs 的离线制品就放在 chart 内）。
+func resolveLocal(rc *RunContext, p string) (string, error) {
+	base := rc.BaseDir
+	if base == "" {
+		base = "."
 	}
-	return filepath.Join(rc.BaseDir, p)
+	absBase, err := filepath.Abs(base)
+	if err != nil {
+		return "", fmt.Errorf("resolve base dir %q: %w", base, err)
+	}
+	joined := p
+	if !filepath.IsAbs(joined) {
+		joined = filepath.Join(absBase, p)
+	}
+	abs, err := filepath.Abs(joined)
+	if err != nil {
+		return "", fmt.Errorf("resolve %q: %w", p, err)
+	}
+	rel, err := filepath.Rel(absBase, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q is outside the chart/playbook directory %s (absolute paths and .. escapes are refused; put the file inside the chart)", p, absBase)
+	}
+	return abs, nil
 }
 
 // Params 参数文档。顺序即使用顺序：src → dest 是主用法（与示例一致），

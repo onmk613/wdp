@@ -13,6 +13,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, DocumentChecked, FolderAdd } from '@element-plus/icons-vue'
 import type * as Monaco from 'monaco-editor'
 import { api, createAppFromSpec, validatePlaybook, type ModuleMeta, type SchemaMeta } from '../api'
+import { authUser } from '../auth'
 import { ChartFS, scaffoldChart } from '../ide/fs'
 import { loadMonaco, editorOptions, bindSuggestKey, modelURI, type MonacoNs } from '../ide/monaco'
 import { applyYamlSchemas, fetchSchema } from '../ide/schemas'
@@ -22,7 +23,9 @@ import { applyDecorations } from '../ide/decorate'
 import { parseIssueLine, applyMarkers, type ProblemItem } from '../ide/validate'
 
 const router = useRouter()
-const DRAFT_KEY = 'wdp-playbook-draft'
+// 草稿按用户隔离：playbook 内容常含内网主机名、账号与脚本逻辑，共享
+// 浏览器上前一个用户的草稿不应弹给下一个用户（与 ide/draft.ts 同口径）
+const draftKey = () => `wdp-playbook-draft-${authUser.value || 'anon'}`
 const FILE = 'playbook.yaml'
 
 const loading = ref(true)
@@ -60,7 +63,7 @@ const scaffold = [
 
 function saveDraft(content: string) {
   try {
-    localStorage.setItem(DRAFT_KEY, JSON.stringify({ content, saved_at: new Date().toISOString() }))
+    localStorage.setItem(draftKey(), JSON.stringify({ content, saved_at: new Date().toISOString() }))
     draftStatus.value = `已暂存 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`
   } catch {
     draftStatus.value = '暂存失败'
@@ -81,7 +84,7 @@ function restoreDraft(content: string) {
   ElMessage.success('草稿已恢复')
 }
 function discardDraft() {
-  localStorage.removeItem(DRAFT_KEY)
+  localStorage.removeItem(draftKey())
   draftInfo.value = null
 }
 
@@ -89,13 +92,16 @@ function download() {
   if (!model) return
   const blob = new Blob([model.getValue()], { type: 'text/yaml' })
   const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
+  const url = URL.createObjectURL(blob)
+  a.href = url
   a.download = FILE
   a.click()
-  URL.revokeObjectURL(a.href)
+  // 延迟 revoke：click 后同步 revoke 在部分浏览器（Safari）会中断尚未
+  // 开始的下载（与 ide/csv.ts 的 downloadText 同口径）
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
   // 下载即完成：清掉草稿，从其他页面重新进入是全新开始（而不是又弹出
   // "检测到未恢复的草稿"）。之后继续编辑会重新产生草稿，互不影响
-  localStorage.removeItem(DRAFT_KEY)
+  localStorage.removeItem(draftKey())
   draftInfo.value = null
   draftStatus.value = `已下载 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`
   ElMessage.success('已下载 playbook.yaml（本地草稿已清空）')
@@ -158,7 +164,7 @@ async function doSaveAsApp() {
     })
     saveDlg.visible = false
     // 已毕业成应用：清草稿，避免下次进入又提示恢复
-    localStorage.removeItem(DRAFT_KEY)
+    localStorage.removeItem(draftKey())
     draftInfo.value = null
     dirty.value = false
     try {
@@ -208,14 +214,23 @@ function playKeysSet(): Set<string> {
   return s
 }
 
+// disposed：onMounted 是长异步链（monaco + schema/modules/hosts 请求），
+// 快速进出路由时 await 之后仍会继续执行——若已卸载还创建 editor/models/
+// providers，清理钩子早已跑过，资源净泄漏；且 model 占用的固定 URI
+// 会让下次进入时 createModel 抛 "already exists"，编辑器直到刷新才恢复。
+// 每个 await 后检查（与 AppIDE 同口径）。
+let disposed = false
+
 onMounted(async () => {
   try {
     const monaco = await loadMonaco()
+    if (disposed) return
     monacoRef.value = monaco
     const [schema, mods] = await Promise.all([
       fetchSchema(),
       api<ModuleMeta[]>('GET', '/api/modules'),
     ])
+    if (disposed) return
     schemaMeta.value = schema
     modulesMeta.value = mods
     try {
@@ -223,13 +238,14 @@ onMounted(async () => {
         api<{ Name: string }[]>('GET', '/api/hosts'),
         api<{ Name: string }[]>('GET', '/api/groups'),
       ])
+      if (disposed) return
       hostGroups.value = { hosts: hosts.map((h) => h.Name), groups: hgroups.map((g) => g.Name) }
-    } catch { hostGroups.value = null }
+    } catch { if (!disposed) hostGroups.value = null }
 
     // 内容：草稿 > 脚手架
     let content = scaffold
     try {
-      const raw = localStorage.getItem(DRAFT_KEY)
+      const raw = localStorage.getItem(draftKey())
       if (raw) {
         const d = JSON.parse(raw)
         if (d && typeof d.content === 'string' && d.content.trim()) {
@@ -262,13 +278,14 @@ onMounted(async () => {
     scheduleDecorate()
     editor.focus()
   } catch (e) {
-    ElMessage.error(`加载失败：${(e as Error).message}`)
+    if (!disposed) ElMessage.error(`加载失败：${(e as Error).message}`)
   } finally {
-    loading.value = false
+    if (!disposed) loading.value = false
   }
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   clearTimeout(draftTimer)
   clearTimeout(decorTimer)
   providers?.dispose()
@@ -277,8 +294,8 @@ onBeforeUnmount(() => {
   model?.dispose()
 })
 
+// 状态栏行数（模板 {{ lines }} 使用）
 const lines = computed(() => (model ? model.getValue().split('\n').length : 0))
-void lines
 </script>
 
 <template>

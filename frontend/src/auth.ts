@@ -16,7 +16,6 @@ export interface Perms {
 }
 
 export const authUser = ref('')
-export const authChecking = ref(true)
 export const authPerms = ref<Perms>({ role: '', verbs: null, global: null, scoped: null })
 
 const verbSet = computed(() => new Set(authPerms.value.verbs || []))
@@ -55,14 +54,12 @@ export async function ensureAuthed(): Promise<string> {
     // 与刷新后 me 重探）口径一致
     authPerms.value = { ...(me.perms || { verbs: null, global: null, scoped: null }), role: me.role }
   }
-  authChecking.value = false
   return me ? me.user : ''
 }
 
 export function setAuth(user: string, perms?: Perms) {
   authUser.value = user
   if (perms) authPerms.value = perms
-  authChecking.value = false
   // 守卫下次导航读缓存：写入已解析的用户（含权限摘要），避免重探
   mePromise = Promise.resolve({ user, role: perms?.role || '', perms: perms || authPerms.value })
 }

@@ -182,7 +182,11 @@ func (s *Server) logRequest(next http.Handler) http.Handler {
 			return
 		}
 		trace := s.logger.Enabled(r.Context(), LevelTrace)
-		if trace && r.URL.Path != "/logs" {
+		// /logs 自排除防递归；/plan 同样排除：请求体内嵌完整任务脚本，
+		// 脚本里的 export TOKEN=... 等敏感内容不匹配脱敏正则（键名是
+		// argv/chdir 等深层结构），会原样进 ring buffer / 日志文件并可经
+		// GET /logs 拉取（exec 日志已用 sha256 摘要对齐，此处同一口径）
+		if trace && r.URL.Path != "/logs" && r.URL.Path != "/plan" {
 			s.logTrace("httpdump request:\n%s", dumphttp.Request(r))
 		}
 		rec := dumphttp.NewRecorder(w)

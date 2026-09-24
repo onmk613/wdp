@@ -72,6 +72,19 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
+// Flush 透传 http.Flusher：SSE（/api/runs/stream）等流式响应依赖它。
+// 少了这个方法，包装后的 ResponseWriter 类型断言 http.Flusher 必然失败
+// ——接口在生产直接 500，而测试直连裸 mux 时全绿（曾真实发生过）。
+func (w *statusWriter) Flush() {
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap 供 http.ResponseController 穿透本包装器，让 Flush/SetWriteDeadline
+// 这类可选能力不被中间件截断。
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
 // renderMetrics 输出 Prometheus 文本格式（指标面很小，手写格式三行一个
 // 指标，可控且零依赖；后续指标多了再考虑 client_golang）。
 func (s *Server) renderMetrics(w http.ResponseWriter) {

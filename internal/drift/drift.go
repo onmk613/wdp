@@ -17,6 +17,7 @@
 package drift
 
 import (
+	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
@@ -58,10 +59,15 @@ func (c *Capture) HostResult(host string, r *model.TaskResult) {
 }
 
 // Results 返回收集到的逐主机结果（巡检 play 执行完后调用）。
+// 返回浅拷贝：内部 map 直出会让调用方误改污染收集器。
 func (c *Capture) Results() map[string]*model.TaskResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.out
+	out := make(map[string]*model.TaskResult, len(c.out))
+	for k, v := range c.out {
+		out[k] = v
+	}
+	return out
 }
 
 // Row 一行巡检结论（JSON 输出字段名固定，供 CI 解析）。
@@ -149,7 +155,31 @@ func driftedDetail(mk *chart.Marker, wantSHA string, wantValues map[string]any) 
 // ValuesDiff 递归比较两棵 values 树，返回叶子级差异（"port: 9100 → 9200"）。
 // "<redacted>" 占位（sensitive_values 脱敏键）不构成差异——真实敏感值的
 // 变化不参与摘要，也不应在 diff 里泄露。
+//
+// 比较前两侧统一经 JSON 规范化：marker 侧数字经 json.Unmarshal 是
+// float64，当前侧经 yaml.Unmarshal 是 int——Go 接口比较不同动态类型恒
+// 不等而 %v 打印相同，会把每个数字字段误报成 "replicas: 3 → 3"，淹没
+// 真实差异。规范化后数字统一为 float64。
 func ValuesDiff(deployed, current map[string]any) []string {
+	return valuesDiff(normalizeValues(deployed), normalizeValues(current))
+}
+
+// normalizeValues 经 JSON 往返做类型归一（int/int64/float64 → float64，
+// 键序无关）。不可序列化的值（NaN 等，理论不可达——marker 侧已过一道
+// JSON）原样返回，差异判定退回旧口径而非报错。
+func normalizeValues(v map[string]any) map[string]any {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return v
+	}
+	var out map[string]any
+	if json.Unmarshal(b, &out) != nil {
+		return v
+	}
+	return out
+}
+
+func valuesDiff(deployed, current map[string]any) []string {
 	var out []string
 	var walk func(a, b map[string]any, prefix string)
 	walk = func(a, b map[string]any, prefix string) {

@@ -5,6 +5,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -75,7 +76,16 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 	for _, it := range req.Items {
 		app, err := s.st.GetApp(it.AppID)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("app %d not found", it.AppID))
+			// 统一文案：不回显应用名/ID 存在性，避免逐 ID 枚举应用
+			writeError(w, http.StatusBadRequest, "app not found or outside your scope")
+			return
+		}
+		// 应用级授权：run:execute 可作用域化（perm.go 的 scopableVerbs），
+		// 只校验"有该 verb"会让 run:execute@poolA 的账号把**任意应用**
+		// （含 scope 属 poolB 的）部署到 poolA 主机上。与上面的主机交集
+		// 合起来才是注释里承诺的"选择器 ∩ run:execute 允许集合"。
+		if !s.permsOf(permUser(r)).canApp(verbRunExec, app.Pools, app.Groups, app.Labels) {
+			writeError(w, http.StatusForbidden, "forbidden: app not found or outside your scope")
 			return
 		}
 		version := it.Version
@@ -84,7 +94,7 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 		}
 		tgz, err := s.st.VersionTgz(it.AppID, version)
 		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("app %s version %s not found", app.Name, version))
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("app version %q not found", version))
 			return
 		}
 		phase := it.Phase
@@ -103,7 +113,7 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 			}
 			if !found {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf(
-					"app %s version %s has no phase %q (available: %s)", app.Name, version, phase, strings.Join(known, ", ")))
+					"app version %q has no phase %q (available: %s)", version, phase, strings.Join(known, ", ")))
 				return
 			}
 		}
@@ -113,33 +123,31 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 	// 应用级执行准入：同应用已有 queued/running 的执行 → 409 拒绝并反馈
 	// 冲突方（谁在跑、跑到哪、什么相位）。并发跑同一应用会交错写 marker/
 	// 状态/marker 值，结果不可解释——此前只挡了主机级（gate），两个不同
-	// 选择器打同一应用照样并行。
-	appIDs := make([]int64, 0, len(items))
-	for _, it := range items {
-		appIDs = append(appIDs, it.app.ID)
+	// 选择器打同一应用照样并行。检查与创建收进 store 单事务（先查后插
+	// 分开执行存在窗口：两个并发请求可同时通过检查同时创建）。
+	user, _ := r.Context().Value(ctxUser{}).(string)
+	inputs := make([]store.RunInput, 0, len(items))
+	for i, it := range items {
+		inputs = append(inputs, store.RunInput{
+			Kind: "app", AppID: it.app.ID, AppName: it.app.Name,
+			Version: it.version, Phase: it.phase, Seq: i,
+			Status: "queued", Selector: string(sel), User: user,
+		})
 	}
-	if active, err := s.st.ActiveRunsByApp(appIDs); err != nil {
-		s.writeInternal(w, err)
-		return
-	} else if len(active) > 0 {
-		parts := make([]string, 0, len(active))
-		for _, a := range active {
+	runIDs, err := s.st.CreateRunsExclusive(inputs)
+	var conflict *store.RunConflictError
+	if errors.As(err, &conflict) {
+		parts := make([]string, 0, len(conflict.Active))
+		for _, a := range conflict.Active {
 			parts = append(parts, fmt.Sprintf("%s[%s]（%s · run #%d · %s）", a.AppName, a.Phase, a.Status, a.ID, a.User))
 		}
 		writeError(w, http.StatusConflict,
 			"应用正在执行中，完成后再发起："+strings.Join(parts, "、"))
 		return
 	}
-
-	runIDs := make([]int64, 0, len(items))
-	user, _ := r.Context().Value(ctxUser{}).(string)
-	for i, it := range items {
-		runID, err := s.st.CreateRun("app", it.app.ID, it.app.Name, it.version, it.phase, i, string(sel), user, "queued")
-		if err != nil {
-			s.writeInternal(w, err)
-			return
-		}
-		runIDs = append(runIDs, runID)
+	if err != nil {
+		s.writeInternal(w, err)
+		return
 	}
 
 	// per-host 执行闸门：拿到全部目标主机的锁才开始（同主机串行，
@@ -169,10 +177,12 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer release()
+		// 探测一次全部目标主机（agent scheme 判定），items 循环内复用：
+		// 每个应用条目重探 N 台主机 ×2 趟 /health 是纯重复开销
+		mhosts := s.runHostModels(ctx, hosts)
 		for i, it := range items {
 			_ = s.st.SetRunStatus(runIDs[i], "running")
 			s.runs.notify(runEvent{ID: runIDs[i], Status: "running"})
-			mhosts := s.runHostModels(ctx, hosts)
 			err := s.runsvc.RunOneApp(ctx, it.tgz, mhosts, it.phase, &dbReporter{st: s.st, runID: runIDs[i], hub: s.runs})
 			status, summary := "succeeded", "ok"
 			if err != nil {
@@ -267,7 +277,7 @@ var _ report.Reporter = (*dbReporter)(nil)
 func (s *Server) runHostModels(ctx context.Context, hosts []*store.Host) []*model.Host {
 	mhosts := make([]*model.Host, 0, len(hosts))
 	for _, h := range hosts {
-		mh := s.agentHostModel(h, s.agentScheme(ctx, h))
+		mh := s.agentHostModel(h)
 		mh.Vars = map[string]any{"group_names": h.Groups}
 		mhosts = append(mhosts, mh)
 	}

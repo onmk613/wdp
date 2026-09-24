@@ -236,13 +236,13 @@ export class ChartFS {
   }
 
   // toSaveBody 序列化保存/校验请求：改动的文本文件 + 删除清单。
-  // chartYAMLOverride 用于保存时把版本号写进 chart.yaml（保持文件与库一致）。
-  toSaveBody(version: string, chartYAMLOverride?: string): SpecSaveBody {
+  // chart.yaml 的版本号由调用方在保存前直接 patch 进 f.content（见
+  // AppIDE 的保存流程），toSaveBody 只做序列化。
+  toSaveBody(version: string): SpecSaveBody {
     const files: SpecSaveBody['files'] = []
     for (const f of this.files.values()) {
       if (f.binary || f.deleted) continue
-      let content = f.content
-      if (f.path === 'chart.yaml' && chartYAMLOverride !== undefined) content = chartYAMLOverride
+      const content = f.content
       const changed = !f.fromBase || content !== f.original || f.path === 'chart.yaml'
       if (!changed) continue
       files.push({ path: f.path, content, size: content.length })

@@ -157,38 +157,31 @@ let seriesSeq = 0
 
 async function loadSeries() {
   const seq = ++seriesSeq
-  let qs = ''
-  if (customRange.value) {
-    const from = Math.floor(customRange.value[0].getTime() / 1000)
-    const to = Math.floor(customRange.value[1].getTime() / 1000)
-    qs = `from=${from}`
-    // to 只是显示边界：series 接口按 from 起查，超出 to 的桶在前端裁掉
-    for (const c of charts) {
+  // 6 张图并行拉取：串行 for-await 时单个慢请求阻塞后续全部图表
+  const to = customRange.value ? Math.floor(customRange.value[1].getTime() / 1000) : 0
+  await Promise.allSettled(
+    charts.map(async (c) => {
+      let qs: string
+      if (customRange.value) {
+        const from = Math.floor(customRange.value[0].getTime() / 1000)
+        // to 只是显示边界：series 接口按 from 起查，超出 to 的桶在前端裁掉
+        qs = `from=${from}`
+      } else {
+        qs = `hours=${hours.value}`
+      }
+      const key = `${c.metric}|${c.labels}`
       try {
         const pts = await api<SeriesPoint[]>(
           'GET', `/api/hosts/${hostId.value}/series?metric=${c.metric}&labels=${encodeURIComponent(c.labels)}&${qs}`,
         )
         if (seq !== seriesSeq) return
-        series.value[`${c.metric}|${c.labels}`] = pts.filter((p) => p.ts <= to)
+        series.value[key] = to ? pts.filter((p) => p.ts <= to) : pts
       } catch {
         if (seq !== seriesSeq) return
-        series.value[`${c.metric}|${c.labels}`] = []
+        series.value[key] = []
       }
-    }
-    return
-  }
-  for (const c of charts) {
-    try {
-      const pts = await api<SeriesPoint[]>(
-        'GET', `/api/hosts/${hostId.value}/series?metric=${c.metric}&labels=${encodeURIComponent(c.labels)}&hours=${hours.value}`,
-      )
-      if (seq !== seriesSeq) return
-      series.value[`${c.metric}|${c.labels}`] = pts
-    } catch {
-      if (seq !== seriesSeq) return
-      series.value[`${c.metric}|${c.labels}`] = []
-    }
-  }
+    }),
+  )
 }
 
 function hoursChanged() {

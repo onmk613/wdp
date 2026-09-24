@@ -81,6 +81,11 @@ Go text/template，`missingkey=error`（**未定义变量直接报错**，尽早
 | 类别 | 函数 |
 |---|---|
 | 字典/列表 | `dict` `list` `concat` `append` `prepend` `first` `last` `rest` `initial` `reverse` `uniq` `without` `has` `compact` `dig` `keys` `pick` `omit` `merge` `values` |
+
+> `merge` 与 Helm/sprig 的差别：wdp 的 `merge` **不改写第一个参数**，返回合并后的新字典。
+> （sprig 原实现就地写 dst，而变量域里的嵌套 map 与 values 是同一对象、被同批次
+> 各主机的并发渲染共享——就地写会跨主机污染配置，甚至触发 Go 的
+> `concurrent map writes` 致命错误。深合并语义本身不变。）
 | 字符串 | `trim` `trimAll` `trimPrefix` `trimSuffix` `upper` `lower` `title` `untitle` `repeat` `substr` `trunc` `abbrev` `initials` `randAlpha` `randAlphaNum` `randNumeric` `wrap` `contains` `hasPrefix` `hasSuffix` `quote` `squote` `cat` `indent` `nindent` `replace` `plural` `sha1sum` `sha256sum` `adler32sum` `toString` `atoi` `int64` `int` `float64` `seq` `toDecimal` |
 | 正则 | `regexMatch` `regexFindAll` `regexFind` `regexReplaceAll` `regexReplaceAllLiteral` `regexSplit` |
 | 类型转换 | `toJson` `fromJson` `toPrettyJson` `ternary` `default` `empty` `coalesce` `all` `any` `kindOf` `typeOf` `kindIs` `typeIs` |

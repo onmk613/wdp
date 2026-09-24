@@ -242,7 +242,7 @@ func TestSelectArchiveMembers(t *testing.T) {
 		"top/docs/guide.md":  "g",
 	})
 	// basename 检索 + 相对路径精确 + 未命中报错 + 同名首个命中
-	sel, err := selectArchiveMembers("targz", arc, []string{"app", "top/docs/guide.md"})
+	sel, err := selectArchiveMembers("targz", arc, []string{"app", "top/docs/guide.md"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func TestSelectArchiveMembers(t *testing.T) {
 	if string(sel[1].data) != "g" {
 		t.Fatalf("guide 成员: %+v", sel[1])
 	}
-	if _, err := selectArchiveMembers("targz", arc, []string{"missing-bin"}); err == nil ||
+	if _, err := selectArchiveMembers("targz", arc, []string{"missing-bin"}, 0); err == nil ||
 		!bytes.Contains([]byte(err.Error()), []byte("missing-bin")) {
 		t.Fatalf("未命中应报错: %v", err)
 	}
@@ -265,12 +265,12 @@ func TestSelectArchiveMembers(t *testing.T) {
 	w, _ := zw.Create("etcd-v3.5/linux/etcdctl")
 	_, _ = w.Write([]byte("ETCDCTL"))
 	_ = zw.Close()
-	sel, err = selectArchiveMembers("zip", zbuf.Bytes(), []string{"etcdctl"})
+	sel, err = selectArchiveMembers("zip", zbuf.Bytes(), []string{"etcdctl"}, 0)
 	if err != nil || len(sel) != 1 || string(sel[0].data) != "ETCDCTL" {
 		t.Fatalf("zip 选取: %v %+v", err, sel)
 	}
 	// 不支持的格式
-	if _, err := selectArchiveMembers("tarxz", arc, []string{"app"}); err == nil {
+	if _, err := selectArchiveMembers("tarxz", arc, []string{"app"}, 0); err == nil {
 		t.Fatal("xz 成员选取应报不支持")
 	}
 }

@@ -272,9 +272,12 @@ func runDirect(ctx context.Context, shard *plan.Plan, opts applyOptions) bool {
 	ex := executor.New(inv, conns, rep, executor.Options{
 		Forks:            config.Current().Forks(),
 		Phase:            shard.Phase,
+		TaskTimeout:      config.Current().Run.TaskTimeout,
 		WdpVersion:       Version,
+		FactCachePath:    opts.factCache,
 		PayloadDir:       opts.chartDir,
 		MaxDownloadBytes: maxDownloadBytes(),
+		MaxUploadBytes:   maxUploadBytes(),
 	})
 	failed := ex.RunPlan(ctx, shard)
 	conns.CloseAll()

@@ -35,7 +35,11 @@ func (m *TemplateModule) Run(rc *RunContext, args map[string]any, _ string) *Res
 	if !ok || dest == "" {
 		return Fail("%s", "template requires a dest parameter")
 	}
-	tpl, err := os.ReadFile(resolveLocal(rc, src))
+	local, lerr := resolveLocal(rc, src)
+	if lerr != nil {
+		return Fail("%v", lerr)
+	}
+	tpl, err := os.ReadFile(local)
 	if err != nil {
 		return Fail("failed to read template: %v", err)
 	}

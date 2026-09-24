@@ -67,7 +67,11 @@ func (s *Server) handleUpgradeHost(w http.ResponseWriter, r *http.Request) {
 	if r.Body != nil {
 		_ = decodeJSONBody(w, r, &req)
 	}
-	res := s.upgradeAgent(r.Context(), h, req.Force)
+	// 升级流程同样脱离请求生命周期（与 exec.go 的口径一致）：断连 →
+	// ctx 取消 → 上传/替换中途被打断，目标机残留 .wdp-upgrade-* 临时
+	// 文件甚至二进制已换未重启的半完成态。代价是断连后响应写往死连接
+	//（无害），结果仍随响应前尽力写出。
+	res := s.upgradeAgent(s.background(), h, req.Force)
 	if res.OK {
 		s.audit(r, "upgrade", "agent", h.Name, fmt.Sprintf("%s → %s", orUnknown(res.From), res.To))
 	} else {
@@ -99,7 +103,7 @@ func (s *Server) upgradeAgent(ctx context.Context, h *store.Host, force bool) Up
 	res := UpgradeResult{ID: h.ID, Name: h.Name, To: agent.BuildVersion()}
 
 	// 1. 探活：平台与当前版本
-	pr := probeHost(ctx, h, s.mtlsProbeClient())
+	pr := probeHost(ctx, h, s.probeClientFor(h))
 	if pr.Status != "online" {
 		res.Detail = "agent 不可达：" + pr.Error
 		return res
@@ -137,9 +141,8 @@ func (s *Server) upgradeAgent(ctx context.Context, h *store.Host, force bool) Up
 	suffix := make([]byte, 6)
 	_, _ = rand.Read(suffix)
 	tmp := filepath.Join(dir, fmt.Sprintf(".wdp-upgrade-%s", hex.EncodeToString(suffix)))
-	scheme := s.agentScheme(ctx, h)
 	dc := &conn.Defaults{Conn: "agent"}
-	ac := agentc.New(s.agentHostModel(h, scheme), dc)
+	ac := agentc.New(s.agentHostModel(h), dc)
 	defer ac.Close()
 	f, err := os.Open(binPath)
 	if err != nil {
@@ -171,7 +174,7 @@ func (s *Server) upgradeAgent(ctx context.Context, h *store.Host, force bool) Up
 				return res
 			}
 			time.Sleep(3 * time.Second)
-			p2 := probeHost(ctx, h, s.mtlsProbeClient())
+			p2 := probeHost(ctx, h, s.probeClientFor(h))
 			if p2.Status == "online" {
 				if p2.Build == res.To {
 					res.OK = true
@@ -259,7 +262,9 @@ func (s *Server) handleUpgradeBatch(w http.ResponseWriter, r *http.Request) {
 			h := hosts[i]
 			cursor++
 			mu.Unlock()
-			results[i] = s.upgradeAgent(r.Context(), h, req.Force)
+			// background ctx（同单台路径）：批量升级中客户端断连不应中断
+			// 正在替换二进制的主机
+			results[i] = s.upgradeAgent(s.background(), h, req.Force)
 		}()
 	}
 	wg.Wait()

@@ -12,6 +12,6 @@ internal/web/static/*
 !internal/web/static/.keep
 wdp-data/
 examples/
-
-# 打包产物
 *.tgz
+# golden 测试夹具必须随库跟踪（CI 干净检出依赖它们）
+!internal/plan/testdata/*.tgz

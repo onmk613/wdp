@@ -54,6 +54,15 @@ function openCreate() {
 }
 
 async function submitCreate() {
+  // 前端先拦（与后端口径一致）：空用户名/短密码不必等一次网络往返吃 400
+  if (!createForm.name.trim()) {
+    ElMessage.warning('请输入用户名')
+    return
+  }
+  if (createForm.password.length < 8) {
+    ElMessage.warning('密码至少 8 位')
+    return
+  }
   createLoading.value = true
   try {
     users.value = await api<User[]>('POST', '/api/users', { ...createForm })
@@ -123,6 +132,10 @@ function openReset(row: User) {
 
 async function submitReset() {
   if (!passUser.value) return
+  if (passForm.password.length < 8) {
+    ElMessage.warning('密码至少 8 位')
+    return
+  }
   passLoading.value = true
   try {
     await api('PUT', `/api/users/${passUser.value.ID}/password`, { password: passForm.password })

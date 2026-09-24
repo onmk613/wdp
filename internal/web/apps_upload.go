@@ -59,8 +59,16 @@ func (s *Server) handleUploadChart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 并入既有应用须在该应用的作用域内（新应用走 app:upload 全局权限）
-	if appErr == nil && !s.permsOf(permUser(r)).canApp(verbAppUpload, existing.Pools, existing.Groups, existing.Labels) {
+	// 并入既有应用须在该应用的作用域内；新应用要求 app:upload 的**全局**
+	// 权限（与 handleCreateSpec 的 verbAppCreate 口径一致）——requirePerm
+	// 对作用域用户同样放行，不补这道校验的话仅持 app:upload@poolA 的
+	// 用户可以任意名字建空作用域应用，污染全局应用列表
+	if appErr == nil {
+		if !s.permsOf(permUser(r)).canApp(verbAppUpload, existing.Pools, existing.Groups, existing.Labels) {
+			permApp403(w)
+			return
+		}
+	} else if !s.permsOf(permUser(r)).global[verbAppUpload] {
 		permApp403(w)
 		return
 	}

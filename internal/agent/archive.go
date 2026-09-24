@@ -66,6 +66,37 @@ func (b *extractBudget) entry() error {
 	return nil
 }
 
+// writeFileLimited 写入单文件并按实际写入字节数扣减预算（截断覆盖，
+// 语义同 tar -x）。zip 分支必须走这里：中央目录声明的 UncompressedSize64
+// 可伪造（声明 1 字节实际展开数十 GB 的 zip 炸弹），实际写入量才是资源
+// 消耗的真相——最多写「剩余预算 + 1」字节，写出界即判超限并停止。
+// 失败（含超限/读取错误）清理本次条目的半成品：半截文件留在 dest 会
+// 在重试时被当作已存在状态。
+func (b *extractBudget) writeFileLimited(path string, r io.Reader, mode fs.FileMode) error {
+	remaining := maxExtractBytes - b.bytes
+	if remaining < 0 {
+		remaining = 0
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	n, cpErr := io.Copy(f, io.LimitReader(r, remaining+1))
+	if cerr := f.Close(); cpErr == nil {
+		cpErr = cerr
+	}
+	if cpErr != nil {
+		_ = os.Remove(path)
+		return cpErr
+	}
+	if n > remaining {
+		_ = os.Remove(path)
+		return fmt.Errorf("archive exceeds the %d GiB extraction limit at entry %q (suspected decompression bomb)", maxExtractBytes>>30, filepath.Base(path))
+	}
+	b.bytes += n
+	return nil
+}
+
 // ExtractArchive 解压 src 到 dest（格式按魔数识别），返回解出的条目数。
 func ExtractArchive(src, dest string) (int, error) {
 	budget := &extractBudget{}
@@ -224,6 +255,16 @@ func extractTar(tr *tar.Reader, dest string, budget *extractBudget) (int, error)
 			if err != nil {
 				return count, fmt.Errorf("hardlink %q target is out of bounds: %w", hdr.Name, err)
 			}
+			// os.Link 解析 oldpath 时跟随符号链接：中间组件或最终组件
+			// 若是指向 dest 外的符号链接（历史残留/预置），硬链接会落在
+			// dest 外的 inode 上，随后同名文件条目经它写穿出去。与文件
+			// 分支同口径 fail-loud。
+			if err := checkIntermediateSymlinks(dest, linkTarget); err != nil {
+				return count, fmt.Errorf("hardlink %q target: %w", hdr.Name, err)
+			}
+			if fi, lerr := os.Lstat(linkTarget); lerr == nil && fi.Mode()&fs.ModeSymlink != 0 {
+				return count, fmt.Errorf("hardlink %q target %s is a symlink, refusing to extract", hdr.Name, hdr.Linkname)
+			}
 			_ = os.Remove(target)
 			if err := os.Link(linkTarget, target); err != nil {
 				return count, fmt.Errorf("failed to create hardlink %s: %w", hdr.Name, err)
@@ -267,10 +308,15 @@ func extractZip(src, dest string, budget *extractBudget) (int, error) {
 			if err != nil {
 				return count, err
 			}
-			link, err := io.ReadAll(rc)
+			// 目标读取同样封顶：symlink 目标本就只是短路径，无上限读取
+			// 与文件分支一样可被声明外数据放大
+			link, err := io.ReadAll(io.LimitReader(rc, 4096+1))
 			rc.Close()
 			if err != nil {
 				return count, err
+			}
+			if len(link) > 4096 {
+				return count, fmt.Errorf("symlink %q target exceeds 4096 bytes", zf.Name)
 			}
 			rel, err := safeLinkTarget(string(link))
 			if err != nil {
@@ -281,9 +327,6 @@ func extractZip(src, dest string, budget *extractBudget) (int, error) {
 				return count, fmt.Errorf("failed to create symlink %s: %w", zf.Name, err)
 			}
 		default:
-			if err := budget.add(zf.Name, int64(zf.UncompressedSize64)); err != nil {
-				return count, err
-			}
 			rc, err := zf.Open()
 			if err != nil {
 				return count, err
@@ -293,7 +336,7 @@ func extractZip(src, dest string, budget *extractBudget) (int, error) {
 				rc.Close()
 				return count, err
 			}
-			err = writeFile(target, rc, mode.Perm())
+			err = budget.writeFileLimited(target, rc, mode.Perm())
 			rc.Close()
 			if err != nil {
 				return count, fmt.Errorf("failed to write %s: %w", zf.Name, err)
@@ -307,7 +350,8 @@ func extractZip(src, dest string, budget *extractBudget) (int, error) {
 	return count, nil
 }
 
-// writeFile 写入单个文件（截断覆盖，语义同 tar -x）。
+// writeFile 写入单个文件（截断覆盖，语义同 tar -x）。失败时删除半截
+// 文件——与 zip 分支的 writeFileLimited 同口径，重试不把残留当已存在状态。
 func writeFile(path string, r io.Reader, mode fs.FileMode) error {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
 	if err != nil {
@@ -315,6 +359,7 @@ func writeFile(path string, r io.Reader, mode fs.FileMode) error {
 	}
 	if _, err := io.Copy(f, r); err != nil {
 		_ = f.Close()
+		_ = os.Remove(path)
 		return err
 	}
 	return f.Close()

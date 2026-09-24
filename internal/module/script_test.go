@@ -13,11 +13,14 @@ import (
 // 远端 shell 解释。现在必须逐词 Quote 后拼接，参数字面传给脚本。
 func TestScriptArgsQuoted(t *testing.T) {
 	rc, fake := newTestRC(t)
+	// src 现在是 chart 内相对路径（绝对路径与 .. 逃逸被沙箱拒绝）：
+	// 以脚本所在目录作为 BaseDir，用文件名引用
 	dir := t.TempDir()
 	src := filepath.Join(dir, "migrate.sh")
 	if err := os.WriteFile(src, []byte("#!/bin/sh\necho ok\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	rc.BaseDir = dir
 
 	var sent string
 	oldExecFn := fake.ExecFn
@@ -28,7 +31,7 @@ func TestScriptArgsQuoted(t *testing.T) {
 		return oldExecFn(req)
 	}
 
-	res := (&ScriptModule{}).Run(rc, map[string]any{"src": src}, `--tag "a b" $(pwned) ;reboot`)
+	res := (&ScriptModule{}).Run(rc, map[string]any{"src": "migrate.sh"}, `--tag "a b" $(pwned) ;reboot`)
 	if res.Failed {
 		t.Fatalf("执行失败: %s", res.Msg)
 	}

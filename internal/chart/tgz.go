@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	"github.com/cyphar/filepath-securejoin"
@@ -64,14 +63,27 @@ func loadTgz(path string, limits Limits) (*Chart, error) {
 			}
 		case tar.TypeSymlink:
 			// 非 wdp package 打包器的 tgz 可能含符号链接（Helm 包常见）：
-			// 创建相对链接（绝对目标收敛为 tmp 内相对写法），缺链接条目
-			// 会导致后续模板渲染出现难以定位的文件缺失
-			rel := strings.TrimPrefix(filepath.ToSlash(hdr.Linkname), "/")
-			if slices.Contains(strings.Split(rel, "/"), "..") {
-				rel = ".wdp-rejected-link"
+			// 缺链接条目会导致后续模板渲染出现难以定位的文件缺失。
+			//
+			// 但链接目标必须校验，否则链接会指到解包根之外：控制台读
+			// spec（console.ReadSpecFromDir）与保存副本（console.CopyDir）
+			// 都会跟随链接，等于把服务端任意文件（含 <data>/ca/ca.key）
+			// 交到上传方手里。
+			//   - 绝对目标：一律让整个包加载失败（合法 chart 不需要，
+			//     出现即恶意或打包器错误，静默忽略会让问题无从发现）；
+			//   - 相对目标：词法归一后必须仍在解包根内，逃逸的条目跳过
+			//     （保持归档可加载，只是该链接不存在）。
+			if strings.HasPrefix(filepath.ToSlash(hdr.Linkname), "/") {
+				os.RemoveAll(tmp)
+				return nil, fmt.Errorf("chart archive entry %q has an absolute symlink target %q, refusing to extract (suspected arbitrary-file-read attempt)",
+					hdr.Name, hdr.Linkname)
+			}
+			link, lerr := safeArchiveLink(tmp, target, hdr.Linkname)
+			if lerr != nil {
+				continue
 			}
 			_ = os.Remove(target)
-			if err := os.Symlink(filepath.FromSlash(rel), target); err != nil {
+			if err := os.Symlink(link, target); err != nil {
 				os.RemoveAll(tmp)
 				return nil, fmt.Errorf("failed to create symlink %q: %w", hdr.Name, err)
 			}
@@ -128,4 +140,23 @@ func loadTgz(path string, limits Limits) (*Chart, error) {
 	}
 	c.tmpDir = tmp
 	return c, nil
+}
+
+// safeArchiveLink 校验归档内符号链接目标并返回可安全创建的链接值。
+// 调用方负责先拒绝绝对目标（见 loadTgz）。此处只处理相对目标：
+// 以「链接所在目录」为基准做词法归一，结果必须仍落在解包根 root 内，
+// 否则返回错误由调用方跳过该条目。
+//
+// 只做词法判定（不 EvalSymlinks）是刻意的：目标文件可能还没解出来。
+// 归档内其它链接同样经过本函数校验，因此链式跟随不会导出根外。
+func safeArchiveLink(root, linkPath, linkName string) (string, error) {
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(linkPath), filepath.FromSlash(linkName)))
+	rel, err := filepath.Rel(root, resolved)
+	if err != nil {
+		return "", fmt.Errorf("symlink target %q cannot be resolved: %w", linkName, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("symlink target %q escapes the archive root", linkName)
+	}
+	return filepath.FromSlash(filepath.ToSlash(linkName)), nil
 }

@@ -38,6 +38,8 @@ func (s *Server) handleHostMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := s.fetchAgentMetrics(r.Context(), h)
 	if err != nil {
+		// 错误原文回传（运维定位 agent 不可达的现场需要），同时落日志
+		s.logger.Warn("fetch agent metrics failed", "host", h.Name, "err", err)
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
@@ -49,26 +51,12 @@ func (s *Server) handleHostMetrics(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
-// agentScheme 探活定传输：纳管信任链启用时先探活（https+mTLS 优先、明文
-// http 回退）取实测 scheme，离线或未启用纳管退回 http。健康检查幂等——
-// 执行前探活定通道，可避免"执行成功但响应失败时重试"导致重复执行。
-func (s *Server) agentScheme(ctx context.Context, h *store.Host) string {
-	if s.cam == nil {
-		return "http"
-	}
-	if pr := probeHost(ctx, h, s.mtlsProbeClient()); pr.Status == "online" {
-		return pr.Scheme
-	}
-	return "http"
-}
-
-// fetchAgentMetrics 从 agent 拉取 /metrics 原文（探活定 scheme，与
-// 远程执行同一条路）。
+// fetchAgentMetrics 从 agent 拉取 /metrics 原文（通道与远程执行同一条路：
+// 已纳管走 mTLS，未纳管走明文，不探活、不降级）。
 func (s *Server) fetchAgentMetrics(ctx context.Context, h *store.Host) (string, error) {
-	scheme := s.agentScheme(ctx, h)
-	client := plainProbeClient()
+	scheme, client := s.agentScheme(h), plainProbeClient()
 	if scheme == "https" {
-		client = s.mtlsProbeClient()
+		client = s.cam.tlsClientFor(hostNameOf(h.Address))
 	}
 	url := fmt.Sprintf("%s://%s/metrics", scheme, net.JoinHostPort(h.Address, fmt.Sprint(h.AgentPort)))
 	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)

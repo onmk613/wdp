@@ -7,6 +7,7 @@ import { ElMessage } from 'element-plus'
 import { Lock, User } from '@element-plus/icons-vue'
 import { api } from '../api'
 import { setAuth, type Perms } from '../auth'
+import { safeRedirect } from '../router'
 
 const route = useRoute()
 const router = useRouter()
@@ -15,6 +16,7 @@ const form = ref({ user: '', password: '' })
 const loading = ref(false)
 
 async function submit() {
+  if (loading.value) return // 密码框回车不受按钮 loading 禁用约束，慢网络下连按会并发登录
   if (!form.value.user || !form.value.password) {
     ElMessage.warning('请输入用户名与密码')
     return
@@ -23,7 +25,7 @@ async function submit() {
   try {
     const r = await api<{ user: string; role: string; perms: Perms }>('POST', '/api/login', form.value)
     setAuth(r.user, { ...r.perms, role: r.role })
-    void router.push((route.query.redirect as string) || '/hosts')
+    void router.push(safeRedirect(route.query.redirect))
   } catch (e) {
     ElMessage.error((e as Error).message)
   } finally {

@@ -1,7 +1,6 @@
 package module
 
 import (
-	"bytes"
 	"fmt"
 	"regexp"
 	"slices"
@@ -134,11 +133,16 @@ func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, _ string) *R
 	case 4:
 		return Fail("remote path %s exists and is not a regular file", path)
 	case 0:
-		var buf bytes.Buffer
-		if err := rc.Conn.DownloadFile(rc.Ctx, path, &buf); err != nil {
+		// 下载封顶：lineinfile 需要全文才能做行变换，超限只能 fail-loud
+		// （截断后回写会把远端文件改坏），不能像 diff 那样降级提示
+		buf := &cappedBuffer{cap: uploadLimit(rc)}
+		if err := rc.Conn.DownloadFile(rc.Ctx, path, buf); err != nil {
 			return Fail("failed to read %s: %v", path, err)
 		}
-		oldContent = buf.String()
+		if buf.truncated() {
+			return Fail("remote file %s exceeds the %d MiB limit ([transfer].max_upload_mb)", path, uploadLimit(rc)>>20)
+		}
+		oldContent = buf.buf.String()
 	default:
 		if state == "absent" {
 			return &Result{Msg: fmt.Sprintf("%s does not exist, no change needed for state=absent", path)}

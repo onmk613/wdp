@@ -36,6 +36,9 @@ func newEnrollServer(t *testing.T) (*Server, *store.Store) {
 	s, err := New(st, Options{
 		AdminUser: "admin", // AdminPass 留空：不干预直接 CreateUser 写入的 passw0rd
 		CADir:     filepath.Join(t.TempDir(), "ca"),
+		// 测试走 httptest 明文（无 TLS 反代）：与可信内网部署一样需要显式
+		// 打开明文引导开关。默认拒绝的行为由 TestEnrollRefusesPlaintext 覆盖
+		AllowPlaintextEnroll: true,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -246,8 +249,9 @@ func TestEnrollScriptHostHeaderInjection(t *testing.T) {
 }
 
 // TestRemoteIPTrustedProxy XFF 采信语义：直连（非信任对端）伪造 XFF 一律
-// 忽略取真实对端；回环（本机反代）与显式 --trust-proxy 对端才采信 XFF，
-// 且值须可解析为 IP。
+// 忽略取真实对端；回环（本机反代）与显式 --trust-proxy 对端才采信 XFF。
+// 采信的是**最后一段**：追加式反代（nginx $proxy_add_x_forwarded_for）
+// 把它看到的真实对端追加在末尾，首段是客户端自带的可伪造值。
 func TestRemoteIPTrustedProxy(t *testing.T) {
 	s, _ := newEnrollServer(t)
 	xff := func(remote, forwarded string) string {
@@ -261,8 +265,8 @@ func TestRemoteIPTrustedProxy(t *testing.T) {
 	if got := xff("203.0.113.9:4444", "10.0.0.1"); got != "203.0.113.9" {
 		t.Errorf("direct client spoofed XFF: got %q, want real peer 203.0.113.9", got)
 	}
-	if got := xff("127.0.0.1:5555", "10.0.0.1, 127.0.0.2"); got != "10.0.0.1" {
-		t.Errorf("loopback proxy should honor first XFF entry: got %q", got)
+	if got := xff("127.0.0.1:5555", "10.0.0.1, 127.0.0.2"); got != "127.0.0.2" {
+		t.Errorf("loopback proxy must honor last (proxy-appended) XFF entry: got %q, want 127.0.0.2", got)
 	}
 	if got := xff("127.0.0.1:5555", "not-an-ip"); got != "127.0.0.1" {
 		t.Errorf("unparseable XFF should fall back to peer: got %q", got)
@@ -290,9 +294,9 @@ func TestRemoteIPTrustedProxy(t *testing.T) {
 	if got := s2.remoteIP(req); got != "10.0.0.8" {
 		t.Errorf("explicitly trusted proxy should honor XFF: got %q", got)
 	}
-	req.RemoteAddr = "198.51.100.7:notaport" // 解析失败回退原文
+	req.RemoteAddr = "198.51.100.7:notaport" // SplitHostPort 照常拆出 host
 	req.Header.Del("X-Forwarded-For")
-	if got := s2.remoteIP(req); got != "198.51.100.7:notaport" && got != "" {
-		t.Logf("unparseable RemoteAddr fallback: %q", got)
+	if got := s2.remoteIP(req); got != "198.51.100.7" {
+		t.Errorf("non-numeric port RemoteAddr should still resolve peer host: got %q", got)
 	}
 }

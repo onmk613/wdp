@@ -172,10 +172,17 @@ func (s *Server) pinMiddleware(next http.Handler) http.Handler {
 			http.Error(w, "client certificate required", http.StatusUnauthorized)
 			return
 		}
-		sum := sha256.Sum256(r.TLS.PeerCertificates[0].Raw)
+		leaf := r.TLS.PeerCertificates[0]
+		sum := sha256.Sum256(leaf.Raw)
 		fp := hex.EncodeToString(sum[:])
+		// 公钥（SPKI）指纹同样接受：证书续期（保留密钥对）后 DER 变了、
+		// SPKI 不变，控制台例行续证因此不会把整片 agent 打成不可达。
+		spki := sha256.Sum256(leaf.RawSubjectPublicKeyInfo)
+		spkiFP := hex.EncodeToString(spki[:])
 		if pins := s.material.Load().pins; pins != nil {
-			if _, ok := pins[fp]; !ok && r.URL.Path != "/health" {
+			_, certOK := pins[fp]
+			_, keyOK := pins[spkiFP]
+			if !certOK && !keyOK && r.URL.Path != "/health" {
 				http.Error(w, "client certificate not pinned", http.StatusForbidden)
 				return
 			}

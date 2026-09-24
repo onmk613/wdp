@@ -43,6 +43,10 @@ type Options struct {
 	// 组合根从 --max-download-mb / wdp.cfg [transfer].max_download_mb 注入。
 	MaxDownloadBytes int64
 
+	// MaxUploadBytes 是 copy/unarchive 读取本地分发源的上限（字节；0 =
+	// 内置默认 2GiB）。组合根从 wdp.cfg [transfer].max_upload_mb 注入。
+	MaxUploadBytes int64
+
 	Chart  *chart.Chart   // chart 模式（nil = 裸 playbook 模式）
 	Values map[string]any // chart 合并后的最终 values
 	// ChartRefs 是裸 playbook 模式的 chart 引用解析表：引用名（去 @版本
@@ -105,14 +109,21 @@ type hostRun struct {
 	notified   map[string]bool
 	stats      *model.Stats
 	journal    []journalEntry // 变更日志（auto_rollback 时快照恢复依据）
-	chartDepth int            // chart 引用展开深度（防自引用/互引用递归崩溃）
+	// rollbackGaps 记录"未能建立快照"的路径（快照失败）：这些路径没有
+	// 还原依据，回滚汇总必须把它们计入失败，而不是当作回滚完成
+	rollbackGaps []string
+	chartDepth   int // chart 引用展开深度（防自引用/互引用递归崩溃）
 }
 
-// journalEntry 一条变更日志：动作 + 实际执行主机。delegate_to 时变更发生在
-// 被委托主机上（快照也在那里），回滚与快照清理必须打到实际执行主机。
+// journalEntry 一条变更日志：动作 + 实际执行主机 + 有效提权用户。
+// delegate_to 时变更发生在被委托主机上（快照也在那里），回滚与快照清理
+// 必须打到实际执行主机；becomeUser 记录变更发生时的有效提权用户
+// （空 = 未提权）——快照由该用户创建（提权时通常 root 属主），回放与
+// 清理以非提权用户执行会权限不足而失败/残留。
 type journalEntry struct {
-	action module.RollbackAction
-	execOn *model.Host // nil = 登记主机自身（无委托）
+	action     module.RollbackAction
+	execOn     *model.Host // nil = 登记主机自身（无委托）
+	becomeUser string      // 空表示变更未提权；become:true 未指定用户时为 "root"
 }
 
 // maxChartDepth 是 chart 引用展开的深度上限（单一事实来源在 chart 包，
@@ -176,25 +187,6 @@ func (s *playState) takeJournal(host string) []journalEntry {
 	return append([]journalEntry{}, s.journal[host]...)
 }
 
-// splitHookTasks 按生命周期相位切分任务：hook 标记 pre_<phase>/post_<phase>
-// 的任务归 pre/post（deploy 相位词干是 install，单一拼写），无 hook 的归
-// 主列表，其它相位的 hook 任务跳过（uninstall 时不跑 install hook）。
-func splitHookTasks(tasks []*model.Task, phase string) (pre, post, main []*model.Task) {
-	preHook := "pre_" + chart.HookNameFor(phase)
-	postHook := "post_" + chart.HookNameFor(phase)
-	for _, t := range tasks {
-		switch t.Hook {
-		case preHook:
-			pre = append(pre, t)
-		case postHook:
-			post = append(post, t)
-		case "":
-			main = append(main, t)
-		}
-	}
-	return pre, post, main
-}
-
 // New 创建执行器。
 func New(inv *inventory.Inventory, conns *conn.Manager, rep report.Reporter, opts Options) *Executor {
 	if opts.Forks <= 0 {
@@ -243,6 +235,14 @@ func (e *Executor) renderLoopItems(loop []any, vars map[string]any) ([]any, erro
 // Run 依次执行全部 play，返回是否存在失败。
 // 启用了 fact cache 时无论成败都落盘（部分采集的 facts 对下次运行仍有价值）。
 func (e *Executor) Run(ctx context.Context, plays []*model.Play) bool {
+	// --start-at-task 的标签必须真实存在：拼错时所有 play 静默空跑、
+	// 退出码 0，还会写部署记录与 release marker——后续 uninstall/status/
+	// drift 全部被误导。这里提前 fail-loud（匹配口径与 runBatchTasks 一致：
+	// play 顶层任务标签）。
+	if e.Opts.StartAtTask != "" && !startAtTaskExists(plays, e.Opts.StartAtTask) {
+		e.Rep.PlayMsg("start-at-task %q: no such task in any play", e.Opts.StartAtTask)
+		return true
+	}
 	if e.Opts.FactCachePath != "" {
 		defer e.saveFactCache(e.Opts.FactCachePath)
 	}
@@ -257,6 +257,19 @@ func (e *Executor) Run(ctx context.Context, plays []*model.Play) bool {
 		}
 	}
 	return anyFail
+}
+
+// startAtTaskExists 报告任一 play 的顶层任务是否带该标签（runBatchTasks
+// 只对 play 顶层任务做 StartAtTask 匹配，嵌套 block 内的任务无法作为起点）。
+func startAtTaskExists(plays []*model.Play, label string) bool {
+	for _, p := range plays {
+		for _, t := range p.Tasks {
+			if t.Label() == label {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // LastStats 返回最近一次 run 的汇总统计快照（部署记录用；跨 play 累计）。

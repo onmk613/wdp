@@ -50,9 +50,9 @@ func do(t *testing.T, h http.Handler, method, path string, body any, cookie *str
 		rd = bytes.NewReader(nil)
 	}
 	req := httptest.NewRequest(method, path, rd)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
+	// 变更类请求恒带 JSON CT（空体也是）：与服务端 requireAuth 的
+	// 空 Content-Type 拒绝口径一致（与前端 api() 恒带 CT 对齐）
+	req.Header.Set("Content-Type", "application/json")
 	if cookie != nil && *cookie != "" {
 		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: *cookie})
 	}

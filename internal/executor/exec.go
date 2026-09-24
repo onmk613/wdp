@@ -129,19 +129,32 @@ func (e *Executor) buildRunContext(taskCtx context.Context, tr *taskRun, itemVar
 		DiffMode:   e.Opts.DiffMode,
 
 		MaxDownloadBytes: e.Opts.MaxDownloadBytes,
+		MaxUploadBytes:   e.Opts.MaxUploadBytes,
 	}
 	// 脚本模块 check 模式需 chart.yaml 显式声明 check_mode: supported
 	if e.Opts.Chart != nil {
 		rc.CheckScriptAllowed = bool(e.Opts.Chart.Meta.CheckMode)
 	}
 	// auto_rollback：注入变更日志（文件类模块登记快照/删除动作）。
-	// 每条记录携带实际执行主机（delegate_to 时回滚必须打到被委托主机）。
+	// 每条记录携带实际执行主机（delegate_to 时回滚必须打到被委托主机）
+	// 与有效提权用户（回放必须以变更发生时的同一提权身份执行）。
 	if tr.p.Strategy != nil && tr.p.Strategy.AutoRollback && !e.Opts.CheckMode && e.rollbackDir != "" {
+		bu := ""
+		if tr.become {
+			bu = firstNonEmpty(tr.becomeUser, "root") // 与 runctx 的提权回退一致
+		}
 		rc.Rollback = &module.RollbackCtx{
 			Dir: e.rollbackDir,
 			Record: func(a module.RollbackAction) {
 				tr.hr.mu.Lock()
-				tr.hr.journal = append(tr.hr.journal, journalEntry{action: a, execOn: tr.execHost})
+				tr.hr.journal = append(tr.hr.journal, journalEntry{action: a, execOn: tr.execHost, becomeUser: bu})
+				tr.hr.mu.Unlock()
+			},
+			// 快照失败 = 该路径没有还原依据。记进 hostRun 并让回滚汇总把
+			// 该主机算作"回滚不完整"，避免"报成功却什么都没保住"。
+			OnSnapshotFailure: func(path, reason string) {
+				tr.hr.mu.Lock()
+				tr.hr.rollbackGaps = append(tr.hr.rollbackGaps, path+": "+reason)
 				tr.hr.mu.Unlock()
 			},
 		}

@@ -22,15 +22,14 @@ Helm 风格 chart 打包与多环境精准部署。
 ```sh
 go build -trimpath -o wdp ./cmd/wdp
 
-# 示例应用包开箱即用（node-exporter / docker）
-wdp run ./examples/node-exporter --check --diff -i examples/inventory.yaml
+# 从一个 playbook 开始（语法见 docs/05-playbook任务编排.md）
+wdp run site.yaml --check --diff -i inventory.yaml
 ```
 
 ## 文档
 
 - 📖 **[Docs](docs/README.md)**：快速开始、inventory、playbook 全语法、
   内置模块手册、chart 应用包、CLI 参考、最佳实践与 FAQ
-- 🧪 **[可运行示例](examples/)**：`node-exporter`、`docker` 等 chart 示例
 
 
 ## 许可证

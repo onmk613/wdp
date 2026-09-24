@@ -7,6 +7,7 @@ package cli
 // web-console 方向的 server 纳管流程承接。
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -55,7 +56,7 @@ func selectAgentHosts(pattern string) ([]*model.Host, error) {
 		}
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("%s", "no conn: agent hosts matched (agentctl only manages resident agents)")
+		return nil, errors.New("no conn: agent hosts matched (agentctl only manages resident agents)")
 	}
 	return out, nil
 }

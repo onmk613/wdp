@@ -174,8 +174,9 @@ func TestParseBatchSize(t *testing.T) {
 		want  int
 	}{
 		{"10%", 100, 10},
-		{"10%", 15, 2}, // ceil(1.5)
-		{"1%", 5, 1},   // min 1
+		{"10%", 15, 2},  // ceil(1.5)
+		{"1%", 5, 1},    // min 1
+		{"0%", 100, 25}, // 0% 不再静默变逐台批次：与非法值同回退默认
 		{"3", 100, 3},
 		{"500", 10, 10}, // 封顶
 		{"", 100, 25},   // 默认 25%
@@ -199,3 +200,113 @@ func joinExecScripts(fakes []*fake.Fake) string {
 	}
 	return sb.String()
 }
+
+// TestRollbackKeepsBecomeContext：become 任务产生的变更，回放必须携带
+// 同一提权身份（非 root 连接用户下快照是 root 属主，不提权的恢复/删除
+// 必然权限不足）。
+func TestRollbackKeepsBecomeContext(t *testing.T) {
+	fakeMu.Lock()
+	fakes = nil
+	fakeMu.Unlock()
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		f := fake.NewFake(h)
+		f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
+			s := req.Script
+			switch {
+			case strings.Contains(s, "sha256sum"):
+				return conn.ExecResult{Code: 3}, nil // 文件不存在
+			case strings.Contains(s, "will-fail"):
+				return conn.ExecResult{Code: 1, Stderr: "boom"}, nil
+			default:
+				return conn.ExecResult{Code: 0}, nil
+			}
+		}
+		fakeMu.Lock()
+		fakes = append(fakes, f)
+		fakeMu.Unlock()
+		return f, nil
+	})
+	rep := &captureReporter{}
+	ex := New(parseTestInv(t), conn.NewManager(), rep, Options{Forks: 2})
+	plays := []*model.Play{{
+		Hosts:    "h1",
+		Strategy: &model.Strategy{Type: "rolling", Batch: "1", AutoRollback: true},
+		Tasks: []*model.Task{
+			{Name: "提权写文件", Module: "copy", Become: ptr(true), BecomeUser: "app",
+				Args: map[string]any{"content": "x", "dest": "/etc/app/a.conf"}},
+			{Name: "失败任务", Module: "shell", FreeForm: "will-fail"},
+		},
+	}}
+	if !ex.Run(context.Background(), plays) {
+		t.Fatal("批次失败应判定失败")
+	}
+	found := false
+	for _, f := range allFakes() {
+		for _, r := range f.ExecLog {
+			if strings.Contains(r.Script, "rm -rf -- '/etc/app/a.conf'") {
+				found = true
+				if r.BecomeUser != "app" {
+					t.Fatalf("回滚应沿用变更时的提权用户 app，实际 %q", r.BecomeUser)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("缺少回滚脚本:\n" + joinExecScripts(allFakes()))
+	}
+}
+
+// TestPreHookFailureTriggersRollback：pre-hook 已产生变更后失败 →
+// auto_rollback 应回滚已执行部分（否则变更留在主机上、快照被 finishPlay
+// 清理、回滚能力永久丢失）。
+func TestPreHookFailureTriggersRollback(t *testing.T) {
+	fakeMu.Lock()
+	fakes = nil
+	fakeMu.Unlock()
+	conn.RegisterFactory("fake", func(h *model.Host, dc *conn.Defaults) (conn.Conn, error) {
+		f := fake.NewFake(h)
+		f.ExecFn = func(req conn.ExecRequest) (conn.ExecResult, error) {
+			s := req.Script
+			switch {
+			case strings.Contains(s, "sha256sum"):
+				return conn.ExecResult{Code: 3}, nil
+			case strings.Contains(s, "will-fail"):
+				return conn.ExecResult{Code: 1, Stderr: "boom"}, nil
+			default:
+				return conn.ExecResult{Code: 0}, nil
+			}
+		}
+		fakeMu.Lock()
+		fakes = append(fakes, f)
+		fakeMu.Unlock()
+		return f, nil
+	})
+	rep := &captureReporter{}
+	ex := New(parseTestInv(t), conn.NewManager(), rep, Options{Forks: 2})
+	plays := []*model.Play{{
+		Hosts:    "h1",
+		Strategy: &model.Strategy{Type: "rolling", Batch: "1", AutoRollback: true},
+		Tasks: []*model.Task{
+			{Name: "预备配置", Module: "copy", Hook: "pre_install",
+				Args: map[string]any{"content": "x", "dest": "/deploy/pre.conf"}},
+			{Name: "预检失败", Module: "shell", FreeForm: "will-fail", Hook: "pre_install"},
+			{Name: "主任务", Module: "copy",
+				Args: map[string]any{"content": "y", "dest": "/deploy/main.conf"}},
+		},
+	}}
+	if !ex.Run(context.Background(), plays) {
+		t.Fatal("pre-hook 失败应判定 play 失败")
+	}
+	scripts := joinExecScripts(allFakes())
+	if !strings.Contains(scripts, "rm -rf -- '/deploy/pre.conf'") {
+		t.Fatalf("pre-hook 失败应回滚其已产生的变更:\n%s", scripts)
+	}
+	if strings.Contains(scripts, "rm -rf -- '/deploy/main.conf'") {
+		t.Fatal("主任务未执行，不应出现其回滚")
+	}
+	if !strings.Contains(rep.joined(), "pre-hook failed") {
+		t.Fatalf("缺少中止消息:\n%s", rep.joined())
+	}
+}
+
+func ptr[T any](v T) *T { return &v }

@@ -4,8 +4,11 @@ import (
 	"crypto/sha256"
 	"embed"
 	"encoding/hex"
+	"io"
 	"io/fs"
 	"net/http"
+	"path"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -100,6 +103,72 @@ func (s *Server) handleAssets() http.Handler {
 	fileServer := http.FileServer(http.FS(assetsFS))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		// 预压缩件直出：构建期由 vite 插件产出同名 .gz（见 frontend/vite.config.ts），
+		// 命中时设 Content-Encoding 并回原 Content-Type。运行时不压缩，零 CPU
+		// 开销；未命中就回原文（客户端不支持 gzip 或未走构建管线时）。
+		if servePrecompressed(w, r) {
+			return
+		}
 		fileServer.ServeHTTP(w, r)
 	})
+}
+
+// servePrecompressed 在存在同名 .gz 且客户端接受 gzip 时直接送预压缩件。
+// 返回 false 表示未命中，调用方按普通静态文件处理。
+func servePrecompressed(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		return false
+	}
+	if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		return false
+	}
+	name := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
+	if name == "" || name == "." || strings.Contains(name, "..") {
+		return false
+	}
+	f, err := assetsFS.Open(name + ".gz")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	// Content-Type 按原扩展名判定（.js.gz → text/javascript），否则浏览器
+	// 会把带 Content-Encoding 的响应当成 octet-stream 拒绝执行
+	w.Header().Set("Content-Type", mimeForAsset(name))
+	w.Header().Set("Content-Encoding", "gzip")
+	// 同一 URL 会因 Accept-Encoding 返回不同字节：必须声明 Vary，
+	// 否则共享缓存会把压缩版发给不支持的客户端
+	w.Header().Add("Vary", "Accept-Encoding")
+	w.Header().Set("Content-Length", strconv.FormatInt(fi.Size(), 10))
+	if r.Method == http.MethodHead {
+		return true
+	}
+	_, _ = io.Copy(w, f)
+	return true
+}
+
+// mimeForAsset 按扩展名给出 Content-Type（静态资源集很小，手写映射避免
+// 依赖 mime.TypeByExtension 的平台差异）。
+func mimeForAsset(name string) string {
+	switch path.Ext(name) {
+	case ".js", ".mjs":
+		return "text/javascript; charset=utf-8"
+	case ".css":
+		return "text/css; charset=utf-8"
+	case ".html":
+		return "text/html; charset=utf-8"
+	case ".json":
+		return "application/json"
+	case ".svg":
+		return "image/svg+xml"
+	case ".ttf":
+		return "font/ttf"
+	case ".woff2":
+		return "font/woff2"
+	default:
+		return "application/octet-stream"
+	}
 }

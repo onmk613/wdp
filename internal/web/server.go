@@ -44,6 +44,11 @@ type Options struct {
 	// 真实对端地址——XFF 可被客户端任意伪造，无条件采信会让审计 IP 与
 	// 纳管 ClaimAddress/证书 SAN 全部可伪造。
 	TrustedProxies []string
+	// AllowPlaintextEnroll 允许在明文 HTTP 下下发纳管脚本。默认关闭：
+	// 脚本以 root 执行，明文通道下中间人替换脚本即等于目标机 root，
+	// 脚本内嵌的 CA 指纹与脚本同源同通道、对主动 MITM 无价值。仅在
+	// 可信内网/离线演示时显式打开。
+	AllowPlaintextEnroll bool
 }
 
 // Server 是控制台 HTTP 服务。
@@ -79,11 +84,17 @@ type sessionTable struct {
 }
 
 type session struct {
-	user string
-	exp  time.Time
+	user   string
+	exp    time.Time
+	issued time.Time // 签发时刻：绝对生命周期上限的锚点
 }
 
 const sessionTTL = 2 * time.Hour
+
+// sessionMaxTTL 是会话的绝对生命周期上限：滑动续期只延长空闲过期，
+// 无绝对上限时 token 泄露后只要被持续使用就永不过期（有管理端可踢，
+// 但不应依赖人工发现）。
+const sessionMaxTTL = 12 * time.Hour
 
 func New(st *store.Store, opts Options, logger *slog.Logger) (*Server, error) {
 	if opts.Addr == "" {
@@ -178,7 +189,7 @@ func bootstrapAdmin(st *store.Store, opts *Options, logger *slog.Logger) error {
 				logger.Info("console admin account", "user", opts.AdminUser, "password", "matches the configured value (unchanged)")
 				return nil
 			}
-			hash, err := bcrypt.GenerateFromPassword([]byte(opts.AdminPass), bcrypt.DefaultCost)
+			hash, err := bcrypt.GenerateFromPassword([]byte(opts.AdminPass), bcryptCost)
 			if err != nil {
 				return err
 			}
@@ -190,7 +201,7 @@ func bootstrapAdmin(st *store.Store, opts *Options, logger *slog.Logger) error {
 		} else if !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-		hash, err := bcrypt.GenerateFromPassword([]byte(opts.AdminPass), bcrypt.DefaultCost)
+		hash, err := bcrypt.GenerateFromPassword([]byte(opts.AdminPass), bcryptCost)
 		if err != nil {
 			return err
 		}
@@ -210,14 +221,21 @@ func bootstrapAdmin(st *store.Store, opts *Options, logger *slog.Logger) error {
 	}
 	pass := hex.EncodeToString(buf)
 	fmt.Printf("[wdp server] created admin %q with generated password: %s (save it now; it is not shown again)\n", opts.AdminUser, pass)
-	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(pass), bcryptCost)
 	if err != nil {
 		return err
 	}
 	return st.CreateUser(opts.AdminUser, string(hash), "admin")
 }
 
-func (s *Server) Handler() http.Handler { return s.mux }
+// Handler 返回对外的完整处理器链（含指标中间件），与 Run 监听的完全一致。
+// 测试必须走这里——曾因测试直连裸 mux、生产包了中间件，导致 SSE 依赖的
+// http.Flusher 在生产被中间件吞掉却全量测试绿灯。
+func (s *Server) Handler() http.Handler { return securityHeaders(s.metricsMiddleware(s.mux)) }
+
+// muxOnly 返回未包中间件的裸路由（仅供需要观察原始 ResponseWriter 的
+// 极端用例；业务测试一律用 Handler）。
+func (s *Server) muxOnly() http.Handler { return s.mux }
 
 // Addr 返回监听地址。
 func (s *Server) Addr() string { return s.opts.Addr }
@@ -233,7 +251,7 @@ func (s *Server) Run(ctx context.Context) error {
 	// 慢速连接攻击（slowloris），IdleTimeout 及时回收空闲连接
 	srv := &http.Server{
 		Addr:              s.opts.Addr,
-		Handler:           s.metricsMiddleware(s.mux),
+		Handler:           s.Handler(),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}

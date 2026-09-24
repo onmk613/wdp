@@ -29,6 +29,11 @@ type Inventory struct {
 	AllVars   map[string]any
 	groupMap  map[string][]string
 	hostsMeta map[string]map[string]any
+	// topoDirty 拓扑缓存失效标记：运行期 AddDynamicGroup/AddRuntimeHost 只
+	// 置脏不重建（千台 group_by 此前每台全量重建 O(N²) 且在锁内串行化），
+	// GroupsMap/HostsMeta 读取时才惰性重建。并发安全由调用侧保证（executor
+	// 持 invMu；进程内单线程的解析/编译路径无并发）。
+	topoDirty bool
 }
 
 type rawInventory map[string]rawGroup

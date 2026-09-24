@@ -298,7 +298,7 @@ async function removeHost(row: Host) {
 const editVisible = ref(false)
 const editLoading = ref(false)
 const editID = ref(0)
-const editForm = reactive({ Name: '', Address: '', AgentPort: 7602, Pools: [] as string[], Groups: [] as string[] })
+const editForm = reactive({ Name: '', Address: '', AgentPort: 7602, Pools: [] as string[], Groups: [] as string[], AllowPlaintext: false })
 const editLabels = ref<Record<string, string>>({})
 
 function openEdit(row: Host) {
@@ -309,6 +309,7 @@ function openEdit(row: Host) {
     AgentPort: row.AgentPort,
     Pools: row.Pools || [],
     Groups: row.Groups || [],
+    AllowPlaintext: !!row.AllowPlaintext,
   })
   editLabels.value = parseLabels(row.Labels)
   editVisible.value = true
@@ -323,6 +324,7 @@ async function submitEdit() {
       Pools: editForm.Pools,
       Groups: editForm.Groups,
       Labels: JSON.stringify(editLabels.value || {}),
+      AllowPlaintext: editForm.AllowPlaintext,
     })
     ElMessage.success(`已更新 ${editForm.Name}`)
     editVisible.value = false
@@ -547,10 +549,12 @@ async function copyCommand() {
 const sshVisible = ref(false)
 const sshText = ref('')
 const sshFileInput = ref()
-// 共享连接设置：应用到清单里 user/password 留空的行（行内值优先）
+// 共享连接设置：应用到清单里 user/password 留空的行（行内值优先）。
+// 指纹校验默认开（与后端安全默认一致）；关闭是知情选择（MITM 可截获
+// SSH 凭据并替换 agent 二进制）
 const sshShared = reactive({
   user: '', password: '', key_path: '', key_passphrase: '',
-  verify_host_key: false, agent_port: 7602,
+  verify_host_key: true, agent_port: 7602,
 })
 
 interface SSHJob {
@@ -567,7 +571,7 @@ const sshRunning = computed(() => sshJobs.value.some((j) => j.status === 'queued
 function openSSHInstall() {
   Object.assign(sshShared, {
     user: '', password: '', key_path: '', key_passphrase: '',
-    verify_host_key: false, agent_port: 7602,
+    verify_host_key: true, agent_port: 7602,
   })
   sshText.value = ''
   sshJobs.value = []
@@ -900,6 +904,14 @@ onUnmounted(() => {
         <el-form-item label="标签">
           <LabelRows v-model="editLabels" :keys="labelKeys" />
         </el-form-item>
+        <el-form-item label="明文通道">
+          <el-switch v-model="editForm.AllowPlaintext" />
+          <div class="muted" style="margin-left: 12px; line-height: 1.6">
+            仅当该主机的 agent 未启用 mTLS 时打开（可信内网）。<br />
+            默认关闭：控制台一律按 mTLS 建连并校验证书身份；<br />
+            明文通道下脚本、口令与制品在网络上不加密。
+          </div>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
@@ -1021,7 +1033,7 @@ onUnmounted(() => {
         </el-form-item>
         <el-form-item label="指纹校验">
           <el-switch v-model="sshShared.verify_host_key" />
-          <span class="muted" style="margin-left: 8px">校验 known_hosts（生产建议开；需预先采集指纹）</span>
+          <span class="muted" style="margin-left: 8px">默认开：校验 known_hosts 指纹，防中间人截获凭据/替换二进制；关闭前需预先采集指纹</span>
         </el-form-item>
         <el-form-item label="agent 端口">
           <el-input-number v-model="sshShared.agent_port" :min="1" :max="65535" />

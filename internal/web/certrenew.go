@@ -91,7 +91,10 @@ func (s *Server) handleRenewHostCert(w http.ResponseWriter, r *http.Request) {
 // 返回 (是否成功, 失败原因)；agent 未启用 mTLS（探活退回 http）时不尝试
 // 推送，返回 (false, nil)——调用方以"重签成功、重启后生效"口径提示。
 func (s *Server) pushCertToAgent(ctx context.Context, h *store.Host, certPEM []byte) (bool, error) {
-	if s.agentScheme(ctx, h) != "https" {
+	if !s.useTLS(h) {
+		// agent 未启用 mTLS（从未签发逐主机证书）：不推送，调用方以
+		// "重签成功、重启后生效"口径提示
+
 		return false, nil
 	}
 	url := fmt.Sprintf("https://%s/cert", net.JoinHostPort(h.Address, fmt.Sprint(h.AgentPort)))

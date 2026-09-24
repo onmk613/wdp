@@ -19,10 +19,16 @@ func (t *sessionTable) issue(user string) (string, error) {
 		return "", err
 	}
 	token := hex.EncodeToString(buf)
+	now := time.Now()
 	t.mu.Lock()
-	t.sessns[token] = session{user: user, exp: time.Now().Add(sessionTTL)}
+	t.sessns[token] = session{user: user, exp: now.Add(sessionTTL), issued: now}
 	t.mu.Unlock()
 	return token, nil
+}
+
+// expired 会话是否已失效：空闲过期（滑动窗口）或超出绝对生命周期。
+func expiredSession(s session, now time.Time) bool {
+	return now.After(s.exp) || now.After(s.issued.Add(sessionMaxTTL))
 }
 
 func (t *sessionTable) lookup(token string) (string, bool) {
@@ -32,11 +38,12 @@ func (t *sessionTable) lookup(token string) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if time.Now().After(s.exp) {
+	now := time.Now()
+	if expiredSession(s, now) {
 		delete(t.sessns, token)
 		return "", false
 	}
-	s.exp = time.Now().Add(sessionTTL) // 滑动续期
+	s.exp = now.Add(sessionTTL) // 滑动续期（绝对上限仍以 issued 为锚）
 	t.sessns[token] = s
 	return s.user, true
 }
@@ -65,7 +72,7 @@ func (t *sessionTable) onlineUsers() map[string]bool {
 	out := map[string]bool{}
 	now := time.Now()
 	for _, s := range t.sessns {
-		if now.After(s.exp) {
+		if expiredSession(s, now) {
 			continue
 		}
 		out[s.user] = true
@@ -80,7 +87,7 @@ func (t *sessionTable) list() []*sessionJSON {
 	out := []*sessionJSON{}
 	now := time.Now()
 	for tok, s := range t.sessns {
-		if now.After(s.exp) {
+		if expiredSession(s, now) {
 			continue
 		}
 		masked := tok
@@ -92,7 +99,9 @@ func (t *sessionTable) list() []*sessionJSON {
 	return out
 }
 
-// kill 强制单个会话下线（完整 token，或掩码前缀唯一命中）。
+// kill 强制单个会话下线（完整 token，或掩码前缀命中）。
+// 前缀多命中（8 hex 碰撞或管理员输入过短）时拒绝而非踢第一个：
+// "首个命中"的 map 遍历序不确定，可能踢错人。
 func (t *sessionTable) kill(token string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -102,11 +111,16 @@ func (t *sessionTable) kill(token string) bool {
 	}
 	if len(token) >= 8 {
 		prefix := token[:8]
+		var match string
+		n := 0
 		for tok := range t.sessns {
 			if strings.HasPrefix(tok, prefix) {
-				delete(t.sessns, tok)
-				return true
+				match, n = tok, n+1
 			}
+		}
+		if n == 1 {
+			delete(t.sessns, match)
+			return true
 		}
 	}
 	return false
@@ -118,7 +132,7 @@ func (t *sessionTable) sweep() {
 	t.mu.Lock()
 	now := time.Now()
 	for tok, s := range t.sessns {
-		if now.After(s.exp) {
+		if expiredSession(s, now) {
 			delete(t.sessns, tok)
 		}
 	}
@@ -137,12 +151,7 @@ func (s *Server) sessionSweepLoop(ctx context.Context) {
 		case <-t.C:
 			s.sessions.sweep()
 			s.loginMu.Lock()
-			now := time.Now()
-			for k, at := range s.loginFails {
-				if now.After(at.lockedTo) && now.Sub(at.lastFail) > loginLockWindow {
-					delete(s.loginFails, k)
-				}
-			}
+			s.pruneLoginFailsLocked(time.Now())
 			s.loginMu.Unlock()
 		}
 	}

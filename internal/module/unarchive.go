@@ -3,7 +3,6 @@ package module
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path"
 	"slices"
 	"strings"
@@ -141,7 +140,11 @@ func (m *UnarchiveModule) Run(rc *RunContext, args map[string]any, _ string) *Re
 	// 实现细节，成败路径都清理（此前默认与失败路径会在远端 /tmp 残留）
 	remoteArc := src
 	if !remoteSrc {
-		data, err := os.ReadFile(resolveLocal(rc, src))
+		local, lerr := resolveLocal(rc, src)
+		if lerr != nil {
+			return Fail("%v", lerr)
+		}
+		data, err := readLocalSrc(rc, local)
 		if err != nil {
 			return Fail("failed to read local archive: %v", err)
 		}
@@ -205,11 +208,15 @@ func (m *UnarchiveModule) runMembers(rc *RunContext, src, kind, dest string, mem
 	if remoteSrc {
 		return Fail("%s", "members requires a local src (the control node must inspect the archive to match entries)")
 	}
-	data, err := os.ReadFile(resolveLocal(rc, src))
+	local, lerr := resolveLocal(rc, src)
+	if lerr != nil {
+		return Fail("%v", lerr)
+	}
+	data, err := readLocalSrc(rc, local)
 	if err != nil {
 		return Fail("failed to read local archive: %v", err)
 	}
-	sel, err := selectArchiveMembers(kind, data, members)
+	sel, err := selectArchiveMembers(kind, data, members, rc.MaxUploadBytes)
 	if err != nil {
 		return Fail("unarchive %s: %v", src, err)
 	}

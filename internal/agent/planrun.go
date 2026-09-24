@@ -78,7 +78,10 @@ func (m *planManager) register(runID, planID string, force bool) (*planRun, *pla
 		delete(m.byRunID, runID)
 		delete(m.byPlan, planID)
 	}
-	if m.current != nil && m.current.state == "running" {
+	// stateLocked 而非裸读：state 的写侧（finish）持的是 run 自己的锁，
+	// 与 manager 锁不构成 happens-before，裸读是数据竞争（同函数其余
+	// 读取均已走 stateLocked）
+	if m.current != nil && m.current.stateLocked() == "running" {
 		return nil, nil, fmt.Errorf("another run %s is still executing (wait, cancel it, or query its status)", m.current.runID)
 	}
 	r := &planRun{runID: runID, planID: planID, state: "running", createdAt: time.Now().UTC()}

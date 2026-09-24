@@ -98,3 +98,12 @@ func maxDownloadBytes() int64 {
 	}
 	return 0
 }
+
+// maxUploadBytes 归一 copy/unarchive 本地源读取上限（wdp.cfg [transfer].max_upload_mb；
+// 0 表示用模块内置默认 2GiB）。
+func maxUploadBytes() int64 {
+	if mb := config.Current().Transfer.MaxUploadMB; mb > 0 {
+		return int64(mb) << 20
+	}
+	return 0
+}

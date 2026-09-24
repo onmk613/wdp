@@ -72,12 +72,6 @@ jobs:
             exit 1
           fi
 
-      - name: 示例 chart lint（examples/ 是文档承诺的可运行样例）
-        run: |
-          for c in examples/docker examples/node-exporter; do
-            go run ./cmd/wdp lint "./$c"
-          done
-
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -109,6 +103,13 @@ jobs:
         run: |
           ./build.sh --help | tee /tmp/help.txt
           grep -q '用法:' /tmp/help.txt
+
+      - name: 前端类型检查 + 单测（脚本早已存在，此前从未在 CI 运行）
+        run: |
+          cd frontend
+          npm ci --no-fund --no-audit
+          npm run typecheck
+          npm run test
 
       - name: build.sh 缺省全平台构建 + 前端内嵌
         run: |

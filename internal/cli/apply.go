@@ -231,6 +231,7 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 		FactCachePath:    opts.factCache,
 		PayloadDir:       opts.chartDir,
 		MaxDownloadBytes: maxDownloadBytes(),
+		MaxUploadBytes:   maxUploadBytes(),
 	})
 
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)

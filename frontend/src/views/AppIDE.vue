@@ -77,7 +77,6 @@ const saving = ref(false)
 const saveVisible = ref(false)
 
 // 变更版本号（任何 fs/model 内容或文件操作都推进，驱动自动暂存与域刷新）
-const fsVersion = ref(0)
 const dirtyCount = computed(() => fs.dirtyCount())
 
 // 左侧目录树宽度可拖拽调整（分隔条 mousedown → document mousemove）
@@ -210,7 +209,6 @@ function rebuildDomain() {
 }
 
 function onContentChanged(path: string) {
-  fsVersion.value++
   stashed.value = false // 改动未暂存
   if (/\.ya?ml$/.test(path)) scheduleDecorate(path)
   scheduleDomain()
@@ -288,7 +286,6 @@ function onTreeOp(ev: { kind: string; path: string; to?: string }) {
     ensureModel(ev.path)
   }
   fileOps.value.push(ev as FileOp)
-  fsVersion.value++
   stashed.value = false
   scheduleDomain()
   scheduleAutosave()
@@ -325,7 +322,6 @@ function undoFileOp() {
       }
     }
   }
-  fsVersion.value++
   stashed.value = false
   scheduleDomain()
   scheduleAutosave()
@@ -413,7 +409,6 @@ function restoreDraft(payload: DraftPayload) {
   draftInfo.value = null
   suppressAutosave = false
   stashed.value = true // 恢复的内容本身来自暂存
-  fsVersion.value++
 }
 
 async function onRestoreFromBanner() {
@@ -459,6 +454,10 @@ function currentChartVersion(): string {
 
 // ---- 保存 ----
 function openSave() {
+  // 校验阶段（validating）也占着保存流程：不加门禁的话，慢校验期间再点
+  // 保存/Ctrl+S 会并发跑两份 onSaveConfirm，第二个 PUT 因版本已存在报
+  // "保存失败"误导用户（第一次实际已成功）
+  if (validating.value || saving.value) return
   if (!fs.isDirty() && !isCreate.value) {
     ElMessage.info('没有改动')
     return
@@ -467,49 +466,52 @@ function openSave() {
 }
 
 async function onSaveConfirm(v: { version: string; description: string; pools: string[]; groups: string[]; labels: string }) {
-  // 1) 版本号/描述同步写进 chart.yaml（文件与库一致）
-  const chart = fs.get('chart.yaml')
-  if (chart) {
-    let content = chart.content
-    const desc = v.description.trim()
-    if (chartYAMLVersion(content) !== v.version) content = patchChartYAMLVersion(content, v.version)
-    // 有 description 行则替换（旧值不残留），没有则追加；空描述不动文件
-    if (desc) content = patchChartYAMLDescription(content, desc)
-    if (content !== chart.content) {
-      const m = models.get('chart.yaml')
-      chart.content = content
-      if (m && m.getValue() !== content) m.setValue(content)
-    }
-  }
-  fs.description = v.description
-  fs.pools = v.pools
-  fs.groups = v.groups
-  fs.labels = v.labels
-
-  // 2) 校验门禁：ERROR 阻断（已确认的决策），WARN 确认后放行。校验请求
-  // 本身失败（网络/500/越权）同样阻断——失败不等于通过
-  const ps = await doValidate()
-  if (!ps) {
-    ElMessage.error('校验未能完成，已取消保存（内容未被提交）')
-    return
-  }
-  const errors = ps.filter((p) => p.level === 'ERROR')
-  if (errors.length) {
-    ElMessage.error(`校验未通过：${errors.length} 个错误（已定位到文件，修正后再保存）`)
-    return
-  }
-  const warns = ps.filter((p) => p.level === 'WARN')
-  if (warns.length) {
-    try {
-      await ElMessageBox.confirm(`校验发现 ${warns.length} 个警告（见问题面板）。仍要保存？`, '警告', {
-        confirmButtonText: '仍要保存', cancelButtonText: '回去修改', type: 'warning',
-      })
-    } catch { return }
-  }
-
-  // 3) 保存
+  if (validating.value || saving.value) return
+  // saving 覆盖全程（校验 + 警告确认 + 提交）：期间按钮 loading、Ctrl+S
+  // 与重复确认都被挡住，杜绝并发 PUT
   saving.value = true
   try {
+    // 1) 版本号/描述同步写进 chart.yaml（文件与库一致）
+    const chart = fs.get('chart.yaml')
+    if (chart) {
+      let content = chart.content
+      const desc = v.description.trim()
+      if (chartYAMLVersion(content) !== v.version) content = patchChartYAMLVersion(content, v.version)
+      // 有 description 行则替换（旧值不残留），没有则追加；空描述不动文件
+      if (desc) content = patchChartYAMLDescription(content, desc)
+      if (content !== chart.content) {
+        const m = models.get('chart.yaml')
+        chart.content = content
+        if (m && m.getValue() !== content) m.setValue(content)
+      }
+    }
+    fs.description = v.description
+    fs.pools = v.pools
+    fs.groups = v.groups
+    fs.labels = v.labels
+
+    // 2) 校验门禁：ERROR 阻断（已确认的决策），WARN 确认后放行。校验请求
+    // 本身失败（网络/500/越权）同样阻断——失败不等于通过
+    const ps = await doValidate()
+    if (!ps) {
+      ElMessage.error('校验未能完成，已取消保存（内容未被提交）')
+      return
+    }
+    const errors = ps.filter((p) => p.level === 'ERROR')
+    if (errors.length) {
+      ElMessage.error(`校验未通过：${errors.length} 个错误（已定位到文件，修正后再保存）`)
+      return
+    }
+    const warns = ps.filter((p) => p.level === 'WARN')
+    if (warns.length) {
+      try {
+        await ElMessageBox.confirm(`校验发现 ${warns.length} 个警告（见问题面板）。仍要保存？`, '警告', {
+          confirmButtonText: '仍要保存', cancelButtonText: '回去修改', type: 'warning',
+        })
+      } catch { return }
+    }
+
+    // 3) 保存
     const body = fs.toSaveBody(v.version)
     if (isCreate.value) {
       const app = await api<{ ID: number; Name: string }>('POST', '/api/apps/spec', { ...body, name: fs.name })
@@ -526,7 +528,6 @@ async function onSaveConfirm(v: { version: string; description: string; pools: s
       fs.markSaved(v.version)
       existingVersions.value.push(v.version)
       draftStatus.value = ''
-      fsVersion.value++
     }
   } catch (e) {
     ElMessage.error(`保存失败：${(e as Error).message}`)

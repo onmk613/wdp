@@ -56,6 +56,7 @@ type AgentConfig struct {
 type TransferConfig struct {
 	MaxDownloadMB int `toml:"max_download_mb"` // get_url 下载响应体上限 MiB（0 = 默认 2048）
 	MaxExtractMB  int `toml:"max_extract_mb"`  // chart tgz 解包总量上限 MiB（0 = 默认 2048）
+	MaxUploadMB   int `toml:"max_upload_mb"`   // copy/unarchive 本地 src 读取上限 MiB（0 = 默认 2048；防误配大文件把控制端内存打爆）
 }
 
 // Load 加载配置文件。path 不存在且 required=false 时静默返回（保持内置默认）。

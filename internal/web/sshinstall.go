@@ -7,9 +7,12 @@ package web
 //	                       → 上传 server CA 签发的逐主机证书 → systemd 装配
 //	server --mTLS--> agent ：health 验证 → 落账
 //
-// SSH 凭据由请求显式提供、仅内存态使用，不落库。verify_host_key=false
-// 时跳过 known_hosts 指纹校验（内网便利；中间人可截获该主机自己的证书，
-// 不影响其他主机），生产建议开启并预先在 server 侧 known_hosts 采集指纹。
+// SSH 凭据由请求显式提供、仅内存态使用，不落库。verify_host_key 缺省
+// true（与 inventory 路径的安全默认一致）：推装通道承载 SSH 密码/私钥
+// 口令认证、agent 二进制与逐主机证书的下发，中间人不仅可截获该主机
+// 自己的证书，还能截获 SSH 凭据、替换二进制（持久化 RCE）。确需关闭
+// 时显式传 false（受控内网的知情选择），生产建议预先在 server 侧
+// known_hosts 采集指纹。
 
 import (
 	"context"
@@ -38,13 +41,16 @@ type SSHInstallRequest struct {
 	Password      string `json:"password"`       // SSH 密码（与 key_path 二选一）
 	KeyPath       string `json:"key_path"`       // 私钥路径（空 = 密码或 server 默认密钥发现）
 	KeyPassphrase string `json:"key_passphrase"` // 私钥口令
-	VerifyHostKey bool   `json:"verify_host_key"`
-	AgentPort     int    `json:"agent_port"` // agent 监听端口（0 = 7602）
+	// 指针类型区分「未传」（缺省 true，安全默认）与「显式 false」
+	//（受控内网的知情选择）。此前 bool 零值 false 是不安全默认：CLI
+	// inventory 路径默认校验指纹，Web 推装路径却默认放行。
+	VerifyHostKey *bool `json:"verify_host_key"`
+	AgentPort     int   `json:"agent_port"` // agent 监听端口（0 = 7602）
 }
 
 // sshUnitFile 生成 systemd 单元（与 enroll 脚本同款，公共实现见 unit.go）。
-func sshUnitFile(agentPort int) string {
-	return agentUnitFile("/usr/local/bin", "/etc/wdp", "/var/log/wdp-agent.log", agentPort)
+func (s *Server) sshUnitFile(agentPort int) string {
+	return agentUnitFile("/usr/local/bin", "/etc/wdp", "/var/log/wdp-agent.log", agentPort, s.clientPins())
 }
 
 // handleSSHInstall 经 SSH 在目标机安装常驻 agent 并落账。
@@ -80,10 +86,14 @@ func (s *Server) handleSSHInstall(w http.ResponseWriter, r *http.Request) {
 	if user == "" {
 		user = "root"
 	}
+	verifyHostKey := true // 安全默认：未显式传 false 时校验主机指纹
+	if req.VerifyHostKey != nil {
+		verifyHostKey = *req.VerifyHostKey
+	}
 	host := &model.Host{
 		Name: name, Address: req.Address, Port: sshPort, User: user,
 		Password: req.Password, KeyPath: req.KeyPath, KeyPassphrase: req.KeyPassphrase,
-		HostKeyCheck: req.VerifyHostKey, ConnectTimeoutSec: 10,
+		HostKeyCheck: verifyHostKey, ConnectTimeoutSec: 10,
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
@@ -165,7 +175,7 @@ func (s *Server) sshInstall(ctx context.Context, host *model.Host, name string, 
 
 	// 4. systemd 装配（enable --now + restart：重装时拉起新二进制）
 	script := fmt.Sprintf("cat > /etc/systemd/system/%[2]s.service <<'WDP_UNIT_EOF'\n%[1]sWDP_UNIT_EOF\nsystemctl daemon-reload && systemctl enable --now %[2]s && systemctl restart %[2]s && sleep 1 && systemctl is-active --quiet %[2]s",
-		sshUnitFile(agentPort), agentUnitName)
+		s.sshUnitFile(agentPort), agentUnitName)
 	if out, err := sshExec(ctx, ssh, script, 60*time.Second); err != nil || out.Code != 0 {
 		detail := ""
 		if out.Stderr != "" {
@@ -176,7 +186,7 @@ func (s *Server) sshInstall(ctx context.Context, host *model.Host, name string, 
 
 	// 5. server→agent 验证（mTLS 探活客户端）
 	h := &store.Host{Name: name, Address: host.Address, AgentPort: agentPort}
-	if res := probeHost(ctx, h, s.mtlsProbeClient()); res.Status != "online" {
+	if res := probeHost(ctx, h, s.probeClientFor(h)); res.Status != "online" {
 		return nil, fmt.Errorf("agent installed but health check failed: %s", res.Error)
 	}
 

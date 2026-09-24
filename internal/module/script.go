@@ -35,7 +35,11 @@ func (m *ScriptModule) Run(rc *RunContext, args map[string]any, free string) *Re
 		}
 		src, scriptArgs = fields[0], strings.Join(fields[1:], " ")
 	}
-	data, err := os.ReadFile(resolveLocal(rc, src))
+	local, lerr := resolveLocal(rc, src)
+	if lerr != nil {
+		return Fail("%v", lerr)
+	}
+	data, err := os.ReadFile(local)
 	if err != nil {
 		return Fail("failed to read local script: %v", err)
 	}

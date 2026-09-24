@@ -32,7 +32,7 @@ func (e *Executor) runTaskOnHost(ctx context.Context, p *model.Play, task *model
 		res.Skipped = true
 		res.SkipReason = "already completed (resumed from journal)"
 		if task.Register != "" {
-			hr.vars[task.Register] = resultData(res)
+			hr.vars[task.Register] = registerData(task, res)
 		}
 		return res
 	}
@@ -144,7 +144,7 @@ func (e *Executor) evalWhen(task *model.Task, base func() map[string]any, hr *ho
 			res.Skipped = true
 			res.SkipReason = cond
 			if task.Register != "" {
-				hr.vars[task.Register] = resultData(res)
+				hr.vars[task.Register] = registerData(task, res)
 			}
 			return res, true
 		}
@@ -222,9 +222,32 @@ func aggregateLoopResults(res *model.TaskResult, loopResults []*model.TaskResult
 	if len(loopResults) > 0 {
 		last := loopResults[len(loopResults)-1]
 		res.Rc, res.Msg = last.Rc, last.Msg
-		res.Items = loopResults // 逐项结果（-vv 展示 / JSON 记录）
+		// Items 逐项输出截到 16KiB：Items 整体随结果对象驻留内存并进
+		// JSON 报告，单项 1MiB × 万级 item 不受 appendCapped 的聚合预算
+		// 保护。浅拷贝后截断（register 引用的原对象不动），聚合 stdout
+		// 仍走 appendCapped 的 1MiB 总预算。
+		items := make([]*model.TaskResult, len(loopResults))
+		for i, lr := range loopResults {
+			c := new(*lr)
+			c.Stdout = truncateTo(lr.Stdout, maxItemOutLen, "item output")
+			c.Stderr = truncateTo(lr.Stderr, maxItemOutLen, "item stderr")
+			items[i] = c
+		}
+		res.Items = items // 逐项结果（-vv 展示 / JSON 记录）
 	}
 	return false
+}
+
+// maxItemOutLen 是 Items 数组内单项输出/错误输出的保留上限。
+const maxItemOutLen = 16 << 10
+
+// truncateTo 定长截断（Items 逐项压缩用；truncateOut 的 1MiB 口径不适配
+// 万级 item 的数组场景）。
+func truncateTo(s string, max int, what string) string {
+	if len(s) <= max {
+		return s
+	}
+	return truncateAtBoundary(s, max) + fmt.Sprintf("\n…[wdp] %s truncated (%d bytes)", what, len(s))
 }
 
 // applyResultJudgements 以 changed_when / failed_when 覆盖结果判定。
@@ -249,6 +272,17 @@ func (e *Executor) applyResultJudgements(task *model.Task, base func() map[strin
 		res.Failed = render.Truthy(s)
 	}
 	return nil
+}
+
+// registerData 构造 skip 路径（when 不满足 / journal 续跑）的 register
+// 变量数据：loop 任务同样附 results 空列表——与 registerResult 的口径
+// 一致，下游 len .r.results 不因任务被跳过而报错。
+func registerData(task *model.Task, res *model.TaskResult) map[string]any {
+	data := resultData(res)
+	if task.Loop != nil {
+		data["results"] = []any{}
+	}
+	return data
 }
 
 // registerResult 把任务结果写入 register 变量（loop 任务附 results 列表；

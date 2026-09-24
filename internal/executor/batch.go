@@ -316,7 +316,13 @@ func (e *Executor) fanOutRunOnce(ctx context.Context, p *model.Play, task *model
 	// register 数据与 notify 触发同步到其余主机
 	var data map[string]any
 	if task.Register != "" {
-		data = resultData(res)
+		// 取执行主机已写入的完整数据（runTaskOnHost 内 registerResult 构造，
+		// loop 任务含 results 列表），而非从聚合结果重建——否则非执行主机
+		// 的 register 缺 results，下游 len .r.results 直接模板报错、主机
+		// 被误标死
+		if v, ok := first.vars[task.Register].(map[string]any); ok {
+			data = v
+		}
 	}
 	for _, hr := range runs {
 		if !hr.alive || hr == first {

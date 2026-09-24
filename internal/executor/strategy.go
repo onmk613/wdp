@@ -22,7 +22,9 @@ func parseBatchSize(batch string, total int) int {
 	}
 	if before, ok := strings.CutSuffix(s, "%"); ok {
 		p, err := strconv.Atoi(strings.TrimSpace(before))
-		if err != nil || p < 0 {
+		// 0% 也回退默认：0/100 向上取整后 max(...,1) 会静默变成逐台批次，
+		// 与空串/非法值共用回退语义才不自相矛盾
+		if err != nil || p <= 0 {
 			return defaultBatchSize(total)
 		}
 		size := max(
@@ -101,9 +103,20 @@ func (e *Executor) rollbackBatch(_ context.Context, runs []*hostRun, stats map[s
 	for _, hr := range runs {
 		hr.mu.Lock()
 		acts := append([]journalEntry{}, hr.journal...)
+		gaps := append([]string{}, hr.rollbackGaps...)
 		hr.mu.Unlock()
-		if len(acts) == 0 {
+		// 快照失败的路径没有还原依据：即便 journal 为空也必须算作回滚
+		// 不完整（否则"没登记动作"会被当成"没有需要回滚的变更"）
+		if len(acts) == 0 && len(gaps) == 0 {
 			continue
+		}
+		for _, g := range gaps {
+			res := &model.TaskResult{
+				Host: hr.host.Name, Task: "auto-rollback", Module: "rollback",
+				Failed: true, Msg: "no snapshot was taken, cannot restore: " + g,
+			}
+			e.recordResult(hr, res, stats, false)
+			e.Rep.HostResult(hr.host.Name, res)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		hostOK := true
@@ -118,8 +131,13 @@ func (e *Executor) rollbackBatch(_ context.Context, runs []*hostRun, stats map[s
 			var script string
 			switch a.Kind {
 			case "restore":
-				script = fmt.Sprintf("mkdir -p -- %s && cp -a -- %s %s",
-					shellquote.Quote(pathDir(a.Path)), shellquote.Quote(a.Shadow), shellquote.Quote(a.Path))
+				// 先删后拷：目标可能已被后续任务重建（目录/文件形态都可能变），
+				// `cp -a shadow path` 在 path 已存在（尤其带尾斜杠）时会变成
+				// "拷入"——现场变成 path/<basename>，原内容不在原位却报成功。
+				// rm -rf 后目标必不存在，cp -a 才是"复原到该路径"的语义。
+				script = fmt.Sprintf("rm -rf -- %s && mkdir -p -- %s && cp -a -- %s %s",
+					shellquote.Quote(a.Path), shellquote.Quote(pathDir(a.Path)),
+					shellquote.Quote(a.Shadow), shellquote.Quote(a.Path))
 			case "remove":
 				script = fmt.Sprintf("rm -rf -- %s", shellquote.Quote(a.Path))
 			default:
@@ -139,7 +157,9 @@ func (e *Executor) rollbackBatch(_ context.Context, runs []*hostRun, stats map[s
 				res.Msg += " failed (connection unavailable): " + err.Error()
 				hostOK = false
 			} else {
-				out, err := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30_000})
+				// 与变更发生时同一提权身份执行：非 root 连接用户 + become 的
+				// 场景下，快照是 root 属主，不提权则恢复/删除必然权限不足
+				out, err := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30_000, BecomeUser: je.becomeUser})
 				switch {
 				case err != nil:
 					res.Failed = true
@@ -156,7 +176,7 @@ func (e *Executor) rollbackBatch(_ context.Context, runs []*hostRun, stats map[s
 			e.recordResult(hr, res, stats, false)
 			e.Rep.HostResult(hr.host.Name, res)
 		}
-		if hostOK {
+		if hostOK && len(gaps) == 0 {
 			rolled++
 		} else {
 			rollFailed++
@@ -173,7 +193,11 @@ func (e *Executor) rollbackBatch(_ context.Context, runs []*hostRun, stats map[s
 // cleanupSnapshots 清除登记过回滚动作的主机上的快照目录（best-effort；
 // 未产生变更的主机不建连）。delegate_to 产生的变更快照在执行主机上，
 // 按动作的执行主机去重清理。
-func (e *Executor) cleanupSnapshots(ctx context.Context, runs []*hostRun) {
+// 限时预算每主机独立（与 rollbackBatch 同一原则）：共用总预算时大批次
+// 排在后面的主机清理必然因预算耗尽而静默失败——root 属主快照目录
+// （含部署文件副本）残留在远端 /tmp。清理以变更发生时的提权身份执行
+// （该主机任一动作提权即用其用户；多数场景下快照由 root 创建）。
+func (e *Executor) cleanupSnapshots(_ context.Context, runs []*hostRun) {
 	script := fmt.Sprintf("rm -rf -- %s", shellquote.Quote(e.rollbackDir))
 	done := 0
 	for _, hr := range runs {
@@ -184,22 +208,28 @@ func (e *Executor) cleanupSnapshots(ctx context.Context, runs []*hostRun) {
 			continue
 		}
 		targets := map[string]*model.Host{}
+		becomeOf := map[string]string{}
 		for _, je := range acts {
 			t := je.execOn
 			if t == nil {
 				t = hr.host
 			}
 			targets[t.Name] = t
+			if je.becomeUser != "" {
+				becomeOf[t.Name] = je.becomeUser
+			}
 		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		for _, t := range targets {
 			cn, err := e.Conns.Get(ctx, t)
 			if err != nil {
 				continue
 			}
-			if out, bad := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30_000}); bad == nil && out.Code == 0 {
+			if out, bad := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30_000, BecomeUser: becomeOf[t.Name]}); bad == nil && out.Code == 0 {
 				done++
 			}
 		}
+		cancel()
 	}
 	if done > 0 {
 		e.Rep.PlayMsg("rollback snapshots cleaned from %d hosts", done)
@@ -207,6 +237,12 @@ func (e *Executor) cleanupSnapshots(ctx context.Context, runs []*hostRun) {
 }
 
 func pathDir(p string) string {
+	// 尾斜杠会让 LastIndexByte 指到末尾空段，dirname 退化成路径本身
+	// （mkdir -p 预建目标 → cp -a 变"拷入"）；统一先剥掉
+	p = strings.TrimRight(p, "/")
+	if p == "" {
+		return "/"
+	}
 	if i := strings.LastIndexByte(p, '/'); i > 0 {
 		return p[:i]
 	}

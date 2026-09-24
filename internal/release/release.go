@@ -116,6 +116,9 @@ func List(chartFilter string) ([]*Record, error) {
 		}
 		rec, err := Load(strings.TrimSuffix(e.Name(), ".json"))
 		if err != nil {
+			// 静默跳过会让坏记录从 list/del 视野里凭空消失且无任何线索
+			//（与项目"防静默失效"原则相悖），stderr 告警后继续
+			fmt.Fprintf(os.Stderr, "warning: skip unreadable release record %s: %v\n", e.Name(), err)
 			continue
 		}
 		if chartFilter != "" && !strings.HasPrefix(rec.ID, chartFilter) {
@@ -140,7 +143,12 @@ func Load(id string) (*Record, error) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("record %s does not exist", id)
+		// 仅"不存在"给确定性文案；权限/IO 错误包装原始错误——报成
+		// 不存在会误导用户去怀疑 ID 抄错而非排查文件权限
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("record %s does not exist", id)
+		}
+		return nil, fmt.Errorf("read record %s: %w", id, err)
 	}
 	var rec Record
 	if err := json.Unmarshal(data, &rec); err != nil {

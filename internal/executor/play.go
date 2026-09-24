@@ -2,8 +2,8 @@ package executor
 
 import (
 	"context"
-	"time"
 
+	"wdp/internal/chart"
 	"wdp/internal/model"
 )
 
@@ -34,7 +34,7 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 	failed := false
 	// 生命周期 hook 分离（pre/post 在策略批次之外、全部主机一批执行）；
 	// 主任务列表按相位过滤（如 uninstall 时跳过 install hook 任务）
-	preHooks, postHooks, mainTasks := splitHookTasks(p.Tasks, e.Opts.Phase)
+	preHooks, postHooks, mainTasks := chart.SplitHookTasks(p.Tasks, e.Opts.Phase)
 	main := p
 	if len(mainTasks) != len(p.Tasks) {
 		mp := *p
@@ -63,7 +63,12 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 	if len(preHooks) > 0 && runHooks(preHooks, "[pre-hook]") {
 		failed = true
 		e.Rep.PlayMsg("pre-hook failed, aborting play")
-		// 与正常路径同样走 finishPlay：清理回滚快照目录、跳过 marker 写入
+		// pre-hook 也可能已产生变更：auto_rollback 下同样回滚已执行部分，
+		// 再走 finishPlay 清理快照（否则变更留在主机上、快照被删、回滚
+		// 能力永久丢失——与 play 级回滚承诺不符）
+		if p.Strategy != nil && p.Strategy.AutoRollback {
+			e.rollbackBatch(ctx, executedRuns, stats)
+		}
 		e.finishPlay(ctx, name, stats, failed, executedRuns, hosts)
 		return true
 	}
@@ -78,6 +83,11 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 	if !failed && len(postHooks) > 0 {
 		if runHooks(postHooks, "[post-hook]") {
 			failed = true
+			// 主任务已成功的变更 + post-hook 自身变更都在 executedRuns：
+			// post-hook 失败同样按 play 级承诺整体回滚
+			if p.Strategy != nil && p.Strategy.AutoRollback {
+				e.rollbackBatch(ctx, executedRuns, stats)
+			}
 		}
 	}
 
@@ -155,11 +165,10 @@ func (e *Executor) finishPlay(ctx context.Context, name string, stats map[string
 	}
 	// 回滚快照清理：play 结束后 shadow 目录不再有用（成功批次保留变更，
 	// 失败批次已回滚），只清理登记过变更的主机，best-effort 清除避免 /tmp 残留。
-	// 用独立的限时 ctx：执行取消（Ctrl+C）时父 ctx 已失效，若沿用会静默跳过清理
+	// 清理自带每主机独立的限时预算（不依赖传入 ctx——执行取消（Ctrl+C）时
+	// 父 ctx 已失效，若沿用会静默跳过清理）
 	if e.rollbackDir != "" {
-		cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		e.cleanupSnapshots(cleanCtx, executedRuns)
-		cancel()
+		e.cleanupSnapshots(ctx, executedRuns)
 		e.rollbackDir = ""
 	}
 	if e.Opts.Chart != nil && !failed && !e.Opts.CheckMode {

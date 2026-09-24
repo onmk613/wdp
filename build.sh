@@ -48,7 +48,9 @@ LDFLAGS="-s -w \
   -X 'wdp/internal/buildinfo.BuildDate=${DATE}' \
   -X 'wdp/internal/buildinfo.GoVersion=${GOVERSION}'"
 
-ALL_TARGETS="linux/amd64 linux/arm64 darwin/arm64 windows/amd64"
+# darwin/amd64 对齐 CI cross-build 矩阵（此前矩阵验证了一个 build.sh
+# 缺省不产出的目标，矩阵与产线集合脱节）
+ALL_TARGETS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64"
 
 # ---- 参数解析 ----
 

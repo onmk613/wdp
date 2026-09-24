@@ -47,6 +47,7 @@ func newAgentCmd() *cobra.Command {
 		Use:   "agent",
 		Short: "start the resident agent (on target hosts)",
 		Long:  agentHelp,
+		Args:  cobra.NoArgs, // agent 不接受位置参数，多余参数此前被静默忽略
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// 默认值在 RunE 内求值：命令树构造早于 wdp.cfg 加载，
 			// 构造期取 config.Current() 会拿到内置默认端口而非配置值
@@ -56,7 +57,7 @@ func newAgentCmd() *cobra.Command {
 			// 最小值校验放在 CLI 层：防手滑配 1s 之类把常驻 agent 秒杀
 			// （服务端不限制，测试可用任意短周期）
 			if idleTimeout != 0 && idleTimeout < time.Minute {
-				return fmt.Errorf("%s", "--idle-timeout must be 0 (disabled) or at least 1m")
+				return errors.New("--idle-timeout must be 0 (disabled) or at least 1m")
 			}
 			srv := agent.New(listen)
 			srv.SetMaxRequestBody(maxRequestMB)

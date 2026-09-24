@@ -112,7 +112,7 @@ func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []str
 	counters := map[string]int{}
 	for playIdx, play := range plays {
 		hosts := inv.SelectPlays([]*model.Play{play}, opts.Limit)
-		pre, post, main := splitHooks(play.Tasks, phase)
+		pre, post, main := chart.SplitHookTasks(play.Tasks, phase)
 		for _, h := range hosts {
 			hc := hostConnOf(h)
 			hc.Via = inv.ViaChain(h.Name)
@@ -182,25 +182,6 @@ func countResolved(tasks []*ResolvedTask) int {
 	}
 	walk(tasks)
 	return n
-}
-
-// splitHooks 按相位切分 hook 任务（与 executor.splitHookTasks 同语义）：
-// pre_<phase>/post_<phase> 归两侧，无 hook 归主列表，其它相位的 hook 丢弃
-// （uninstall 不跑 install hook）。deploy 相位沿用 install 命名。
-func splitHooks(tasks []*model.Task, phase string) (pre, post, main []*model.Task) {
-	preHook := "pre_" + chart.HookNameFor(phase)
-	postHook := "post_" + chart.HookNameFor(phase)
-	for _, t := range tasks {
-		switch t.Hook {
-		case preHook:
-			pre = append(pre, t)
-		case postHook:
-			post = append(post, t)
-		case "":
-			main = append(main, t)
-		}
-	}
-	return pre, post, main
 }
 
 // playMetaOf 快照 play 级编排属性。
@@ -353,36 +334,38 @@ func resolveTasks(tasks []*model.Task, start int) []*ResolvedTask {
 	var conv func(t *model.Task) *ResolvedTask
 	conv = func(t *model.Task) *ResolvedTask {
 		rt := &ResolvedTask{
-			Idx:          idx,
-			Label:        t.Label(),
-			Module:       t.Module,
-			Rollback:     rollbackOf(t),
-			Hook:         t.Hook,
-			ChartRef:     t.ChartRef,
-			TasksFrom:    t.TasksFrom,
-			ChartVars:    t.ChartVars,
-			Args:         t.Args,
-			FreeForm:     t.FreeForm,
-			When:         t.When,
-			Loop:         t.Loop,
-			LoopVar:      t.LoopVar,
-			Register:     t.Register,
-			Notify:       t.Notify,
-			Tags:         t.Tags,
-			Environment:  t.Environment,
-			IgnoreErrors: t.IgnoreErrors,
-			Retries:      t.Retries,
-			DelaySec:     t.DelaySec,
-			TimeoutSec:   t.TimeoutSec,
-			Become:       t.Become,
-			BecomeUser:   t.BecomeUser,
-			ChangedWhen:  t.ChangedWhen,
-			FailedWhen:   t.FailedWhen,
-			Until:        t.Until,
-			Output:       t.Output,
-			NoLog:        t.NoLog,
-			DelegateTo:   t.DelegateTo,
-			RunOnce:      t.RunOnce,
+			Idx:             idx,
+			Label:           t.Label(),
+			Module:          t.Module,
+			Rollback:        rollbackOf(t),
+			Hook:            t.Hook,
+			ChartRef:        t.ChartRef,
+			TasksFrom:       t.TasksFrom,
+			ChartVars:       t.ChartVars,
+			ChartHosts:      t.ChartHosts,
+			ChartValuesFrom: t.ChartValuesFrom,
+			Args:            t.Args,
+			FreeForm:        t.FreeForm,
+			When:            t.When,
+			Loop:            t.Loop,
+			LoopVar:         t.LoopVar,
+			Register:        t.Register,
+			Notify:          t.Notify,
+			Tags:            t.Tags,
+			Environment:     t.Environment,
+			IgnoreErrors:    t.IgnoreErrors,
+			Retries:         t.Retries,
+			DelaySec:        t.DelaySec,
+			TimeoutSec:      t.TimeoutSec,
+			Become:          t.Become,
+			BecomeUser:      t.BecomeUser,
+			ChangedWhen:     t.ChangedWhen,
+			FailedWhen:      t.FailedWhen,
+			Until:           t.Until,
+			Output:          t.Output,
+			NoLog:           t.NoLog,
+			DelegateTo:      t.DelegateTo,
+			RunOnce:         t.RunOnce,
 		}
 		idx++
 		for _, b := range t.Block {

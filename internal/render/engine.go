@@ -40,6 +40,12 @@ func newEngine() *Engine {
 	}
 	// 自有函数覆盖同名 sprig 函数
 	maps.Copy(fm, funcs)
+	// merge 必须换成不就地改写的版本：sprig 的 merge 是
+	// mergo.Merge(&dst, src)——**原地写 dst**。变量域里的嵌套 map 与 chart
+	// values 是同一对象、且被批内所有主机的 goroutine 共享，模板里一句
+	// {{ merge .app (dict "x" 1) }} 就是并发写同一 map：轻则主机间配置互相
+	// 污染，重则 "concurrent map writes" fatal（不可 recover，控制台直接死）。
+	fm["merge"] = safeMerge
 	e.base = template.New("wdp").
 		Funcs(fm).
 		Funcs(template.FuncMap{

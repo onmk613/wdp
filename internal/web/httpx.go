@@ -43,6 +43,10 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return false
 	}
+	if dec.More() {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: trailing data after JSON value")
+		return false
+	}
 	return true
 }
 
@@ -64,6 +68,10 @@ func decodeJSONLarge(w http.ResponseWriter, r *http.Request, v any) bool {
 			return false
 		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return false
+	}
+	if dec.More() {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: trailing data after JSON value")
 		return false
 	}
 	return true

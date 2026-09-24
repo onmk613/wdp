@@ -1,9 +1,12 @@
 package plan
 
-// §6.4 golden 快照：examples/docker 与 examples/node-exporter 的 plan 编译
+// §6.4 golden 快照：docker 与 node-exporter 两个示例 chart 的 plan 编译
 // 结果固化为 golden 文件，防后续改动无意提交语义漂移。有意变更时：
 //
 //	UPDATE_GOLDEN=1 go test ./internal/plan/ -run TestGoldenExamples
+//
+// 示例 tgz 是测试夹具，存放于 testdata/（examples/ 目录已不纳入版本
+// 控制，fresh checkout 不存在——夹具必须随仓库走，golden 门禁才成立）。
 
 import (
 	"encoding/json"
@@ -21,31 +24,17 @@ docker:
     d2: {ansible_host: 10.20.0.12}
 `
 
-// repoRoot 定位仓库根（测试工作目录是 internal/plan）。
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
-		t.Fatalf("repo root not found: %v", err)
-	}
-	return root
-}
-
 func TestGoldenExamples(t *testing.T) {
-	root := repoRoot(t)
 	inv, err := inventory.Parse([]byte(goldenInv))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, example := range []string{"docker", "node-exporter"} {
 		t.Run(example, func(t *testing.T) {
-			// 示例以打包产物形态存放（examples/<name>-<version>.tgz）：
+			// 示例以打包产物形态存放（testdata/<name>-<version>.tgz）：
 			// 与「下载制品可直接 wdp apply/再导入」的闭环一致，golden 走
 			// 同一条加载路径
-			matches, err := filepath.Glob(filepath.Join(root, "examples", example+"-*.tgz"))
+			matches, err := filepath.Glob(filepath.Join("testdata", example+"-*.tgz"))
 			if err != nil || len(matches) == 0 {
 				t.Fatalf("no packaged example for %s: %v", example, err)
 			}

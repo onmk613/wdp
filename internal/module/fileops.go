@@ -5,20 +5,38 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/pmezard/go-difflib/difflib"
 
+	"wdp/internal/conn"
 	"wdp/internal/shellquote"
 )
 
 // uploadBytes 将字节流上传到远端路径。
+//
+// become 场景优先走提权写（conn.PrivilegedUploader）：UploadFile 以登录
+// 用户落盘，非 root 登录 + `become: true` 写 /etc 之类目录必然
+// permission denied——提权此前只作用于命令执行，对文件分发无效，而
+// docs 明确要求 owner/group 配合 become 使用。连接不支持该能力时回退
+// 旧行为（agent 通道本身以 root 运行，不受影响）。
 func uploadBytes(rc *RunContext, dest string, data []byte, mode int64, hasMode bool) error {
 	var fm fs.FileMode
 	if hasMode {
 		fm = fs.FileMode(mode)
+	}
+	if rc.Become {
+		user := rc.BecomeUser
+		if user == "" {
+			user = "root"
+		}
+		if pu, ok := rc.Conn.(conn.PrivilegedUploader); ok {
+			return pu.UploadFileAs(rc.Ctx, dest, bytes.NewReader(data), fm, user)
+		}
 	}
 	return rc.Conn.UploadFile(rc.Ctx, dest, bytes.NewReader(data), fm)
 }
@@ -57,6 +75,20 @@ exit $?`, shellquote.Quote(path))
 func sha256hex(data []byte) string {
 	h := sha256.Sum256(data)
 	return hex.EncodeToString(h[:])
+}
+
+// fileSHA256 流式计算本地文件摘要（不把文件读进内存）。
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // putFile 将数据落盘到远端：校验和对比幂等、可选备份、可选属主设置。
@@ -242,18 +274,20 @@ const maxDiffBytes = 1 << 20
 
 // contentDiff 下载远端文件与目标内容做 unified diff（--diff 模式；
 // check 专用只读路径，远端不存在时全部为新增行）。
+// 下载经 cappedBuffer 流式封顶：旧实现先整份读进 bytes.Buffer 再比
+// maxDiffBytes，判定在下完之后——远端一个几 GB 的文件就足以打爆控制端。
 func contentDiff(rc *RunContext, dest string, exists bool, want string) string {
 	if !exists {
 		return diffText("", want, "(remote does not exist)", dest)
 	}
-	var buf bytes.Buffer
-	if err := rc.Conn.DownloadFile(rc.Ctx, dest, &buf); err != nil {
+	buf := &cappedBuffer{cap: maxDiffBytes}
+	if err := rc.Conn.DownloadFile(rc.Ctx, dest, buf); err != nil {
 		return fmt.Sprintf("(failed to read remote content: %v)", err)
 	}
-	if buf.Len() > maxDiffBytes {
-		return fmt.Sprintf("(remote file is %d bytes, over the diff limit; showing change summary only)", buf.Len())
+	if buf.truncated() {
+		return fmt.Sprintf("(remote file is over the %d byte diff limit; showing change summary only)", int64(maxDiffBytes))
 	}
-	return diffText(buf.String(), want, "remote "+dest, "target "+dest)
+	return diffText(buf.buf.String(), want, "remote "+dest, "target "+dest)
 }
 
 // diffText 生成 unified diff（无差异返回空串）。

@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path"
+	"strings"
 
 	"github.com/pkg/sftp"
 
@@ -17,7 +18,9 @@ import (
 
 // sftpCopy 在 SFTP 通道上执行 copy 并响应 ctx：SFTP 协议本身无 deadline，
 // 取消时强制关闭文件与 SFTP 客户端解除阻塞（连接降级为 exec 流式通道，
-// 下次传输自动走 streamUpload——它原生响应 ctx）。
+// 下次传输自动走 streamUpload——它原生响应 ctx）。killSftp 只关闭不置
+// nil：并发共享该连接的传输持有的指针继续安全（已关闭通道上的操作返回
+// 错误），不会 TOCTOU nil 解引用。
 func (c *Conn) sftpCopy(ctx context.Context, f *sftp.File, r io.Reader) error {
 	if ctx == nil {
 		_, err := io.Copy(f, r)
@@ -34,10 +37,7 @@ func (c *Conn) sftpCopy(ctx context.Context, f *sftp.File, r io.Reader) error {
 		return r.err
 	case <-ctx.Done():
 		_ = f.Close()
-		if c.sftp != nil {
-			_ = c.sftp.Close()
-			c.sftp = nil // 后续传输降级 exec 流式（响应 ctx）
-		}
+		c.killSftp()
 		<-done // 回收 goroutine（Copy 已因连接关闭而出错返回）
 		return ctx.Err()
 	}
@@ -51,38 +51,33 @@ func (c *Conn) UploadFile(ctx context.Context, dst string, r io.Reader, mode fs.
 	if err := c.ensureClient(); err != nil {
 		return err
 	}
-	if c.sftp != nil {
-		if err := mkdirRemote(c.sftp, path.Dir(dst)); err != nil {
+	sc := c.sftpClient()
+	if sc != nil {
+		if err := mkdirRemote(sc, path.Dir(dst)); err != nil {
 			return fmt.Errorf("failed to create remote directory: %w", err)
 		}
 		tmp := fmt.Sprintf("%s/.wdp.upload.%s", path.Dir(dst), randHex())
-		f, err := c.sftp.Create(tmp)
+		f, err := sc.Create(tmp)
 		if err != nil {
 			return fmt.Errorf("failed to create remote temp file: %w", err)
 		}
 		if err := c.sftpCopy(ctx, f, r); err != nil {
 			f.Close()
-			if c.sftp != nil {
-				_ = c.sftp.Remove(tmp)
-			}
+			_ = sc.Remove(tmp)
 			return fmt.Errorf("write failed: %w", err)
 		}
 		if err := f.Chmod(mode.Perm()); err != nil {
 			f.Close()
-			if c.sftp != nil {
-				_ = c.sftp.Remove(tmp)
-			}
+			_ = sc.Remove(tmp)
 			return fmt.Errorf("failed to set permissions: %w", err)
 		}
 		if err := f.Close(); err != nil {
-			if c.sftp != nil {
-				_ = c.sftp.Remove(tmp) // 关闭失败时清掉远端临时文件
-			}
+			_ = sc.Remove(tmp) // 关闭失败时清掉远端临时文件
 			return err
 		}
-		if err := c.sftp.PosixRename(tmp, dst); err != nil {
-			if err2 := c.sftp.Rename(tmp, dst); err2 != nil {
-				_ = c.sftp.Remove(tmp) // 两种改名均失败，清掉临时文件
+		if err := sc.PosixRename(tmp, dst); err != nil {
+			if err2 := sc.Rename(tmp, dst); err2 != nil {
+				_ = sc.Remove(tmp) // 两种改名均失败，清掉临时文件
 				return fmt.Errorf("rename failed: %w", err)
 			}
 		}
@@ -128,8 +123,9 @@ func (c *Conn) DownloadFile(ctx context.Context, src string, w io.Writer) error 
 	if err := c.ensureClient(); err != nil {
 		return err
 	}
-	if c.sftp != nil {
-		f, err := c.sftp.Open(src)
+	sc := c.sftpClient()
+	if sc != nil {
+		f, err := sc.Open(src)
 		if err != nil {
 			return fmt.Errorf("failed to open remote file: %w", err)
 		}
@@ -146,10 +142,7 @@ func (c *Conn) DownloadFile(ctx context.Context, src string, w io.Writer) error 
 			return r.err
 		case <-ctx.Done():
 			_ = f.Close()
-			if c.sftp != nil {
-				_ = c.sftp.Close()
-				c.sftp = nil
-			}
+			c.killSftp()
 			<-done
 			return ctx.Err()
 		}
@@ -181,6 +174,40 @@ func mkdirRemote(c *sftp.Client, dir string) error {
 		if _, err2 := c.Stat(dir); err2 != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// UploadFileAs 以 becomeUser 身份写入 dst（提权分发）。
+//
+// 机制：先把数据经 SFTP/流式写到登录用户自己的临时文件（登录用户可写
+// /tmp），再用 `sudo -n -u <user> -- cp` 搬到目标路径并设权限——sudo 以
+// 目标身份读取登录用户的临时文件，因此不要求临时文件对他人可读。
+// 结束后无论成败都清理临时文件。
+func (c *Conn) UploadFileAs(ctx context.Context, dst string, r io.Reader, mode fs.FileMode, becomeUser string) error {
+	if becomeUser == "" {
+		return c.UploadFile(ctx, dst, r, mode)
+	}
+	if mode == 0 {
+		mode = 0o644
+	}
+	tmp := "/tmp/.wdp.upload." + randHex()
+	if err := c.UploadFile(ctx, tmp, r, 0o600); err != nil {
+		return err
+	}
+	cleanup := func() {
+		_, _ = c.Exec(ctx, conn.ExecRequest{Script: "rm -f -- " + shellquote.Quote(tmp), TimeoutMs: 30_000})
+	}
+	defer cleanup()
+
+	script := fmt.Sprintf("install -m %04o -- %s %s",
+		mode.Perm(), shellquote.Quote(tmp), shellquote.Quote(dst))
+	out, err := c.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 120_000, BecomeUser: becomeUser})
+	if err != nil {
+		return fmt.Errorf("become upload failed: %w", err)
+	}
+	if out.Code != 0 {
+		return fmt.Errorf("become upload failed rc=%d: %s", out.Code, strings.TrimSpace(out.Stderr))
 	}
 	return nil
 }

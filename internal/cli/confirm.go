@@ -46,15 +46,26 @@ func confirmReversibility(ch *chart.Chart, phase string, yes bool) error {
 		return nil
 	}
 	if !fmtutil.IsTerminal(os.Stderr) { // 与提示输出流一致：stdout 重定向（管道/CI 摘取）不应跳过确认
-		p.Printf(fmtutil.Yellow, "==> warning: %d irreversible operation(s) in a non-interactive environment, continuing (suppress with --yes)\n",
-			rep.Irreversible)
-		return nil
+		// stderr 非终端不再静默放行：交互会话里常见的
+		// `wdp run … 2>&1 | tee deploy.log` 也落进这条分支，用户并不
+		// 知道自己跳过了不可逆确认。要么 --yes 显式确认，要么用环境
+		// 变量保留旧的自动放行（CI 场景）。
+		if os.Getenv("WDP_AUTO_CONFIRM_IRREVERSIBLE") == "1" {
+			p.Printf(fmtutil.Yellow, "==> warning: %d irreversible operation(s), continuing (non-interactive, WDP_AUTO_CONFIRM_IRREVERSIBLE=1)\n",
+				rep.Irreversible)
+			return nil
+		}
+		return fmt.Errorf("irreversible operations detected in a non-interactive environment (stderr is not a terminal); "+
+			"rerun with --yes to proceed explicitly, or set WDP_AUTO_CONFIRM_IRREVERSIBLE=1 for unattended pipelines")
 	}
 	p.Printf(fmtutil.None, "==> %s, continue? [Y/n] ",
 		p.Sprint(fmtutil.BoldRed, "irreversible operations detected"))
 	line, err := readLine(os.Stdin)
 	if err != nil {
-		return nil // 读失败按默认继续
+		// fail-closed：stdin 被重定向/关闭（如 `< /dev/null`）时 EOF——
+		// 不可逆操作不能因读不到确认而默认放行（终端判定在 stderr，
+		// 二者可以不一致）；提示用户改用 --yes 显式确认
+		return fmt.Errorf("cannot read confirmation (stdin closed or redirected); rerun with --yes to proceed explicitly")
 	}
 	switch strings.ToLower(strings.TrimSpace(line)) {
 	case "", "y", "yes":

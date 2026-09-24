@@ -8,6 +8,7 @@ import (
 )
 
 // precomputeTopology 预计算组拓扑与主机元信息（内置变量 groups/hosts 的数据源）。
+// 直接调用仅限构建期；运行期失效走 markTopoDirty + ensureTopology。
 func (inv *Inventory) precomputeTopology() {
 	inv.groupMap = map[string][]string{"all": hostNames(inv.Hosts)}
 	for name, g := range inv.Groups {
@@ -19,13 +20,30 @@ func (inv *Inventory) precomputeTopology() {
 			"name": h.Name, "address": h.Address, "conn": h.Conn,
 		}
 	}
+	inv.topoDirty = false
+}
+
+// markTopoDirty 置脏拓扑缓存（运行期写路径），读取侧惰性重建。
+func (inv *Inventory) markTopoDirty() { inv.topoDirty = true }
+
+// ensureTopology 读取侧确保拓扑缓存新鲜。
+func (inv *Inventory) ensureTopology() {
+	if inv.topoDirty {
+		inv.precomputeTopology()
+	}
 }
 
 // GroupsMap 返回组名→成员主机名（含 children 展开；all = 全部主机）。
-func (inv *Inventory) GroupsMap() map[string][]string { return inv.groupMap }
+func (inv *Inventory) GroupsMap() map[string][]string {
+	inv.ensureTopology()
+	return inv.groupMap
+}
 
 // HostsMeta 返回主机名→{name,address,conn}。
-func (inv *Inventory) HostsMeta() map[string]map[string]any { return inv.hostsMeta }
+func (inv *Inventory) HostsMeta() map[string]map[string]any {
+	inv.ensureTopology()
+	return inv.hostsMeta
+}
 
 // HostByName 按名查找主机（delegate_to 等场景；未找到返回 nil）。
 func (inv *Inventory) HostByName(name string) *model.Host {
@@ -59,7 +77,7 @@ func (inv *Inventory) AddDynamicGroup(name string, members []string) {
 			seen[m] = true
 		}
 	}
-	inv.precomputeTopology()
+	inv.markTopoDirty()
 }
 
 // AddRuntimeHost 运行时（add_host 模块）新增或更新主机，可同时入组。
@@ -97,10 +115,8 @@ func (inv *Inventory) AddRuntimeHost(h *model.Host, groups []string) {
 	for _, g := range groups {
 		inv.AddDynamicGroup(g, []string{h.Name})
 	}
-	if len(groups) == 0 {
-		inv.precomputeTopology()
-		return
-	}
+	// AddDynamicGroup 已置脏；无组时同样只需置脏一次
+	inv.markTopoDirty()
 	// group_names 与静态 inventory 构建口径一致：主机变量里保留所属组清单
 	names, _ := h.Vars["group_names"].([]string)
 	for _, g := range groups {

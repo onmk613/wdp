@@ -49,11 +49,11 @@ func (m *FetchModule) Run(rc *RunContext, args map[string]any, _ string) *Result
 	if err := checkLocalPath(dest, local); err != nil {
 		return Fail("%v", err)
 	}
-	// 幂等：本地已存在同校验和文件则跳过下载（只读模块，check 模式行为不变）
-	if data, err := os.ReadFile(local); err == nil {
-		if sum := sha256hex(data); sum == remote {
-			return &Result{Msg: fmt.Sprintf("%s is already up to date (sha256 matches)", local)}
-		}
+	// 幂等：本地已存在同校验和文件则跳过下载（只读模块，check 模式行为不变）。
+	// 摘要按流式计算：本地文件大小不受控，整份读进内存只为算 sha256 是
+	// 无谓的内存放大（也把 fetch 变成控制端 OOM 的一条路径）。
+	if sum, err := fileSHA256(local); err == nil && sum == remote {
+		return &Result{Msg: fmt.Sprintf("%s is already up to date (sha256 matches)", local)}
 	}
 
 	if rc.CheckMode {

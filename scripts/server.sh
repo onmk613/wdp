@@ -97,7 +97,10 @@ start() {
   if [ ! -x "$BIN" ] || [ "${1:-}" = "build" ]; then
     build
   fi
-  mkdir -p "$DATA_DIR"
+  # 数据目录与日志收敛权限：首启未显式配密码时 server 会把随机生成的
+  # 管理员密码打印进日志（0644 的话本机任意用户可读），CA/DB 也在该目录
+  mkdir -p "$DATA_DIR" && chmod 700 "$DATA_DIR"
+  touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
 
   local args=(server --addr "$ADDR" --data "$DATA_DIR")
   [ -n "${WDP_ADVERTISE:-}" ] && args+=(--advertise "$WDP_ADVERTISE")
@@ -121,7 +124,7 @@ start() {
         echo "wdp server 已启动: http://$probe (pid $(cat "$PID_FILE"))"
         echo "管理员账号: ${WDP_ADMIN_USER:-admin}"
         if [ -n "${WDP_ADMIN_PASS:-}" ]; then
-          echo "管理员密码: ${WDP_ADMIN_PASS}（来自 WDP_ADMIN_PASS，已生效）"
+          echo "管理员密码: 已按 WDP_ADMIN_PASS 生效（不回显，避免留在终端记录里）"
         else
           echo "管理员密码: 未配置——首启随机生成在日志开头；设 WDP_ADMIN_PASS 后 restart 可显式指定/重置"
         fi

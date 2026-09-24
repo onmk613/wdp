@@ -20,7 +20,7 @@ var (
 )
 
 func version() string {
-	return fmt.Sprintf("%s \ngolang %s \ncommit %s\nbuilt %s", Version, GoVersion, Commit, BuildDate)
+	return fmt.Sprintf("%s\ngolang %s\ncommit %s\nbuilt %s", Version, GoVersion, Commit, BuildDate)
 }
 
 // 命令分组
@@ -76,7 +76,7 @@ func NewRootCmd() *cobra.Command {
 	pf.CountVarP(&gVerbosity, "verbose", "v", "verbosity (repeatable): -v per-host / -vv full stdout/stderr & loop items / -vvv debug")
 	pf.BoolVarP(&gQuiet, "quiet", "q", false, "quiet: only failed hosts and RECAP")
 	pf.BoolVar(&flNoColor, "no-color", false, "disable colored output")
-	pf.StringVar(&gOutput, "output", "console", "output format: console | json (machine-readable, for CI/CD)")
+	pf.StringVar(&gOutput, "output", "console", "output format: console | json (machine-readable; applies to run/apply/adhoc/drift, other commands print plain tables)")
 	pf.Int64Var(&flMaxDown, "max-download-mb", 0, "get_url download body size limit in MiB (0 = follow wdp.cfg [transfer], default 2048)")
 
 	// 子命令 RunE 前统一加载 wdp.cfg，再把显式指定的 flag 覆盖进当前配置

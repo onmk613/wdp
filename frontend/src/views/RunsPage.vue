@@ -86,6 +86,9 @@ async function openRun(r: Run) {
   detailTasks.value = []
   try {
     const d = await api<{ run: Run; tasks: RunTask[] }>('GET', `/api/runs/${r.ID}`)
+    // 竞态守卫：等待期间用户可能已点开另一条 run（慢响应后到会整体
+    // 替换抽屉内容，且 refreshDetail 之后一直刷错的那条）
+    if (detailRun.value?.ID !== r.ID) return
     detailRun.value = d.run
     detailTasks.value = d.tasks
   } catch (e) {
@@ -135,11 +138,18 @@ function schedulePoll() {
 
 onMounted(() => {
   load()
-  unsubRuns = subscribeRuns(() => {
-    sseAlive = true
-    load(true)
-    refreshDetail()
-  })
+  unsubRuns = subscribeRuns(
+    () => {
+      sseAlive = true
+      load(true)
+      refreshDetail()
+    },
+    () => {
+      // 连接失败（server 重启/502）后 EventSource 不再自动重连：回落快档
+      // 轮询，直到下次收到事件再放宽
+      sseAlive = false
+    },
+  )
   schedulePoll()
 })
 onUnmounted(() => {

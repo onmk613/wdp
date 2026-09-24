@@ -2,6 +2,7 @@ package chart
 
 import (
 	"bytes"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,11 +20,25 @@ const (
 	RedactedValue = "<redacted>"
 )
 
+// digestInvalid 返回 values 含不可 JSON 序列化值（YAML .nan/.inf 等）时的
+// 摘要哨兵，携带**每次调用独立**的随机段。deploy 与巡检两侧都走
+// ValuesDigest，哨兵若为固定值（"n/a"），两份坏摘要恒相等，drift 会把
+// 真实漂移恒判 OK；常驻进程（console）里 deploy 与巡检共享同一进程，
+// 进程级随机也不够——每次调用独立随机保证坏值摘要必不相等，漂移必然
+// 可见。哨兵唯一消费者是相等比较（还有展示），不稳定性无害。
+func digestInvalid() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "unserializable:fixed" // crypto/rand 失败极罕见：仍可区分正常摘要
+	}
+	return "unserializable:" + hex.EncodeToString(b[:])
+}
+
 // ValuesDigest 返回 values 的短摘要（sha256 前 12 位，marker 记录用）。
 func ValuesDigest(values map[string]any) string {
 	b, err := json.Marshal(values)
 	if err != nil {
-		return "n/a"
+		return digestInvalid()
 	}
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])[:12]

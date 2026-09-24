@@ -7,12 +7,12 @@
 | `--config` | ./wdp.cfg | 配置文件（显式指定时必须存在） |
 | `--inventory / -i` | inventory.yaml | inventory 文件，**可多次指定**（后者覆盖合并） |
 | `--forks` | 5 | 并发主机数 |
-| `--timeout` | 0 | 全局墙钟超时秒（0 不限） |
+| `--timeout` | 0 | 全局墙钟超时秒（0 不限；作用于 run/apply 的执行阶段，drift/adhoc/plan 的联网阶段暂不受其约束） |
 | `--task-timeout` | 0 | 任务默认超时秒（任务级 timeout 属性可覆盖） |
 | `--verbose / -v` | 0 | 可重复计数：-v 逐主机 / -vv 全量+loop 逐项 / -vvv 调试 |
 | `--quiet / -q` | false | 仅异常与 RECAP |
 | `--no-color` | false | 禁用颜色 |
-| `--output` | console | console / json（机器可读） |
+| `--output` | console | console / json（机器可读；仅对 run/apply/adhoc/drift 生效，列表类命令输出普通表格） |
 | `--max-download-mb` | 0 | get_url 下载响应体上限 MiB（0 = 跟随 wdp.cfg `[transfer]`，默认 2048） |
 
 未显式指定的 flag 回退 wdp.cfg（见[配置文件](02-配置文件.md)）。

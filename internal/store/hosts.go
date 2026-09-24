@@ -25,6 +25,10 @@ type Host struct {
 	LastSeenAt string
 	CreatedAt  string
 	UpdatedAt  string
+	// AllowPlaintext 声明该主机的 agent 未启用 mTLS（明文 HTTP，仅限可信
+	// 内网）。默认 false：CA 启用时一律按 mTLS 建连，避免"探测失败即降级
+	// 明文"这种可被中间人触发的通道降级。
+	AllowPlaintext bool `json:"allow_plaintext,omitempty"`
 }
 
 // CreateHost 新增主机（name 唯一；重复返回错误）。
@@ -45,9 +49,9 @@ func (s *Store) CreateHost(h *Host) (int64, error) {
 	var id int64
 	// 台账行与池/组归属同事务：中途失败不留无归属（或归属半截）的行
 	err := s.tx(func(q execer) error {
-		res, err := q.Exec(`INSERT INTO hosts (name, address, agent_port, labels, status, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			h.Name, h.Address, h.AgentPort, h.Labels, h.Status, h.CreatedAt, h.UpdatedAt)
+		res, err := q.Exec(`INSERT INTO hosts (name, address, agent_port, labels, status, created_at, updated_at, allow_plaintext)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			h.Name, h.Address, h.AgentPort, h.Labels, h.Status, h.CreatedAt, h.UpdatedAt, boolInt(h.AllowPlaintext))
 		if err != nil {
 			return err
 		}
@@ -115,8 +119,8 @@ func (s *Store) UpdateHost(id int64, h *Host) error {
 	}
 	// 更新与池/组整体替换同事务：替换中途失败不得留下半替换状态
 	return s.tx(func(q execer) error {
-		res, err := q.Exec(`UPDATE hosts SET address = ?, agent_port = ?, labels = ?, updated_at = ? WHERE id = ?`,
-			h.Address, h.AgentPort, h.Labels, nowUTC(), id)
+		res, err := q.Exec(`UPDATE hosts SET address = ?, agent_port = ?, labels = ?, allow_plaintext = ?, updated_at = ? WHERE id = ?`,
+			h.Address, h.AgentPort, h.Labels, boolInt(h.AllowPlaintext), nowUTC(), id)
 		if err != nil {
 			return err
 		}
@@ -151,7 +155,7 @@ func (s *Store) DeleteHost(id int64) error {
 
 // GetHost 按 id 查询。
 func (s *Store) GetHost(id int64) (*Host, error) {
-	row := s.db.QueryRow(`SELECT id, name, address, agent_port, labels, status, last_seen_at, created_at, updated_at,
+	row := s.db.QueryRow(`SELECT id, name, address, agent_port, labels, status, last_seen_at, created_at, updated_at, allow_plaintext,
 		(SELECT COALESCE(group_concat(pool, ','), '') FROM host_pools WHERE host_id = hosts.id),
 		(SELECT COALESCE(group_concat(group_name, ','), '') FROM host_group_map WHERE host_id = hosts.id)
 		FROM hosts WHERE id = ?`, id)
@@ -161,7 +165,7 @@ func (s *Store) GetHost(id int64) (*Host, error) {
 // ListHosts 台账（按 name 排序）。q 非空时按 主机名/地址/池/组/标签
 // 模糊匹配过滤（标签为 JSON 文本 LIKE，键值子串均可命中）。
 func (s *Store) ListHosts(q string) ([]*Host, error) {
-	sqlStr := `SELECT id, name, address, agent_port, labels, status, last_seen_at, created_at, updated_at,
+	sqlStr := `SELECT id, name, address, agent_port, labels, status, last_seen_at, created_at, updated_at, allow_plaintext,
 		(SELECT COALESCE(group_concat(pool, ','), '') FROM host_pools WHERE host_id = hosts.id),
 		(SELECT COALESCE(group_concat(group_name, ','), '') FROM host_group_map WHERE host_id = hosts.id)
 		FROM hosts`
@@ -199,6 +203,16 @@ func (s *Store) SetHostStatus(id int64, status string) error {
 	_, err := s.db.Exec(`UPDATE hosts SET status = ?, last_seen_at = CASE WHEN ? = 'online' THEN ? ELSE last_seen_at END, updated_at = ? WHERE id = ?`,
 		status, status, lastSeen, nowUTC(), id)
 	return err
+}
+
+// GetHostByName 按台账名查主机（不存在返回 ErrNotFound）。纳管 claim 的
+// 主机名碰撞校验用。
+func (s *Store) GetHostByName(name string) (*Host, error) {
+	row := s.db.QueryRow(`SELECT id, name, address, agent_port, labels, status, last_seen_at, created_at, updated_at, allow_plaintext,
+		(SELECT COALESCE(group_concat(pool, ','), '') FROM host_pools WHERE host_id = hosts.id),
+		(SELECT COALESCE(group_concat(group_name, ','), '') FROM host_group_map WHERE host_id = hosts.id)
+		FROM hosts WHERE name = ?`, name)
+	return scanHostMulti(row)
 }
 
 // UpsertHostByName 纳管完成落账：同名更新地址/端口（保留分组与标签），
@@ -255,17 +269,27 @@ func (s *Store) HostIDs() ([]int64, error) {
 
 type rowScanner interface{ Scan(dest ...any) error }
 
+// boolInt 把布尔落成 SQLite 的 0/1。
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 // scanHostMulti 扫描 hosts 行（含尾部 group_concat 的池/组多值列）。
 func scanHostMulti(row rowScanner) (*Host, error) {
 	h := &Host{}
 	var pools, groups string
-	err := row.Scan(&h.ID, &h.Name, &h.Address, &h.AgentPort, &h.Labels, &h.Status, &h.LastSeenAt, &h.CreatedAt, &h.UpdatedAt, &pools, &groups)
+	var plaintext int
+	err := row.Scan(&h.ID, &h.Name, &h.Address, &h.AgentPort, &h.Labels, &h.Status, &h.LastSeenAt, &h.CreatedAt, &h.UpdatedAt, &plaintext, &pools, &groups)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	h.AllowPlaintext = plaintext != 0
 	// 排序保证输出稳定：group_concat 无 ORDER BY，行序不定会让结果抖动
 	if pools != "" {
 		h.Pools = strings.Split(pools, ",")
@@ -284,12 +308,18 @@ func scanHostMulti(row rowScanner) (*Host, error) {
 
 // BatchAssign 批量设置池/组/标签：pools/groups 为 nil 表示不改
 // （非 nil 即整体替换该集合，空切片 = 清空）；labels 追加合并
-// （replace=true 时整体替换）。
+// （replace=true 时整体替换）。单台失败（读取/写入出错）返回首个错误，
+// 其余主机继续处理——静默吞错会让调用方看到"失败却无原因"（n=0 且
+// err=nil 时尤其误导）。
 func (s *Store) BatchAssign(ids []int64, pools, groups []string, setPools, setGroups bool, labels map[string]string, replace bool) (int, error) {
 	n := 0
+	var firstErr error
 	for _, id := range ids {
 		h, err := s.GetHost(id)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("host %d: %w", id, err)
+			}
 			continue
 		}
 		if setPools {
@@ -315,11 +345,14 @@ func (s *Store) BatchAssign(ids []int64, pools, groups []string, setPools, setGr
 			h.Labels = string(b)
 		}
 		if err := s.UpdateHost(id, h); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("host %d: %w", id, err)
+			}
 			continue
 		}
 		n++
 	}
-	return n, nil
+	return n, firstErr
 }
 
 // HostsBySelector 按选择器解析主机：kind = all|pool|group|label|hosts。

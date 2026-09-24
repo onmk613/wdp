@@ -13,6 +13,10 @@ import (
 	"strings"
 )
 
+// defaultMemberLimit 是成员解压后的默认总上限（调用方未注入
+// max_upload_mb 时的兜底，与 readLocalCap 同口径）。
+const defaultMemberLimit int64 = 2 << 30
+
 // archiveMember 是从归档中选取的一个成员（name 为归档内完整路径）。
 type archiveMember struct {
 	name string
@@ -25,16 +29,24 @@ type archiveMember struct {
 // kubernetes/server/bin/kubelet 这类带顶层目录的发布包）；多条目命中同一
 // 成员名时归档顺序在前者生效。任一成员未命中即报错（拼错文件名必须当场
 // 失败，离线场景少一个二进制是灾难）。
-func selectArchiveMembers(kind string, data []byte, members []string) ([]archiveMember, error) {
+//
+// limit 是成员解压后的总字节上限（<=0 时取内置 2GiB）：归档体积受
+// max_download_mb/max_upload_mb 约束，但解压后可以任意放大（压缩比
+// 1000:1 很常见），不封顶就是控制端 OOM 的最短路径。
+func selectArchiveMembers(kind string, data []byte, members []string, limit int64) ([]archiveMember, error) {
 	for i, m := range members {
 		if strings.TrimSpace(m) == "" {
 			return nil, fmt.Errorf("members[%d] is empty", i)
 		}
 	}
+	if limit <= 0 {
+		limit = defaultMemberLimit
+	}
 
 	var out []archiveMember
+	var total int64
 	matched := make([]bool, len(members))
-	take := func(name string, mode int64, r io.Reader) error {
+	take := func(name string, mode int64, size int64, r io.Reader) error {
 		for i, m := range members {
 			if matched[i] {
 				continue
@@ -42,10 +54,20 @@ func selectArchiveMembers(kind string, data []byte, members []string) ([]archive
 			if !matchArchiveMemberName(name, m) {
 				continue
 			}
-			b, err := io.ReadAll(r)
+			// 条目声明大小已知时先判（tar 头/zip 目录），未知再靠读时截断
+			if size > 0 && size > limit-total {
+				return fmt.Errorf("archive member %s declares %d bytes, over the %d MiB member limit (suspected extraction bomb)",
+					name, size, limit>>20)
+			}
+			b, err := io.ReadAll(io.LimitReader(r, limit-total+1))
 			if err != nil {
 				return fmt.Errorf("failed to read archive entry %s: %w", name, err)
 			}
+			if int64(len(b)) > limit-total {
+				return fmt.Errorf("archive member %s exceeds the %d MiB member limit (suspected extraction bomb)",
+					name, limit>>20)
+			}
+			total += int64(len(b))
 			matched[i] = true
 			out = append(out, archiveMember{name: name, mode: mode, data: b})
 			return nil // 单条目只满足一个成员名
@@ -76,7 +98,7 @@ func selectArchiveMembers(kind string, data []byte, members []string) ([]archive
 			if hdr.Typeflag != tar.TypeReg {
 				continue
 			}
-			if err := take(hdr.Name, int64(hdr.FileInfo().Mode().Perm()), tr); err != nil {
+			if err := take(hdr.Name, int64(hdr.FileInfo().Mode().Perm()), hdr.Size, tr); err != nil {
 				return nil, err
 			}
 		}
@@ -93,7 +115,7 @@ func selectArchiveMembers(kind string, data []byte, members []string) ([]archive
 			if err != nil {
 				return nil, fmt.Errorf("failed to open archive entry %s: %w", f.Name, err)
 			}
-			err = take(f.Name, int64(f.Mode().Perm()), fr)
+			err = take(f.Name, int64(f.Mode().Perm()), int64(f.UncompressedSize64), fr)
 			fr.Close()
 			if err != nil {
 				return nil, err
