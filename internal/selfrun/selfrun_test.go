@@ -10,12 +10,13 @@ import (
 	"time"
 )
 
-// TestBecomeScriptPasswordOnlyOnStdin 提权密码只经 stdin 传递，绝不出现在
-// 脚本或命令行里（同机用户 ps 不可见）。
-func TestBecomeScriptPasswordOnlyOnStdin(t *testing.T) {
-	script, stdin := BecomeScript("echo hi", "root", "s3cret", "user-input\n")
-	if strings.Contains(script, "s3cret") {
-		t.Fatalf("密码不得出现在脚本中: %s", script)
+// TestBecomeCmdPasswordOnlyOnStdin 提权密码只经 stdin 传递，绝不进 argv；
+// 脚本体以临时文件路径引用，不内联在命令行（同机用户 ps 不可见）。
+func TestBecomeCmdPasswordOnlyOnStdin(t *testing.T) {
+	argv, stdin := becomeCmd("/tmp/.wdp-exec-x", "root", "s3cret", "user-input\n")
+	joined := strings.Join(argv, " ")
+	if strings.Contains(joined, "s3cret") {
+		t.Fatalf("密码不得出现在 argv: %s", joined)
 	}
 	if !strings.HasPrefix(stdin, "s3cret\n") {
 		t.Fatalf("密码应作为 stdin 首行: %q", stdin)
@@ -23,17 +24,33 @@ func TestBecomeScriptPasswordOnlyOnStdin(t *testing.T) {
 	if !strings.HasSuffix(stdin, "user-input\n") {
 		t.Fatalf("原 stdin 应拼接在密码行之后: %q", stdin)
 	}
-	if !strings.Contains(script, "sudo -S") {
-		t.Fatalf("有密码时应使用 sudo -S: %s", script)
+	if !strings.Contains(joined, "sudo -S") {
+		t.Fatalf("有密码时应使用 sudo -S: %s", joined)
 	}
-	// 用户名注入被引号包裹
-	script, _ = BecomeScript("echo hi", "user; rm -rf /", "", "")
-	if !strings.Contains(script, "'user; rm -rf /'") {
-		t.Fatalf("用户名应经 shell 引号: %s", script)
+	// argv 引用脚本文件路径而非脚本体
+	if !strings.Contains(joined, "/tmp/.wdp-exec-x") {
+		t.Fatalf("argv 应引用脚本文件路径: %s", joined)
 	}
-	// 无 become 用户：原样返回
-	if s, in := BecomeScript("echo hi", "", "pw", "x"); s != "echo hi" || in != "x" {
-		t.Fatalf("无 become 应原样返回: %q %q", s, in)
+	// 免密 become：sudo -n
+	argv, _ = becomeCmd("/tmp/.wdp-exec-x", "appuser", "", "")
+	if !strings.Contains(strings.Join(argv, " "), "sudo -n") {
+		t.Fatalf("无密码时应使用 sudo -n: %v", argv)
+	}
+}
+
+// TestRunScriptNotInArgv 脚本体不得进 argv（回归：同机任意用户可经
+// ps//proc/<pid>/cmdline 看到任意进程的完整命令行，脚本内嵌的
+// export TOKEN=…/口令会随 argv 广播）。观察法：脚本自己 ps 父进程
+// （即执行脚本的 sh）并在其命令行里找脚本体标记——内联实现会命中 1。
+func TestRunScriptNotInArgv(t *testing.T) {
+	resp := RunScript(context.Background(), ExecReq{
+		Script: `ps -o command= -p $PPID | grep -c wdp-argv-marker-9f3a`,
+	})
+	if resp.Code != 1 { // grep 无命中退出 1；若脚本进了 argv 会命中、退出 0
+		t.Fatalf("脚本体不得出现在父进程命令行: %+v (stdout=%q)", resp, resp.Stdout)
+	}
+	if strings.TrimSpace(resp.Stdout) != "0" {
+		t.Fatalf("ps 中不应找到脚本体标记: %q", resp.Stdout)
 	}
 }
 

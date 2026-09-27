@@ -39,6 +39,12 @@ func (s *Server) handleRenewHostCert(w http.ResponseWriter, r *http.Request) {
 	}
 	crt, key := s.hostCertPaths(h.Name)
 	if _, err := os.Stat(crt); err != nil {
+		// 只有"确实没有证书"才是 404：Stat 的其他失败（权限/IO）是
+		// server 侧问题，回 500 而不是伪装成"未纳管"
+		if !errors.Is(err, os.ErrNotExist) {
+			s.writeInternal(w, fmt.Errorf("stat host cert: %w", err))
+			return
+		}
 		writeError(w, http.StatusNotFound, "host certificate not found (was this host enrolled via the web console?)")
 		return
 	}
@@ -92,9 +98,6 @@ func (s *Server) handleRenewHostCert(w http.ResponseWriter, r *http.Request) {
 // 推送，返回 (false, nil)——调用方以"重签成功、重启后生效"口径提示。
 func (s *Server) pushCertToAgent(ctx context.Context, h *store.Host, certPEM []byte) (bool, error) {
 	if !s.useTLS(h) {
-		// agent 未启用 mTLS（从未签发逐主机证书）：不推送，调用方以
-		// "重签成功、重启后生效"口径提示
-
 		return false, nil
 	}
 	url := fmt.Sprintf("https://%s/cert", net.JoinHostPort(h.Address, fmt.Sprint(h.AgentPort)))

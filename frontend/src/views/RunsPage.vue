@@ -1,15 +1,20 @@
 <script setup lang="ts">
 // 执行记录：应用执行（kind=app，多应用按序各一行 run）与远程命令（kind=exec）
-// 的统一审计视图。列表 5s 自动刷新，点击行查看任务明细与逐任务输出。
-import { onMounted, onUnmounted, ref } from 'vue'
+// 的统一审计视图。列表 SSE 事件驱动即时刷新；轮询兜底（收到事件前 5s、
+// 收到后放缓到 30s 慢档）。点击行查看任务明细与逐任务输出。
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { can } from '../auth'
 import { Delete, Refresh } from '@element-plus/icons-vue'
 import { api, subscribeRuns, type Run, type RunTask } from '../api'
+import { runStatus, taskStatus } from '../lib/format'
 
 const runs = ref<Run[]>([])
 const loading = ref(false)
 const kindFilter = ref('')
+// 模板内的过滤提为 computed：每次渲染重算 filter 是纯浪费（响应式依赖
+// runs/kindFilter 本身已可精确追踪）
+const filteredRuns = computed(() => runs.value.filter((r) => !kindFilter.value || r.Kind === kindFilter.value))
 
 async function load(silent = false) {
   if (!silent) loading.value = true
@@ -103,21 +108,17 @@ const RUN_TERMINAL = new Set(['succeeded', 'failed'])
 async function refreshDetail() {
   if (!detailVisible.value || !detailRun.value) return
   if (RUN_TERMINAL.has(detailRun.value.Status)) return
+  const id = detailRun.value.ID
   try {
-    const d = await api<{ run: Run; tasks: RunTask[] }>('GET', `/api/runs/${detailRun.value.ID}`)
+    const d = await api<{ run: Run; tasks: RunTask[] }>('GET', `/api/runs/${id}`)
+    // 竞态守卫（与 openRun 同口径）：慢响应回来时用户可能已点开另一条
+    // run——迟到响应整体覆盖抽屉内容后，后续轮询会一直刷错的那条
+    if (detailRun.value?.ID !== id) return
     detailRun.value = d.run
     detailTasks.value = d.tasks
   } catch {
     /* 静默 */
   }
-}
-
-function runStatus(s: string): 'success' | 'danger' | 'info' | 'warning' {
-  return s === 'succeeded' ? 'success' : s === 'failed' ? 'danger' : s === 'queued' ? 'warning' : 'info'
-}
-
-function taskStatus(s: string): 'success' | 'info' | 'danger' {
-  return s === 'ok' ? 'success' : s === 'skipped' ? 'info' : 'danger'
 }
 
 // 执行事件流（SSE）：任何 run 状态/任务落库都推一条 → 即时刷新。
@@ -179,7 +180,7 @@ onUnmounted(() => {
     <el-card shadow="never">
       <el-table
         ref="tableRef"
-        :data="runs.filter((r) => !kindFilter || r.Kind === kindFilter)"
+        :data="filteredRuns"
         v-loading="loading"
         row-key="ID"
         style="width: 100%"

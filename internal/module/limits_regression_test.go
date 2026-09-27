@@ -101,7 +101,7 @@ func TestReadLocalCapRejectsOversize(t *testing.T) {
 // TestCappedBufferTruncates cappedBuffer 超限后继续接收但不再增长，
 // 且能报告"发生过截断"（供调用方降级提示或 fail-loud）。
 func TestCappedBufferTruncates(t *testing.T) {
-	b := &cappedBuffer{cap: 100}
+	b := &cappedBuffer{max: 100}
 	n, err := b.Write(bytes.Repeat([]byte("x"), 1000))
 	if err != nil || n != 1000 {
 		t.Fatalf("Write 应吞下全部输入（不中断上游）: %d %v", n, err)
@@ -112,7 +112,7 @@ func TestCappedBufferTruncates(t *testing.T) {
 	if !b.truncated() {
 		t.Fatal("应报告发生截断")
 	}
-	b2 := &cappedBuffer{cap: 100}
+	b2 := &cappedBuffer{max: 100}
 	_, _ = b2.Write([]byte("short"))
 	if b2.truncated() {
 		t.Fatal("未超限不应报告截断")

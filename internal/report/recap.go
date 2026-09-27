@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 
 	"wdp/internal/fmtutil"
@@ -14,7 +15,7 @@ func statCell(v int, clr fmtutil.Color) fmtutil.Cell {
 	if v == 0 {
 		return fmtutil.CC("0", fmtutil.Dim)
 	}
-	return fmtutil.CC(fmt.Sprintf("%d", v), clr)
+	return fmtutil.CC(strconv.Itoa(v), clr)
 }
 
 // statCells 按固定列序（OK/CHANGED/FAILED/UNREACHABLE/SKIPPED/IGNORED）生成单元格。

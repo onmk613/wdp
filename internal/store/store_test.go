@@ -213,6 +213,75 @@ func TestListRegistriesEmptyAndMembers(t *testing.T) {
 	}
 }
 
+// TestLabelAttachDetachRegression 标签键创建/删除的事务路径回归：
+// CreateLabel 附加到主机的 labels 读取+写入须同事务（预读在外会被并发
+// 修改覆盖，丢更新）；失败整体回滚（不留"键建了但主机没打上"）；DeleteLabel
+// 从全部主机移除该键并删注册行。此前 DeleteLabel 零覆盖。
+func TestLabelAttachDetachRegression(t *testing.T) {
+	s := openTest(t)
+
+	h1, err := s.CreateHost(&Host{Name: "lh1", Address: "10.0.0.1", Labels: `{"env":"prod"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h2, err := s.CreateHost(&Host{Name: "lh2", Address: "10.0.0.2", Labels: `{"env":"prod"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 创建即附加：既有 env 保留，新键 zone 追加
+	if _, err := s.CreateLabel("zone", "", []int64{h1, h2}, "dmz"); err != nil {
+		t.Fatal(err)
+	}
+	for _, hid := range []int64{h1, h2} {
+		h, err := s.GetHost(hid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if h.Labels != `{"env":"prod","zone":"dmz"}` {
+			t.Fatalf("标签应追加而非覆盖: %s", h.Labels)
+		}
+	}
+
+	// 不存在的目标主机：整体回滚，注册行不得残留
+	bad := int64(99999)
+	if _, err := s.CreateLabel("ghost", "", []int64{bad}, "x"); err != ErrNotFound {
+		t.Fatalf("目标主机缺失应 ErrNotFound: %v", err)
+	}
+	if labelIDByName(t, s, "ghost") != 0 {
+		t.Fatal("回滚后不应残留 ghost 标签键")
+	}
+
+	// 删除：全部主机移除该键（其它键保留），注册行删除
+	if err := s.DeleteLabel(labelIDByName(t, s, "zone")); err != nil {
+		t.Fatal(err)
+	}
+	for _, hid := range []int64{h1, h2} {
+		h, _ := s.GetHost(hid)
+		if h.Labels != `{"env":"prod"}` {
+			t.Fatalf("删除后其它键应保留: %s", h.Labels)
+		}
+	}
+	if err := s.DeleteLabel(labelIDByName(t, s, "zone")); err != ErrNotFound {
+		t.Fatalf("重复删除应 ErrNotFound: %v", err)
+	}
+}
+
+// labelIDByName 按键名查标签键 id（0 = 不存在）。
+func labelIDByName(t *testing.T, s *Store, key string) int64 {
+	t.Helper()
+	labels, err := s.ListLabels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range labels {
+		if l.Key == key {
+			return l.ID
+		}
+	}
+	return 0
+}
+
 // TestEnrollTokenLifecycle 纳管凭证：创建 → 查询 → claim（幂等）→
 // 消费（单次）→ 过期拒绝；过期清理随创建进行。
 func TestEnrollTokenLifecycle(t *testing.T) {
@@ -601,5 +670,333 @@ func TestDeleteRunCleansTasks(t *testing.T) {
 	tasks, err := s.RunTasks(rid)
 	if err != nil || len(tasks) != 0 {
 		t.Fatalf("任务明细应级联清理: %d %v", len(tasks), err)
+	}
+}
+
+// TestHostsBySelector 选择器语义回归（SQL 下推后口径不变）：
+// all/pool/group/label（键存在与键值匹配、含 LIKE 元字符的键不误匹配）、
+// hosts（含空集）。
+func TestHostsBySelector(t *testing.T) {
+	s := openTest(t)
+	// h1: pool-a + label env=prod；h2: pool-b + label env=stage, tier=1
+	// h3: 无归属；h4: 键名含 LIKE 元字符（pct_100=x）防通配误命中
+	mk := func(name, addr, labels string, pools []string) {
+		t.Helper()
+		if _, err := s.CreateHost(&Host{Name: name, Address: addr, Labels: labels, Pools: pools}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("h1", "10.0.0.1", `{"env":"prod"}`, []string{"pool-a"})
+	mk("h2", "10.0.0.2", `{"env":"stage","tier":"1"}`, []string{"pool-b"})
+	mk("h3", "10.0.0.3", `{}`, nil)
+	mk("h4", "10.0.0.4", `{"pct_100":"x"}`, nil)
+
+	names := func(kind, value string, ids []int64) []string {
+		t.Helper()
+		hs, err := s.HostsBySelector(kind, value, ids)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := []string{}
+		for _, h := range hs {
+			out = append(out, h.Name)
+		}
+		return out
+	}
+	if got := names("all", "", nil); len(got) != 4 {
+		t.Fatalf("all 应命中 4 台: %v", got)
+	}
+	if got := names("pool", "pool-a", nil); len(got) != 1 || got[0] != "h1" {
+		t.Fatalf("pool 选择器: %v", got)
+	}
+	if got := names("label", "env", nil); len(got) != 2 {
+		t.Fatalf("label 键存在应命中 h1/h2: %v", got)
+	}
+	if got := names("label", "env=prod", nil); len(got) != 1 || got[0] != "h1" {
+		t.Fatalf("label 键值匹配: %v", got)
+	}
+	if got := names("label", "env=nope", nil); len(got) != 0 {
+		t.Fatalf("不存在的值不应命中: %v", got)
+	}
+	// 键名里的 _ 是 LIKE 单字符通配：不转义时 pct_100 会误匹配 pctX100
+	// 一类键；精确判定必须只在真键上命中
+	if got := names("label", "pct_100", nil); len(got) != 1 || got[0] != "h4" {
+		t.Fatalf("元字符键应精确命中 h4: %v", got)
+	}
+	if got := names("label", "pctX100", nil); len(got) != 0 {
+		t.Fatalf("通配误命中: %v", got)
+	}
+	if got := names("hosts", "", []int64{}); len(got) != 0 {
+		t.Fatalf("空 id 集不应命中: %v", got)
+	}
+	ids := []int64{hostIDByName(t, s, "h1"), hostIDByName(t, s, "h3")}
+	if got := names("hosts", "", ids); len(got) != 2 {
+		t.Fatalf("hosts 选择器应命中 2 台: %v", got)
+	}
+}
+
+// hostIDByName 按台账名查主机 id（测试辅助）。
+func hostIDByName(t *testing.T, s *Store, name string) int64 {
+	t.Helper()
+	h, err := s.GetHostByName(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h.ID
+}
+
+// TestUserRoleEnumValidation role 枚举 domain 层兜底：CreateUser 拒绝
+// 非法值含空（空 role 入库会被 perm 语义当 operator——新账号静默拿到
+// 高于 viewer 的权限）；UpdateUser 拒绝非法非空值（空 = 保持不变）。
+func TestUserRoleEnumValidation(t *testing.T) {
+	s := openTest(t)
+	if err := s.CreateUser("u1", "h", "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"", "root", "Operator"} {
+		if err := s.CreateUser("bad-"+bad, "h", bad); err == nil || !IsBizErr(err) {
+			t.Fatalf("CreateUser 非法 role %q 应报业务错误: %v", bad, err)
+		}
+	}
+	u, err := s.UserByName("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateUser(u.ID, "superadmin", nil); err == nil || !IsBizErr(err) {
+		t.Fatalf("UpdateUser 非法 role 应报业务错误: %v", err)
+	}
+	// 空 = 保持不变（PATCH 语义）
+	dis := true
+	if err := s.UpdateUser(u.ID, "", &dis); err != nil {
+		t.Fatalf("空 role 应保持不变: %v", err)
+	}
+	u, _ = s.UserByID(u.ID)
+	if u.Role != "viewer" || !u.Disabled {
+		t.Fatalf("空 role 不应改动角色: %+v", u)
+	}
+	// 合法枚举照常
+	if err := s.UpdateUser(u.ID, "operator", nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestHotPathIndexes 迁移后热路径索引落库（按池/组圈选与执行互斥预检，
+// 见迁移 v12 注释）；旧库重开也应补齐。
+func TestHotPathIndexes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s, err = Open(path) // 重开走增量迁移路径
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	want := []string{"idx_host_pools_pool", "idx_host_group_map_group", "idx_runs_app_status", "idx_runs_status"}
+	for _, name := range want {
+		var n string
+		err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&n)
+		if err != nil || n != name {
+			t.Fatalf("索引 %s 应存在: %v", name, err)
+		}
+	}
+}
+
+// TestUpdateVersionScopesLatestInTx isLatest 必须与 UPDATE 同事务读 latest：
+// 预读在外时窗口内并发的 SetLatestVersion 会让 isLatest 按陈旧值误判
+// （调用方据此决定是否回写应用级 scope）。并发混合调用也不得出错或死锁
+// （事务内查询走 q 的口径）。
+func TestUpdateVersionScopesLatestInTx(t *testing.T) {
+	s := openTest(t)
+	id, err := s.CreateApp("app", "", "{}", nil, nil, "1.0.0", "/tmp/a.tgz", "sha", 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddVersion(id, "2.0.0", "/tmp/b.tgz", "sha", 1, "", nil, nil, "{}", nil); err != nil {
+		t.Fatal(err)
+	}
+	// latest=2.0.0：改 1.0.0 非 latest；切默认后同次调用变 latest
+	if isLatest, err := s.UpdateVersionScopes(id, "1.0.0", nil, nil, "{}"); err != nil || isLatest {
+		t.Fatalf("非默认版本 isLatest 应为 false: %v %v", isLatest, err)
+	}
+	if err := s.SetLatestVersion(id, "1.0.0"); err != nil {
+		t.Fatal(err)
+	}
+	if isLatest, err := s.UpdateVersionScopes(id, "1.0.0", nil, nil, "{}"); err != nil || !isLatest {
+		t.Fatalf("默认版本 isLatest 应为 true: %v %v", isLatest, err)
+	}
+	// 不存在的版本/应用
+	if _, err := s.UpdateVersionScopes(id, "9.9.9", nil, nil, "{}"); err != ErrNotFound {
+		t.Fatalf("版本缺失应 ErrNotFound: %v", err)
+	}
+	if _, err := s.UpdateVersionScopes(99999, "1.0.0", nil, nil, "{}"); err != ErrNotFound {
+		t.Fatalf("应用缺失应 ErrNotFound: %v", err)
+	}
+
+	// 并发混合：SetLatestVersion 与 UpdateVersionScopes 交错。isLatest 只
+	// 保证与本事务内的 latest 一致（返回后 latest 仍可能被并发切换，无法
+	// 事后断言），此处锁定的是不报错、不死锁（latest 读取已收进事务走 q）
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 16; i++ {
+		wg.Add(2)
+		go func() { defer wg.Done(); errs <- s.SetLatestVersion(id, "2.0.0") }()
+		go func() {
+			defer wg.Done()
+			_, err := s.UpdateVersionScopes(id, "1.0.0", nil, nil, "{}")
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestCreatePoolGroupMissingHostRollback 划入不存在的 hostID：host_pools/
+// host_group_map 无外键约束，INSERT OR IGNORE 会落孤儿成员行——先校验后
+// 整体回滚（口径同 CreateLabel），注册行不得残留。
+func TestCreatePoolGroupMissingHostRollback(t *testing.T) {
+	s := openTest(t)
+	h, err := s.CreateHost(&Host{Name: "h1", Address: "10.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreatePool("ghost-pool", "", []int64{h, 99999}); err != ErrNotFound {
+		t.Fatalf("hostID 缺失应 ErrNotFound: %v", err)
+	}
+	pools, _ := s.ListPools()
+	for _, p := range pools {
+		if p.Name == "ghost-pool" {
+			t.Fatal("回滚后不应残留 ghost-pool")
+		}
+	}
+	if _, err := s.CreateGroup("ghost-group", "", []int64{99999}); err != ErrNotFound {
+		t.Fatalf("hostID 缺失应 ErrNotFound: %v", err)
+	}
+	groups, _ := s.ListGroups()
+	for _, g := range groups {
+		if g.Name == "ghost-group" {
+			t.Fatal("回滚后不应残留 ghost-group")
+		}
+	}
+}
+
+// TestClaimEnrollTokenConcurrentSameInfo 并发同 (host,address) claim：
+// 条件 UPDATE 输家重读后信息一致须幂等放行（注释契约），不得误报
+// "already claimed by another host"。
+func TestClaimEnrollTokenConcurrentSameInfo(t *testing.T) {
+	s := openTest(t)
+	if err := s.CreateEnrollToken("tok", "", 0, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	const n = 8
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = s.ClaimEnrollToken("tok", "web9", "10.0.0.9")
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("并发同信息 claim #%d 应幂等放行: %v", i, err)
+		}
+	}
+	tk, err := s.GetEnrollToken("tok")
+	if err != nil || tk.ClaimHost != "web9" || tk.ClaimAddress != "10.0.0.9" {
+		t.Fatalf("claim 信息异常: %+v %v", tk, err)
+	}
+}
+
+// TestUpdateUserLastAdminGuard 最后一个活跃 admin 的降级/禁用由 store 事务内
+// 原子拒绝（web 层 CountAdmins 预检与 UPDATE 之间存在并发双降级窗口）；
+// 有其他活跃 admin 时照常，禁用态 admin 的降级不受限（本就不活跃）。
+func TestUpdateUserLastAdminGuard(t *testing.T) {
+	s := openTest(t)
+	if err := s.CreateUser("root", "h", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := s.UserByName("root")
+	dis := true
+	if err := s.UpdateUser(root.ID, "operator", nil); err == nil || !IsBizErr(err) {
+		t.Fatalf("唯一活跃 admin 降级应报业务错误: %v", err)
+	}
+	if err := s.UpdateUser(root.ID, "", &dis); err == nil || !IsBizErr(err) {
+		t.Fatalf("唯一活跃 admin 禁用应报业务错误: %v", err)
+	}
+	if u, _ := s.UserByID(root.ID); u.Role != "admin" || u.Disabled {
+		t.Fatalf("被拒后应保持活跃 admin: %+v", u)
+	}
+
+	// 第二个活跃 admin 在场：降级放行；但降至只剩 root2 一个活跃 admin 后，
+	// 再降 root2 被拒
+	if err := s.CreateUser("root2", "h", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateUser(root.ID, "operator", nil); err != nil {
+		t.Fatalf("有其他活跃 admin 时降级应放行: %v", err)
+	}
+	root2, _ := s.UserByName("root2")
+	if err := s.UpdateUser(root2.ID, "operator", nil); err == nil || !IsBizErr(err) {
+		t.Fatalf("降级至最后一个活跃 admin 应拒绝: %v", err)
+	}
+
+	// 禁用态 admin 降级不受限（不活跃本就不计入活跃 admin 口径）；
+	// 禁用本身仍受最后一个活跃 admin 保护
+	if err := s.CreateUser("root3", "h", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	root3, _ := s.UserByName("root3")
+	if err := s.UpdateUser(root2.ID, "", &dis); err != nil {
+		t.Fatalf("有其他活跃 admin 时禁用应放行: %v", err)
+	}
+	if err := s.UpdateUser(root2.ID, "viewer", nil); err != nil {
+		t.Fatalf("禁用态 admin 降级应放行: %v", err)
+	}
+	if err := s.UpdateUser(root3.ID, "", &dis); err == nil || !IsBizErr(err) {
+		t.Fatalf("禁用最后一个活跃 admin 应拒绝: %v", err)
+	}
+}
+
+// TestDeleteUserLastAdminGuard 删除路径的 last-admin 原子保护与降级/禁用
+// 同款（web 预检与 DELETE 分离存在并发双删窗口）；非最后 admin 照常删。
+func TestDeleteUserLastAdminGuard(t *testing.T) {
+	s := openTest(t)
+	if err := s.CreateUser("root", "h", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateUser("op", "h", "viewer"); err != nil {
+		t.Fatal(err)
+	}
+	root, _ := s.UserByName("root")
+	if err := s.DeleteUser(root.ID); err == nil || !IsBizErr(err) {
+		t.Fatalf("删除唯一活跃 admin 应报业务错误: %v", err)
+	}
+	if _, err := s.UserByName("root"); err != nil {
+		t.Fatalf("被拒后应保留: %v", err)
+	}
+	op, _ := s.UserByName("op")
+	if err := s.DeleteUser(op.ID); err != nil {
+		t.Fatalf("删除普通用户应放行: %v", err)
+	}
+	// 第二个活跃 admin 在场时删除放行
+	if err := s.CreateUser("root2", "h", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUser(root.ID); err != nil {
+		t.Fatalf("有其他活跃 admin 时删除应放行: %v", err)
+	}
+	root2, _ := s.UserByName("root2")
+	if err := s.DeleteUser(root2.ID); err == nil || !IsBizErr(err) {
+		t.Fatalf("删除最后一个活跃 admin 应拒绝: %v", err)
 	}
 }

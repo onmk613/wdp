@@ -41,7 +41,9 @@ type Conn struct {
 // New 创建 SSH 连接（未建连）。
 func New(h *model.Host) *Conn { return &Conn{host: h} }
 
-// Connect 建立 SSH 连接并初始化 SFTP（可用时）。
+// Connect 建立 SSH 连接并初始化 SFTP（可用时）。幂等重入依赖调用方
+// 串行调用（manager.Get 与 healingConn.current 各自持锁保证）；并发
+// 调用会双重拨号并泄漏第一条连接。
 func (c *Conn) Connect(_ context.Context) error {
 	if c.client != nil {
 		return nil

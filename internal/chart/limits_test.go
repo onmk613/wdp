@@ -3,6 +3,7 @@ package chart
 import (
 	"archive/tar"
 	"compress/gzip"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -46,5 +47,30 @@ func TestLoadWithLimits(t *testing.T) {
 	// OpenWithLimits 走同一注入路径
 	if _, _, _, err := OpenWithLimits(tgz, nil, nil, Limits{MaxExtractBytes: 50}); err == nil {
 		t.Fatal("OpenWithLimits 应传递上限")
+	}
+}
+
+// TestLoadTgzEntryCap 条目总数上限：海量零字节条目不占解包尺寸
+// （maxExtractBytes 只按 TypeReg 的声明 Size 累计），但同样构成解压
+// 炸弹（耗尽 inode/内存），必须在条目维度单独封顶。
+func TestLoadTgzEntryCap(t *testing.T) {
+	tgz := filepath.Join(t.TempDir(), "entries-0.1.0.tgz")
+	f, err := os.Create(tgz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz := gzip.NewWriter(f)
+	tw := tar.NewWriter(gz)
+	for i := 0; i <= maxArchiveEntries; i++ {
+		if err := tw.WriteHeader(&tar.Header{Name: fmt.Sprintf("d/e%06d", i), Mode: 0o755}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = tw.Close()
+	_ = gz.Close()
+
+	if _, err := Load(tgz); err == nil || !strings.Contains(err.Error(), "exceeds entry limit") {
+		t.Fatalf("超条目数的包应被拒绝: %v", err)
 	}
 }

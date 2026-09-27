@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -128,7 +129,23 @@ func newAgentRetireCmd() *cobra.Command {
 				if len(files) > 0 {
 					noun += "; also delete the given extra paths"
 				}
-				fmt.Fprintf(cmd.OutOrStderr(), "about to retire %d host(s): %s. This is irreversible. Pass --yes to confirm.\n", len(hosts), noun)
+				// 与 release del 的批量确认同口径：不可逆操作先列影响面
+				// （主机清单），用户核对模式匹配结果后再 --yes——只报数量
+				// 时，模式写错（如通配过宽）无从察觉
+				names := make([]string, len(hosts))
+				for i, h := range hosts {
+					names[i] = h.Name
+				}
+				fmt.Fprintf(cmd.OutOrStderr(), "about to retire %d host(s):\n", len(hosts))
+				const maxListed = 20
+				shown := names
+				if len(shown) > maxListed {
+					shown = shown[:maxListed]
+					fmt.Fprintf(cmd.OutOrStderr(), "  %s\n  ... and %d more\n", strings.Join(shown, ", "), len(names)-maxListed)
+				} else {
+					fmt.Fprintf(cmd.OutOrStderr(), "  %s\n", strings.Join(shown, ", "))
+				}
+				fmt.Fprintf(cmd.OutOrStderr(), "This will %s. This is irreversible. Pass --yes to confirm.\n", noun)
 				return nil
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)

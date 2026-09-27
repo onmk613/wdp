@@ -37,7 +37,9 @@ type RunItem struct {
 }
 
 // handleRunApps 同步顺序执行全部应用（每个应用一行 run 记录，前端轮询
-// runs 列表查看状态；同步返回首个 run id）。
+// runs 列表查看状态；同步返回全部 run id）。校验/建 run/执行三个阶段
+// 各自拆为私有函数（runAppsTargets / runAppsItems / runAppsCreateRuns /
+// execRunItems），本函数只做编排。
 func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 	var req RunRequest
 	if !decodeJSON(w, r, &req) {
@@ -47,14 +49,41 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "items is empty")
 		return
 	}
+	hosts, sel, ok := s.runAppsTargets(w, r, &req)
+	if !ok {
+		return
+	}
+	items, ok := s.runAppsItems(w, r, &req)
+	if !ok {
+		return
+	}
+	user, _ := r.Context().Value(ctxUser{}).(string)
+	runIDs, ok := s.runAppsCreateRuns(w, items, sel, user)
+	if !ok {
+		return
+	}
+	hostIDs := make([]int64, 0, len(hosts))
+	for _, h := range hosts {
+		hostIDs = append(hostIDs, h.ID)
+	}
+	go s.execRunItems(runIDs, items, hosts, hostIDs)
+	writeJSON(w, http.StatusAccepted, map[string]any{"run_ids": runIDs, "hosts": len(hosts)})
+}
+
+// runAppsTargets 目标解析（校验阶段）：选择器 → run:execute 执行交集
+// 裁剪 → 落库 selector（记实际执行集合）。失败时已写好响应。
+func (s *Server) runAppsTargets(w http.ResponseWriter, r *http.Request, req *RunRequest) ([]*store.Host, string, bool) {
+	// 原始选择器仅在裁剪发生时附注进审计（见下），落库 selector 一律记
+	// 实际执行集合——裁前集合让事后审计无法还原真实触达范围
+	origSel, _ := json.Marshal(req.Selector)
 	hosts, err := s.st.HostsBySelector(req.Selector.Kind, req.Selector.Value, req.Selector.HostIDs)
 	if err != nil {
 		s.writeInternal(w, err)
-		return
+		return nil, "", false
 	}
 	if len(hosts) == 0 {
 		writeError(w, http.StatusBadRequest, "selector matched no hosts")
-		return
+		return nil, "", false
 	}
 	// 执行交集：目标主机 ∩ run:execute 允许范围（全局权限 = 全部）；
 	// 交集为空 = 对选中的主机一台都无执行权，拒绝（防越权扫全网）
@@ -62,23 +91,33 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 		trimmed := intersectHosts(hosts, allowed)
 		if len(trimmed) == 0 {
 			writeError(w, http.StatusForbidden, "forbidden: no target host inside your run:execute scope")
-			return
+			return nil, "", false
 		}
 		if len(trimmed) < len(hosts) {
-			s.audit(r, "run", "exec", "", fmt.Sprintf("执行范围被权限裁剪：%d → %d 台", len(hosts), len(trimmed)))
+			s.audit(r, "run", "exec", "", fmt.Sprintf("执行范围被权限裁剪：%d → %d 台（原始选择器 %s）", len(hosts), len(trimmed), origSel))
 		}
 		hosts = trimmed
 	}
-	sel, _ := json.Marshal(req.Selector)
+	// run 的 selector 记实际执行集合（与 exec.go 同口径）：请求 selector
+	// 在作用域裁剪后不再反映真实触达范围，按最终 hosts 构造
+	hostIDs := make([]int64, 0, len(hosts))
+	for _, h := range hosts {
+		hostIDs = append(hostIDs, h.ID)
+	}
+	sel, _ := json.Marshal(map[string]any{"kind": "hosts", "ids": hostIDs})
+	return hosts, string(sel), true
+}
 
-	// 预校验全部应用/版本/相位（避免执行到一半才发现版本或相位不存在）
+// runAppsItems 预校验全部应用/版本/相位（校验阶段；避免执行到一半才发现
+// 版本或相位不存在）。失败时已写好响应。
+func (s *Server) runAppsItems(w http.ResponseWriter, r *http.Request, req *RunRequest) ([]runItem, bool) {
 	items := make([]runItem, 0, len(req.Items))
 	for _, it := range req.Items {
 		app, err := s.st.GetApp(it.AppID)
 		if err != nil {
 			// 统一文案：不回显应用名/ID 存在性，避免逐 ID 枚举应用
-			writeError(w, http.StatusBadRequest, "app not found or outside your scope")
-			return
+			writeError(w, http.StatusForbidden, "app not found or outside your scope")
+			return nil, false
 		}
 		// 应用级授权：run:execute 可作用域化（perm.go 的 scopableVerbs），
 		// 只校验"有该 verb"会让 run:execute@poolA 的账号把**任意应用**
@@ -86,7 +125,7 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 		// 合起来才是注释里承诺的"选择器 ∩ run:execute 允许集合"。
 		if !s.permsOf(permUser(r)).canApp(verbRunExec, app.Pools, app.Groups, app.Labels) {
 			writeError(w, http.StatusForbidden, "forbidden: app not found or outside your scope")
-			return
+			return nil, false
 		}
 		version := it.Version
 		if version == "" {
@@ -94,8 +133,14 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 		}
 		tgz, err := s.st.VersionTgz(it.AppID, version)
 		if err != nil {
+			// 预校验口径：未知版本回 400（既有契约，apps_test 锚定）；
+			// DB 故障不得伪装成"版本不存在"，走 writeStoreErr 分流 500
+			if !errors.Is(err, store.ErrNotFound) {
+				s.writeStoreErr(w, err)
+				return nil, false
+			}
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("app version %q not found", version))
-			return
+			return nil, false
 		}
 		phase := it.Phase
 		if phase == "" {
@@ -114,24 +159,27 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 			if !found {
 				writeError(w, http.StatusBadRequest, fmt.Sprintf(
 					"app version %q has no phase %q (available: %s)", version, phase, strings.Join(known, ", ")))
-				return
+				return nil, false
 			}
 		}
 		items = append(items, runItem{app: app, version: version, tgz: tgz, phase: phase})
 	}
+	return items, true
+}
 
-	// 应用级执行准入：同应用已有 queued/running 的执行 → 409 拒绝并反馈
-	// 冲突方（谁在跑、跑到哪、什么相位）。并发跑同一应用会交错写 marker/
-	// 状态/marker 值，结果不可解释——此前只挡了主机级（gate），两个不同
-	// 选择器打同一应用照样并行。检查与创建收进 store 单事务（先查后插
-	// 分开执行存在窗口：两个并发请求可同时通过检查同时创建）。
-	user, _ := r.Context().Value(ctxUser{}).(string)
+// runAppsCreateRuns 建全部 run 行（编排阶段）。应用级执行准入：同应用
+// 已有 queued/running 的执行 → 409 拒绝并反馈冲突方（谁在跑、跑到哪、
+// 什么相位）。并发跑同一应用会交错写 marker/状态/marker 值，结果不可
+// 解释——此前只挡了主机级（gate），两个不同选择器打同一应用照样并行。
+// 检查与创建收进 store 单事务（先查后插分开执行存在窗口：两个并发请求
+// 可同时通过检查同时创建）。失败时已写好响应。
+func (s *Server) runAppsCreateRuns(w http.ResponseWriter, items []runItem, sel, user string) ([]int64, bool) {
 	inputs := make([]store.RunInput, 0, len(items))
 	for i, it := range items {
 		inputs = append(inputs, store.RunInput{
 			Kind: "app", AppID: it.app.ID, AppName: it.app.Name,
 			Version: it.version, Phase: it.phase, Seq: i,
-			Status: "queued", Selector: string(sel), User: user,
+			Status: "queued", Selector: sel, User: user,
 		})
 	}
 	runIDs, err := s.st.CreateRunsExclusive(inputs)
@@ -143,57 +191,61 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusConflict,
 			"应用正在执行中，完成后再发起："+strings.Join(parts, "、"))
-		return
+		return nil, false
 	}
 	if err != nil {
 		s.writeInternal(w, err)
-		return
+		return nil, false
 	}
+	return runIDs, true
+}
 
+// execRunItems 执行阶段（后台 goroutine）：排队等主机闸门 → 逐应用执行
+// 并落 runs/run_tasks。
+func (s *Server) execRunItems(runIDs []int64, items []runItem, hosts []*store.Host, hostIDs []int64) {
 	// per-host 执行闸门：拿到全部目标主机的锁才开始（同主机串行，
 	// 排队期间 run 状态为 queued）
-	hostIDs := make([]int64, 0, len(hosts))
-	for _, h := range hosts {
-		hostIDs = append(hostIDs, h.ID)
+	// 约束：排队等待必须可中断——挂在 server 生命周期 ctx 上并叠加
+	// 排队超时；闸门被长执行占用时旧实现会无限堆积 goroutine，
+	// server 关停也无法中断
+	queueCtx, cancelQueue := context.WithTimeout(s.background(), runQueueTimeout)
+	defer cancelQueue()
+	release, ok := s.gate.AcquireCtx(queueCtx, hostIDs)
+	if !ok {
+		// 获取失败（排队超时/服务关停）：run 置 failed，不再执行
+		reason := "server 正在关停，执行排队中止"
+		if queueCtx.Err() == context.DeadlineExceeded {
+			reason = fmt.Sprintf("排队超时（%s 内未取得主机执行闸门）", runQueueTimeout)
+		}
+		for _, id := range runIDs {
+			_ = s.st.FinishRun(id, "failed", reason)
+			s.runs.notify(runEvent{ID: id, Status: "failed", Summary: reason})
+		}
+		s.logger.Warn("app run aborted while queuing", "runs", len(runIDs), "reason", reason)
+		return
 	}
-	go func() {
-		// 约束：排队等待必须可中断——挂在 server 生命周期 ctx 上并叠加
-		// 排队超时；闸门被长执行占用时旧实现会无限堆积 goroutine，
-		// server 关停也无法中断
-		ctx, cancel := context.WithTimeout(s.background(), runQueueTimeout)
-		defer cancel()
-		release, ok := s.gate.AcquireCtx(ctx, hostIDs)
-		if !ok {
-			// 获取失败（排队超时/服务关停）：run 置 failed，不再执行
-			reason := "server 正在关停，执行排队中止"
-			if ctx.Err() == context.DeadlineExceeded {
-				reason = fmt.Sprintf("排队超时（%s 内未取得主机执行闸门）", runQueueTimeout)
-			}
-			for _, id := range runIDs {
-				_ = s.st.FinishRun(id, "failed", reason)
-				s.runs.notify(runEvent{ID: id, Status: "failed", Summary: reason})
-			}
-			s.logger.Warn("app run aborted while queuing", "runs", len(runIDs), "reason", reason)
-			return
+	defer release()
+	// 执行换挂独立 ctx：排队超时只封顶"等闸门"，不得封顶执行本身——
+	// 多主机/多相位部署轻松超过 30 分钟，沿用排队 ctx 会把部署拦腰
+	// 打断（半完成态比失败更糟）。执行不另设上限：单任务超时在执行器
+	// 内部（console.RunService 600s/任务），server 关停仍可取消。
+	ctx, cancelExec := context.WithCancel(s.background())
+	defer cancelExec()
+	// 探测一次全部目标主机（agent scheme 判定），items 循环内复用：
+	// 每个应用条目重探 N 台主机 ×2 趟 /health 是纯重复开销
+	mhosts := s.runHostModels(ctx, hosts)
+	for i, it := range items {
+		_ = s.st.SetRunStatus(runIDs[i], "running")
+		s.runs.notify(runEvent{ID: runIDs[i], Status: "running"})
+		err := s.runsvc.RunOneApp(ctx, it.tgz, mhosts, it.phase, &dbReporter{st: s.st, runID: runIDs[i], hub: s.runs})
+		status, summary := "succeeded", "ok"
+		if err != nil {
+			status, summary = "failed", err.Error()
 		}
-		defer release()
-		// 探测一次全部目标主机（agent scheme 判定），items 循环内复用：
-		// 每个应用条目重探 N 台主机 ×2 趟 /health 是纯重复开销
-		mhosts := s.runHostModels(ctx, hosts)
-		for i, it := range items {
-			_ = s.st.SetRunStatus(runIDs[i], "running")
-			s.runs.notify(runEvent{ID: runIDs[i], Status: "running"})
-			err := s.runsvc.RunOneApp(ctx, it.tgz, mhosts, it.phase, &dbReporter{st: s.st, runID: runIDs[i], hub: s.runs})
-			status, summary := "succeeded", "ok"
-			if err != nil {
-				status, summary = "failed", err.Error()
-			}
-			_ = s.st.FinishRun(runIDs[i], status, summary)
-			s.runs.notify(runEvent{ID: runIDs[i], Status: status, Summary: summary})
-			s.logger.Info("app run finished", "app", it.app.Name, "version", it.version, "phase", it.phase, "status", status, "err", err)
-		}
-	}()
-	writeJSON(w, http.StatusAccepted, map[string]any{"run_ids": runIDs, "hosts": len(hosts)})
+		_ = s.st.FinishRun(runIDs[i], status, summary)
+		s.runs.notify(runEvent{ID: runIDs[i], Status: status, Summary: summary})
+		s.logger.Info("app run finished", "app", it.app.Name, "version", it.version, "phase", it.phase, "status", status, "err", err)
+	}
 }
 
 // runItem 是一个待执行的应用版本（执行流水线的内部形态）。

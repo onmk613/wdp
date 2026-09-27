@@ -3,7 +3,6 @@ package web
 // 应用与版本的增删改查（列表/详情/更新/删除/默认版本/作用域/批量操作）。
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -75,21 +74,12 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.st.UpdateAppScopes(id, req.Note, req.Pools, req.Groups, req.Labels); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "app not found")
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	updated, err := s.st.GetApp(id)
 	if err != nil {
-		// 约束：忽略 GetApp 错误直接解引用 app.Name 会 panic
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "app not found")
-		} else {
-			s.writeInternal(w, err)
-		}
+		s.writeStoreErr(w, err)
 		return
 	}
 	s.audit(r, "update", "app", app.Name, "描述/池/组/标签")
@@ -106,11 +96,7 @@ func (s *Server) handleUpdateVersionScope(w http.ResponseWriter, r *http.Request
 	}
 	app, err := s.st.GetApp(id)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "app not found")
-		} else {
-			s.writeInternal(w, err)
-		}
+		s.writeStoreErr(w, err)
 		return
 	}
 	var req struct {
@@ -138,11 +124,7 @@ func (s *Server) handleUpdateVersionScope(w http.ResponseWriter, r *http.Request
 	}
 	isLatest, err := s.st.UpdateVersionScopes(id, version, req.Pools, req.Groups, req.Labels)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "version not found")
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	if isLatest {
@@ -152,8 +134,7 @@ func (s *Server) handleUpdateVersionScope(w http.ResponseWriter, r *http.Request
 		}
 	}
 	s.audit(r, "update", "app", fmt.Sprintf("%s@%s", app.Name, version), "作用域变更（不升版本）")
-	updated, _ := s.st.GetApp(id)
-	writeJSON(w, http.StatusOK, updated)
+	s.replyApp(w, id, http.StatusOK)
 }
 
 func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
@@ -165,16 +146,12 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 	// ErrNotFound，审计会恒丢应用名
 	app, err := s.st.GetApp(id)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "app not found")
-		} else {
-			s.writeInternal(w, err)
-		}
+		s.writeStoreErr(w, err)
 		return
 	}
 	paths, err := s.st.DeleteApp(id)
 	if err != nil {
-		s.writeInternal(w, err)
+		s.writeStoreErr(w, err)
 		return
 	}
 	for _, p := range paths {
@@ -211,17 +188,12 @@ func (s *Server) handleSetLatestVersion(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if err := s.st.SetLatestVersion(id, version); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	updated, err := s.st.GetApp(id)
 	if err != nil {
-		// 约束：忽略 GetApp 错误直接解引用 app.Name 会 panic
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "app not found")
-		} else {
-			s.writeInternal(w, err)
-		}
+		s.writeStoreErr(w, err)
 		return
 	}
 	s.audit(r, "set_latest", "version", app.Name+"@"+version, "设为默认版本")
@@ -284,12 +256,8 @@ func (s *Server) handleDeleteVersion(w http.ResponseWriter, r *http.Request) {
 	tgz, err := s.st.DeleteVersion(id, vid)
 	if err != nil {
 		// 约束：DeleteVersion 传播错误（吞错会留下没人重算的旧 latest），
-		// 真实失败不得伪装成 404
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "version not found")
-		} else {
-			s.writeInternal(w, err)
-		}
+		// 真实失败不得伪装成 404（writeStoreErr 分流）
+		s.writeStoreErr(w, err)
 		return
 	}
 	if tgz != "" {

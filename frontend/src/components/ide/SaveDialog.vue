@@ -2,8 +2,12 @@
 // 保存对话框：版本号（默认取 chart.yaml 内版本——未被占用时；否则自动
 // 推进到下一个可用号）、描述、作用域（池/组/标签）。确认后由 AppIDE
 // 负责把版本号同步写进 chart.yaml（保持文件与库一致）再走校验+保存。
-import { reactive, watch } from 'vue'
-import type { Pool, GroupEntry } from '../../api'
+// 标签用 LabelRows 行编辑器（与主机编辑/批量设置/版本作用域同款交互，
+// 此前是裸 JSON 文本输入，体验割裂且易写出非法 JSON）。
+import { reactive, ref, watch } from 'vue'
+import type { Pool, GroupEntry, LabelDef } from '../../api'
+import { api } from '../../api'
+import LabelRows from '../LabelRows.vue'
 
 const props = defineProps<{
   visible: boolean
@@ -20,7 +24,23 @@ const emit = defineEmits<{
   (e: 'confirm', v: { version: string; description: string; pools: string[]; groups: string[]; labels: string }): void
 }>()
 
-const form = reactive({ version: '', description: '', pools: [] as string[], groups: [] as string[], labels: '{}' })
+const form = reactive({ version: '', description: '', pools: [] as string[], groups: [] as string[] })
+const labelObj = ref<Record<string, string>>({})
+
+// 标签键注册表（键下拉可选项；拉取失败降级为空——仍可手输新键）。
+// ref 而非 let：await 后重新赋值也要触发选项重渲染
+const labelKeys = ref<string[]>([])
+let labelKeysLoaded = false
+async function loadLabelKeys() {
+  if (labelKeysLoaded) return
+  labelKeysLoaded = true
+  try {
+    labelKeys.value = (await api<LabelDef[]>('GET', '/api/labels')).map((l) => l.Key)
+  } catch {
+    // 无 registry 权限或瞬时错误：回滚加载标记，下次打开对话框仍会重试
+    labelKeysLoaded = false
+  }
+}
 
 watch(
   () => props.visible,
@@ -30,7 +50,11 @@ watch(
     form.description = props.defaultDescription
     form.pools = [...props.current.pools]
     form.groups = [...props.current.groups]
-    form.labels = props.current.labels || '{}'
+    try {
+      const o = JSON.parse(props.current.labels || '{}')
+      labelObj.value = o && typeof o === 'object' && !Array.isArray(o) ? o : {}
+    } catch { labelObj.value = {} }
+    void loadLabelKeys()
   },
 )
 
@@ -42,23 +66,16 @@ function versionErr(): string {
   if (!props.isCreate && props.takenVersions.includes(v)) return `版本 ${v} 已存在（发布后不可覆盖）`
   return ''
 }
-function labelsErr(): string {
-  try {
-    const o = JSON.parse(form.labels || '{}')
-    if (o && typeof o === 'object' && !Array.isArray(o)) return ''
-  } catch { /* fallthrough */ }
-  return '标签必须是 JSON 对象'
-}
 
 function ok() {
-  if (versionErr() || labelsErr()) return
+  if (versionErr()) return
   emit('update:visible', false)
   emit('confirm', {
     version: form.version.trim(),
     description: form.description,
     pools: form.pools,
     groups: form.groups,
-    labels: form.labels.trim() || '{}',
+    labels: JSON.stringify(labelObj.value || {}),
   })
 }
 </script>
@@ -91,13 +108,12 @@ function ok() {
         </el-select>
       </el-form-item>
       <el-form-item label="标签">
-        <el-input v-model="form.labels" placeholder='JSON，如 {"env":"prod"}' />
-        <span v-if="labelsErr()" class="err">{{ labelsErr() }}</span>
+        <LabelRows v-model="labelObj" :keys="labelKeys" />
       </el-form-item>
     </el-form>
     <template #footer>
       <el-button @click="emit('update:visible', false)">取消</el-button>
-      <el-button type="primary" :disabled="!!versionErr() || !!labelsErr()" @click="ok">校验并保存</el-button>
+      <el-button type="primary" :disabled="!!versionErr()" @click="ok">校验并保存</el-button>
     </template>
   </el-dialog>
 </template>

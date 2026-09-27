@@ -3,7 +3,6 @@ package store
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -86,20 +85,30 @@ func (s *Store) ClaimEnrollToken(token, host, address string) (*EnrollToken, err
 	if t.ClaimHost == "" {
 		// 条件更新防并发窗口：两个不同来源同时 claim 同一空闲 token 时，
 		// 无条件 UPDATE 会后写覆盖先写（"换 hostname 再来按重放拒绝"的
-		// 检测随之失效）。只允许抢到"仍无 claim"的那次落库，输家按重放
-		// 拒绝——与 ConsumeEnrollToken 的双花防护同口径。
+		// 检测随之失效）。只允许抢到"仍无 claim"的那次落库，输家重读后
+		// 分流——与 ConsumeEnrollToken 的双花防护同口径。
 		res, err := s.db.Exec(`UPDATE enroll_tokens SET claim_host = ?, claim_address = ? WHERE id = ? AND claim_host = ''`, host, address, t.ID)
 		if err != nil {
 			return nil, err
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
-			return nil, fmt.Errorf("enroll token already claimed by another host")
+			// 输家重读：同 (host,address) 的重复 claim 是并发下的幂等
+			// 重放（赢家写的与本帧一致），放行返回最新记录；信息不一致
+			// 才是别的来源抢注，按重放拒绝
+			cur, err := s.GetEnrollToken(token)
+			if err != nil {
+				return nil, err
+			}
+			if cur.ClaimHost != host || cur.ClaimAddress != address {
+				return nil, Bizf("enroll token already claimed by %q from %s", cur.ClaimHost, cur.ClaimAddress)
+			}
+			return cur, nil
 		}
 		t.ClaimHost, t.ClaimAddress = host, address
 	} else if t.ClaimHost != host || t.ClaimAddress != address {
 		// 幂等仅限信息一致：同 token 换 hostname/来源再来，按凭证被
 		// 复制重放拒绝，否则无从察觉 token 泄露
-		return nil, fmt.Errorf("enroll token already claimed by %q from %s", t.ClaimHost, t.ClaimAddress)
+		return nil, Bizf("enroll token already claimed by %q from %s", t.ClaimHost, t.ClaimAddress)
 	}
 	return t, nil
 }

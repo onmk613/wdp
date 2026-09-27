@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -117,6 +118,53 @@ func TestTolerantKnownHostsAllBad(t *testing.T) {
 	}
 	if len(ke.Want) != 0 {
 		t.Fatalf("应为未知主机（Want 空）: %+v", ke)
+	}
+}
+
+// TestKnownHostsCacheReuse (path, mtime, size) 缓存：同文件未改写时复用
+// 已构建回调（指针同一）；改写文件（mtime/size 变化）后重建。缓存命中的
+// 回调行为与首建一致（坏行跳过语义不因缓存丢失）。
+func TestKnownHostsCacheReuse(t *testing.T) {
+	dir := t.TempDir()
+	khPath := filepath.Join(dir, "known_hosts")
+	goodLine, pub := khFixture(t, "10.0.3.1")
+	content := "10.0.3.1 ssh-ed25519 AAAA!!!bad!!!\n" + goodLine + "\n"
+	if err := os.WriteFile(khPath, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cb1, err := cachedTolerantKnownHosts(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 坏行跳过语义在首建回调上成立
+	if err := cb1("10.0.3.1:22", tcpAddr(), pub); err != nil {
+		t.Fatalf("首建回调应放行好行: %v", err)
+	}
+	cb2, err := cachedTolerantKnownHosts(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%p", cb1) != fmt.Sprintf("%p", cb2) {
+		t.Fatal("文件未变时应复用同一回调")
+	}
+
+	// 改写文件（追加一条新主机记录）：缓存失效重建，新记录生效
+	l2, p2 := khFixture(t, "10.0.3.2")
+	f, err := os.OpenFile(khPath, os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(l2 + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	cb3, err := cachedTolerantKnownHosts(khPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cb3("10.0.3.2:22", tcpAddr(), p2); err != nil {
+		t.Fatalf("改写后重建的回调应含新记录: %v", err)
 	}
 }
 

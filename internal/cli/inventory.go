@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -84,12 +85,12 @@ func runInventoryList(inv *inventory.Inventory, pattern string, showVars bool, o
 		return nil
 	}
 
-	tb := fmtutil.NewTable("HOST", "ADDRESS", "CONN", "GROUPS")
+	tb := fmtutil.NewTable("HOST", "ADDRESS", "PORT", "CONN", "GROUPS")
 	for _, h := range hosts {
 		gs := hostGroups[h.Name]
 		slices.Sort(gs)
 		tb.AddRow(fmtutil.C(h.Name), fmtutil.C(h.Address),
-			fmtutil.C(h.Conn), fmtutil.C(strings.Join(gs, ",")))
+			fmtutil.C(strconv.Itoa(h.Port)), fmtutil.C(h.Conn), fmtutil.C(strings.Join(gs, ",")))
 	}
 	tb.RenderTo(out)
 	fmt.Fprintf(out, "%d host(s)\n", len(hosts))

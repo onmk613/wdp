@@ -32,7 +32,8 @@ import (
 
 // maxPlanBodyBytes 是 /plan 请求体（解压后）上限：plan 内嵌 chart 树与
 // values，体积远超 /exec，故绕过全局 64MiB；制品（packages/）不进 plan，
-// 走 PayloadRef。内存放大边界：请求体会整体驻留内存解码（JSON），但提交
+// 走 PayloadRef。内存放大边界：请求体整体驻留内存解码（JSON），且提交后
+// 由后台执行 goroutine 持有至 run 终态，不随 HTTP 请求结束释放。
 
 const maxPlanBodyBytes = 512 << 20
 
@@ -60,12 +61,14 @@ type PlanSubmitResponse struct {
 type PlanStatusResponse struct {
 	RunID   string                  `json:"run_id"`
 	PlanID  string                  `json:"plan_id"`
-	State   string                  `json:"state"` // running|done|failed|cancelled
+	State   string                  `json:"state"` // running|cancelling|done|failed|cancelled
 	Journal []JournalEntry          `json:"journal"`
 	Stats   map[string]*model.Stats `json:"stats,omitempty"`
 	Error   string                  `json:"error,omitempty"`
 }
 
+// handlePlanSubmit 接受 plan 分片提交：校验完整性 → 落盘（0700/0600）→
+// 后台启动执行并立即返回 run_id。
 func (s *Server) handlePlanSubmit(w http.ResponseWriter, r *http.Request) {
 	body := io.Reader(r.Body)
 	if r.Header.Get("Content-Encoding") == "gzip" {
@@ -129,64 +132,15 @@ func (s *Server) handlePlanSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, msg, status)
 	}
 
-	// 落盘（plan.json 0600：values 可能含敏感配置；run 目录 0700）
-	run.dir = s.runDir(req.RunID)
-	if err := os.MkdirAll(run.dir, 0o700); err != nil {
-		fail(http.StatusInternalServerError, "failed to create run dir: "+err.Error())
-		return
-	}
-	pb, err := json.MarshalIndent(req.Plan, "", "  ")
+	// 落盘（plan.json 0600 / run 目录 0700）与断点续跑重放（细节见
+	// persistRun/computeSkipDone）
+	skipDone, resumed, err := s.persistRun(run, req)
 	if err != nil {
-		fail(http.StatusInternalServerError, "failed to encode plan: "+err.Error())
-		return
-	}
-	if err := os.WriteFile(filepath.Join(run.dir, "plan.json"), pb, 0o600); err != nil {
-		fail(http.StatusInternalServerError, "failed to persist plan: "+err.Error())
-		return
-	}
-	if !req.Resume {
-		// 新 run（非续跑）不得追加进同 id 旧 run 的 journal：failed/force 重跑
-		// 与 agent 重启后的重复提交都会命中已有 run 目录，混合 journal 会让
-		// 增量游标语义失真——整册作废重来
-		if err := os.Remove(filepath.Join(run.dir, "journal.ndjson")); err != nil && !os.IsNotExist(err) {
-			fail(http.StatusInternalServerError, "failed to reset journal: "+err.Error())
-			return
+		status := http.StatusInternalServerError
+		if errors.Is(err, errResumePlanMismatch) {
+			status = http.StatusConflict
 		}
-	}
-
-	// 断点续跑：resume 且 plan_id 与已有落盘一致时，journal 中已 ok/changed
-	// 的 idx 不重做；plan_id 不一致则明确拒绝（旧进度对新 plan 无意义）
-	skipDone := map[string]map[int]bool{}
-	resumed := map[string]int{}
-	if req.Resume {
-		prevID, perr := os.ReadFile(filepath.Join(run.dir, "plan.id"))
-		switch {
-		case os.IsNotExist(perr):
-			// 首次提交，无进度可续
-		case perr != nil:
-			fail(http.StatusInternalServerError, "failed to read previous plan id: "+perr.Error())
-			return
-		case string(prevID) != req.Plan.PlanID:
-			fail(http.StatusConflict, fmt.Sprintf("resume refused: run dir holds plan %s, submitted plan %s (old progress is meaningless for a changed plan; use a new run_id)", shortID(string(prevID)), shortID(req.Plan.PlanID)))
-			return
-		default:
-			done, jerr := CompletedIdx(filepath.Join(run.dir, "journal.ndjson"))
-			if jerr != nil {
-				fail(http.StatusInternalServerError, "failed to replay journal: "+jerr.Error())
-				return
-			}
-			skipDone = done
-			for h, idxs := range done {
-				resumed[h] = len(idxs)
-			}
-		}
-	}
-	if err := os.WriteFile(filepath.Join(run.dir, "plan.id"), []byte(req.Plan.PlanID), 0o600); err != nil {
-		fail(http.StatusInternalServerError, "failed to persist plan id: "+err.Error())
-		return
-	}
-	if err := WriteStateFile(run.dir, "running"); err != nil {
-		fail(http.StatusInternalServerError, "failed to persist state: "+err.Error())
+		fail(status, err.Error())
 		return
 	}
 
@@ -205,6 +159,88 @@ func (s *Server) handlePlanSubmit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// errResumePlanMismatch 是断点续跑 plan 与落盘不一致的哨兵（handlePlanSubmit
+// 据此映射 409）。
+var errResumePlanMismatch = errors.New("resume refused: plan changed")
+
+// resumeMismatchError 保留原始响应消息（HTTP 错误体原文不变）同时可被
+// errors.Is 识别为 errResumePlanMismatch。
+type resumeMismatchError struct{ msg string }
+
+func (e *resumeMismatchError) Error() string { return e.msg }
+func (e *resumeMismatchError) Unwrap() error { return errResumePlanMismatch }
+
+// persistRun 把提交的 plan 落盘到 run 目录：run 目录 0700 → plan.json
+// （0600，values 可能含敏感配置）→ 非续跑时整册作废旧 journal →
+// resume 重放（computeSkipDone）→ plan.id（0600）→ state=running。
+// 返回（跳过集合, 各主机已跳过数）；任何失败返回错误，由调用方回滚
+// manager 登记并写 HTTP 错误响应（fail）。
+func (s *Server) persistRun(run *planRun, req PlanSubmitRequest) (map[string]map[int]bool, map[string]int, error) {
+	run.dir = s.runDir(req.RunID)
+	if err := os.MkdirAll(run.dir, 0o700); err != nil {
+		return nil, nil, fmt.Errorf("failed to create run dir: %w", err)
+	}
+	pb, err := json.MarshalIndent(req.Plan, "", "  ")
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encode plan: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(run.dir, "plan.json"), pb, 0o600); err != nil {
+		return nil, nil, fmt.Errorf("failed to persist plan: %w", err)
+	}
+	if !req.Resume {
+		// 新 run（非续跑）不得追加进同 id 旧 run 的 journal：failed/force 重跑
+		// 与 agent 重启后的重复提交都会命中已有 run 目录，混合 journal 会让
+		// 增量游标语义失真——整册作废重来
+		if err := os.Remove(filepath.Join(run.dir, "journal.ndjson")); err != nil && !os.IsNotExist(err) {
+			return nil, nil, fmt.Errorf("failed to reset journal: %w", err)
+		}
+	}
+	skipDone, resumed, err := s.computeSkipDone(run, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := os.WriteFile(filepath.Join(run.dir, "plan.id"), []byte(req.Plan.PlanID), 0o600); err != nil {
+		return nil, nil, fmt.Errorf("failed to persist plan id: %w", err)
+	}
+	if err := WriteStateFile(run.dir, "running"); err != nil {
+		return nil, nil, fmt.Errorf("failed to persist state: %w", err)
+	}
+	return skipDone, resumed, nil
+}
+
+// computeSkipDone 断点续跑重放：resume 且 plan_id 与已有落盘一致时，
+// journal 中已 ok/changed 的 idx 不重做；plan_id 不一致则拒绝（旧进度
+// 对新 plan 无意义，错误包装 errResumePlanMismatch 供 409 映射）。
+// 非 resume 返回空集合。返回（各主机跳过 idx 集合, 各主机已跳过数）。
+func (s *Server) computeSkipDone(run *planRun, req PlanSubmitRequest) (map[string]map[int]bool, map[string]int, error) {
+	skipDone := map[string]map[int]bool{}
+	resumed := map[string]int{}
+	if !req.Resume {
+		return skipDone, resumed, nil
+	}
+	prevID, perr := os.ReadFile(filepath.Join(run.dir, "plan.id"))
+	switch {
+	case os.IsNotExist(perr):
+		// 首次提交，无进度可续
+	case perr != nil:
+		return nil, nil, fmt.Errorf("failed to read previous plan id: %w", perr)
+	case string(prevID) != req.Plan.PlanID:
+		return nil, nil, &resumeMismatchError{fmt.Sprintf(
+			"resume refused: run dir holds plan %s, submitted plan %s (old progress is meaningless for a changed plan; use a new run_id)",
+			shortID(string(prevID)), shortID(req.Plan.PlanID))}
+	default:
+		done, jerr := CompletedIdx(filepath.Join(run.dir, "journal.ndjson"))
+		if jerr != nil {
+			return nil, nil, fmt.Errorf("failed to replay journal: %w", jerr)
+		}
+		skipDone = done
+		for h, idxs := range done {
+			resumed[h] = len(idxs)
+		}
+	}
+	return skipDone, resumed, nil
+}
+
 // runPlanAsync 后台执行计划并维护 run 状态。
 
 func (s *Server) runPlanAsync(ctx context.Context, run *planRun, req PlanSubmitRequest, skipDone map[string]map[int]bool) {
@@ -214,7 +250,7 @@ func (s *Server) runPlanAsync(ctx context.Context, run *planRun, req PlanSubmitR
 
 	jr, err := OpenJournal(filepath.Join(run.dir, "journal.ndjson"))
 	if err != nil {
-		run.finish("failed", "", err)
+		run.finish("failed", err)
 		return
 	}
 	defer jr.Close()
@@ -233,21 +269,22 @@ func (s *Server) runPlanAsync(ctx context.Context, run *planRun, req PlanSubmitR
 	conns.CloseAll()
 
 	if ctx.Err() != nil {
-		run.finish("cancelled", "", nil)
+		run.finish("cancelled", nil)
 		s.logInfo("plan cancelled: run=%s", run.runID)
 		return
 	}
 	if failed {
-		run.finish("failed", "", errors.New("execution finished with failed hosts"))
+		run.finish("failed", errors.New("execution finished with failed hosts"))
 		s.logInfo("plan failed: run=%s", run.runID)
 		return
 	}
-	run.finish("done", "", nil)
+	run.finish("done", nil)
 	s.logInfo("plan done: run=%s", run.runID)
 }
 
-// finish 落终态（幂等）。
-
+// trimAfterRun 在 run 落终态后裁剪历史：runs 根目录只保留最近 keepRuns
+// 个 run 目录（按目录修改时间裁最旧，当前 run 永不裁），planManager 内存
+// 记录经 forget/trim 同步收缩到同一规模。
 func (s *Server) trimAfterRun(current *planRun) {
 	root := s.runsRoot()
 	entries, err := os.ReadDir(root)
@@ -282,8 +319,7 @@ func (s *Server) trimAfterRun(current *planRun) {
 }
 
 // planInventory 从计划构造合成 inventory：本机主机条目改走 selfexec
-// （become 密码经 host 字段注入，仅内存态）；其余主机按计划内连接元数据
-
+// （become 密码经 host 字段注入，仅内存态），其余主机沿用计划内连接元数据。
 func planInventory(p *plan.Plan, localHost, becomePassword string) *inventory.Inventory {
 	var hosts []*model.Host
 	for _, name := range p.Host() {
@@ -374,6 +410,8 @@ func (s *Server) handlePlanCancel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, PlanStatusResponse{RunID: run.runID, State: "cancelling"})
 }
 
+// rejectSelfUpdate 拒绝以 agent 自身为目标的 plan：升级二进制/停用单元会
+// 杀掉正在执行本 plan 的进程（收敛中断且难恢复），自更新走 agentctl 专用路径。
 func (s *Server) rejectSelfUpdate(p *plan.Plan) error {
 	selfBin, _ := os.Executable()
 	unit := s.systemdUnit
@@ -417,8 +455,8 @@ func (s *Server) rejectSelfUpdate(p *plan.Plan) error {
 	return nil
 }
 
-// journalReporter 把执行事件落 journal（PlanIdx > 0 的任务级结果）并转播
-
+// journalReporter 把执行事件落 journal（PlanIdx > 0 的任务级结果），play
+// 级进度消息转播进 agent 日志（控制端可经 /logs 拉取）。
 type journalReporter struct {
 	srv     *Server
 	run     *planRun
@@ -461,10 +499,33 @@ func (j *journalReporter) HostResult(host string, r *model.TaskResult) {
 	}
 }
 
+// Recap 每 play 收尾时被调用一次（executor finishPlay），传入的是**该
+// play** 的统计 map——直接保存引用会让多 play plan 的 run.stats 只剩最后
+// 一个 play，控制端 /plan/status 拿到的统计残缺。executor 侧自身的跨
+// play 口径是 totalStats 累计（mergeStats），这里对齐：同一主机计数叠加、
+// 主机集取并集。stats 归 run 所有后 reporter 不再写它，无别名问题。
 func (j *journalReporter) Recap(name string, stats map[string]*model.Stats) {
 	j.run.mu.Lock()
-	j.run.stats = stats
-	j.run.mu.Unlock()
+	defer j.run.mu.Unlock()
+	if j.run.stats == nil {
+		j.run.stats = make(map[string]*model.Stats, len(stats))
+	}
+	for host, s := range stats {
+		if s == nil {
+			continue
+		}
+		total := j.run.stats[host]
+		if total == nil {
+			total = &model.Stats{}
+			j.run.stats[host] = total
+		}
+		total.Ok += s.Ok
+		total.Changed += s.Changed
+		total.Failed += s.Failed
+		total.Unreachable += s.Unreachable
+		total.Skipped += s.Skipped
+		total.Ignored += s.Ignored
+	}
 }
 
 func firstLine(s string) string {

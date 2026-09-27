@@ -12,7 +12,8 @@ import (
 	"wdp/internal/store"
 )
 
-// audit 写一条操作审计（用户取会话 context，IP 取 RemoteAddr 去端口）。
+// audit 写一条操作审计（用户取会话 context，IP 取 remoteIP：直连取
+// RemoteAddr 去端口，信任反代时采信 XFF 末段）。
 func (s *Server) audit(r *http.Request, action, object, name, detail string) {
 	user, _ := r.Context().Value(ctxUser{}).(string)
 	s.auditEntry(user, s.remoteIP(r), action, object, name, detail)

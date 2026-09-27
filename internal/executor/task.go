@@ -10,6 +10,7 @@ import (
 	"maps"
 	"time"
 
+	"wdp/internal/fmtutil"
 	"wdp/internal/model"
 	"wdp/internal/render"
 )
@@ -247,7 +248,7 @@ func truncateTo(s string, max int, what string) string {
 	if len(s) <= max {
 		return s
 	}
-	return truncateAtBoundary(s, max) + fmt.Sprintf("\n…[wdp] %s truncated (%d bytes)", what, len(s))
+	return fmtutil.TruncateUTF8(s, max) + fmt.Sprintf("\n…[wdp] %s truncated (%d bytes)", what, len(s))
 }
 
 // applyResultJudgements 以 changed_when / failed_when 覆盖结果判定。

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -16,6 +18,9 @@ import (
 )
 
 // hostKeyCallback 按配置选择指纹校验（known_hosts，默认开启）或显式跳过。
+// 构建结果经 (path, mtime, size) 包级缓存复用：每次 Connect 都会走到这里，
+// 万级主机批量连接时对同一 known_hosts 逐次重解析（读文件 + 临时文件
+// 轮转）是纯浪费——文件只在被 ssh-keygen 等工具改写后 mtime/size 才变。
 func hostKeyCallback(h *model.Host) ssh.HostKeyCallback {
 	if !h.HostKeyCheck {
 		return ssh.InsecureIgnoreHostKey()
@@ -33,7 +38,7 @@ func hostKeyCallback(h *model.Host) ssh.HostKeyCallback {
 			f.Close()
 		}
 	}
-	cb, err := tolerantKnownHosts(path)
+	cb, err := cachedTolerantKnownHosts(path)
 	if err != nil {
 		return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			return fmt.Errorf("known_hosts verification failed (%s): %w", path, err)
@@ -42,19 +47,93 @@ func hostKeyCallback(h *model.Host) ssh.HostKeyCallback {
 	return wrapKeyError(cb)
 }
 
-// tolerantKnownHosts 逐行加载 known_hosts：单条坏行跳过并向 stderr 告警
+// knownHostsCacheEntry 一次成功构建的缓存条目；modTime+size 相同视为
+// 文件未变（mtime 粒度内的同尺寸改写理论可漏判，known_hosts 的实际
+// 写入方（ssh-keygen）都会同时改变两者，风险可接受）。
+type knownHostsCacheEntry struct {
+	modTime time.Time
+	size    int64
+	cb      ssh.HostKeyCallback
+}
+
+var (
+	knownHostsCacheMu sync.Mutex
+	knownHostsCache   = map[string]knownHostsCacheEntry{}
+)
+
+// cachedTolerantKnownHosts 带缓存的容错加载：命中即复用回调（回调无状态、
+// 可安全共享）；未命中在锁外构建（并发重复构建幂等，后写覆盖）。
+func cachedTolerantKnownHosts(path string) (ssh.HostKeyCallback, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return tolerantKnownHosts(path) // 保持原错误路径（读失败的具体报错）
+	}
+	abs := path
+	if a, aerr := filepath.Abs(path); aerr == nil {
+		abs = a
+	}
+	knownHostsCacheMu.Lock()
+	ent, ok := knownHostsCache[abs]
+	knownHostsCacheMu.Unlock()
+	if ok && ent.size == info.Size() && ent.modTime.Equal(info.ModTime()) {
+		return ent.cb, nil
+	}
+	cb, err := tolerantKnownHosts(path)
+	if err != nil {
+		return nil, err
+	}
+	knownHostsCacheMu.Lock()
+	knownHostsCache[abs] = knownHostsCacheEntry{modTime: info.ModTime(), size: info.Size(), cb: cb}
+	knownHostsCacheMu.Unlock()
+	return cb, nil
+}
+
+// tolerantKnownHosts 容错加载 known_hosts：单条坏行跳过并向 stderr 告警
 // （对齐 OpenSSH 行为——一条损坏记录不再拖垮全部主机的连接），行尾先剥
-// \r（CRLF 行尾文件兼容）。knownhosts 库只提供整文件 New，逐行隔离靠
-// 复用一个临时文件轮转喂入实现。返回的组合回调语义与 New 一致：
-// 任一行匹配即通过；"指纹不匹配"错误优先于"未知主机"。
-// 吊销例外：x/crypto 的 @revoked 检查是**全局按密钥字节**的（在主机
-// 匹配之前），逐行拆分会让"普通行放行"短路吊销行——因此先收集全部
-// @revoked 密钥，组合回调在行匹配之前先查吊销表，保持整文件语义。
+// \r（CRLF 行尾文件兼容）。返回回调的语义与整文件 knownhosts.New 一致：
+// 任一行匹配即通过、@revoked 全局按密钥字节吊销、"指纹不匹配"错误优先
+// 于"未知主机"。
+//
+// 实现：先试整文件 New（无坏行的常态，零额外开销）；失败才逐行内存
+// 预检剔除坏行，好行单次重写（一次 Sync）后一次 New 构建——取代旧
+// "每行重写临时文件 + 每行重读整文件"的 O(N²) 轮转。预检用
+// ssh.ParseKnownHosts，它不校验行级匹配器（如哈希主机模式），合并后
+// New 仍失败时退回逐行隔离加载（perLineKnownHosts，频率极低）。
 func tolerantKnownHosts(path string) (ssh.HostKeyCallback, error) {
+	if cb, err := knownhosts.New(path); err == nil {
+		return cb, nil // 快路径：无坏行，整文件语义即所求
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+
+	var good []string
+	var revokedKeys [][]byte // @revoked 行的密钥字节（逐行兜底路径的全局吊销表）
+	skipped := 0
+	for i, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
+			continue // 空行与注释：本就不参与校验
+		}
+		marker, _, pub, _, _, perr := ssh.ParseKnownHosts([]byte(line + "\n"))
+		if perr != nil {
+			skipped++
+			fmt.Fprintf(os.Stderr, "[ssh] known_hosts:%d skipped malformed line: %v\n", i+1, perr)
+			continue
+		}
+		if marker == "revoked" && pub != nil {
+			revokedKeys = append(revokedKeys, pub.Marshal())
+		}
+		good = append(good, line)
+	}
+	if skipped > 0 {
+		fmt.Fprintf(os.Stderr, "[ssh] known_hosts: %d malformed line(s) skipped (%s)\n", skipped, path)
+	}
+	if len(good) == 0 {
+		return composeHostKeyCallbacks(nil, revokedKeys), nil
+	}
+
 	tmp, err := os.CreateTemp(filepath.Dir(path), ".known_hosts.scan*")
 	if err != nil {
 		// 临时文件不可用时退回严格整文件加载（保持原行为）
@@ -63,31 +142,50 @@ func tolerantKnownHosts(path string) (ssh.HostKeyCallback, error) {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
+	for _, line := range good {
+		if _, werr := tmp.WriteString(line + "\n"); werr != nil {
+			_ = tmp.Close()
+			return nil, werr
+		}
+	}
+	if serr := tmp.Sync(); serr != nil {
+		_ = tmp.Close()
+		return nil, serr
+	}
+	if cerr := tmp.Close(); cerr != nil {
+		return nil, cerr
+	}
+	if cb, nerr := knownhosts.New(tmpName); nerr == nil {
+		return cb, nil // 好行合并构建成功：New 自带吊销/不匹配优先语义
+	}
+	// 兜底：预检放行的行在 New 下仍有个别失败（ParseKnownHosts 不校验的
+	// 行级匹配器错误，如损坏的 |1|哈希主机模式）——逐行隔离，单行损失自身
+	return perLineKnownHosts(good, revokedKeys, path)
+}
 
+// perLineKnownHosts 逐行隔离加载（合并构建失败的兜底，频率极低）：每行
+// 单独喂入临时文件构建回调，行内错误只损失该行。revokedKeys 来自预检
+// 阶段的收集——逐行拆分会破坏 @revoked 的全局按密钥吊销语义，组合回调
+// 在行匹配之前先查吊销表（见 composeHostKeyCallbacks）。
+func perLineKnownHosts(lines []string, revokedKeys [][]byte, path string) (ssh.HostKeyCallback, error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".known_hosts.scan*")
+	if err != nil {
+		cb, nerr := knownhosts.New(path)
+		return cb, nerr
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
 	var cbs []ssh.HostKeyCallback
-	var revokedKeys [][]byte // @revoked 行的密钥字节（全局吊销，先于主机匹配检查）
-	skipped := 0
-	for i, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.TrimSpace(line) == "" || strings.HasPrefix(strings.TrimSpace(line), "#") {
-			continue // 空行与注释：本就不参与校验
+	for i, line := range lines {
+		if werr := rewriteTmp(tmp, line); werr != nil {
+			return nil, werr
 		}
-		if err := rewriteTmp(tmp, line); err != nil {
-			return nil, err
-		}
-		if marker, _, pub, _, _, perr := ssh.ParseKnownHosts([]byte(line + "\n")); perr == nil && marker == "revoked" && pub != nil {
-			revokedKeys = append(revokedKeys, pub.Marshal())
-		}
-		cb, err := knownhosts.New(tmpName)
-		if err != nil {
-			skipped++
-			fmt.Fprintf(os.Stderr, "[ssh] known_hosts:%d skipped malformed line: %v\n", i+1, err)
+		cb, nerr := knownhosts.New(tmpName)
+		if nerr != nil {
+			fmt.Fprintf(os.Stderr, "[ssh] known_hosts:%d skipped malformed line: %v\n", i+1, nerr)
 			continue
 		}
 		cbs = append(cbs, cb)
-	}
-	if skipped > 0 {
-		fmt.Fprintf(os.Stderr, "[ssh] known_hosts: %d malformed line(s) skipped (%s)\n", skipped, path)
 	}
 	return composeHostKeyCallbacks(cbs, revokedKeys), nil
 }

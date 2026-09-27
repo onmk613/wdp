@@ -70,6 +70,14 @@ func (e *Executor) injectPlanBuiltins(vars map[string]any, h *model.Host, playHo
 // 对后执行主机不可见（与分批语义一致），下一批次/play 可见——两段式
 // 编排（收集 play → 配置 play）不受影响。
 func (e *Executor) hostvarsSnapshot() map[string]map[string]any {
+	// invMu 与 expand.go 的 host.Vars 读点同口径：add_host/group_by 的并发
+	// 写（exec.go 持 invMu）可能在同一 fanOut 波内发生。当前调用点
+	//（prepareBatchRuns）都在波次间串行执行——上一波 wg.Wait 与下一波
+	// 组装构成 happens-before，裸读恰好安全——但该"波次串行不变量"是
+	// 隐式约定，统一持锁消除对它的依赖（锁序 invMu → factsMu，全库无
+	// 反向嵌套，无死锁风险）。
+	e.invMu.Lock()
+	defer e.invMu.Unlock()
 	e.factsMu.Lock()
 	defer e.factsMu.Unlock()
 	out := make(map[string]map[string]any, len(e.Inv.Hosts))

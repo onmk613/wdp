@@ -7,7 +7,7 @@
 // 保存为应用：play 的相位形态与 chart deploy.yaml 兼容，直接生成 chart
 // 三件套入库。草稿存 localStorage（playbook 是本地文件，不进服务端库），
 // 下载即完成——清草稿，重新进入是全新开始。
-import { computed, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, DocumentChecked, FolderAdd } from '@element-plus/icons-vue'
@@ -17,6 +17,7 @@ import { authUser } from '../auth'
 import { ChartFS, scaffoldChart } from '../ide/fs'
 import { loadMonaco, editorOptions, bindSuggestKey, modelURI, type MonacoNs } from '../ide/monaco'
 import { applyYamlSchemas, fetchSchema } from '../ide/schemas'
+import { controlKeys, playKeysSet } from '../ide/keys'
 import { registerProviders } from '../ide/complete'
 import { buildVarDomain, type VarDomain } from '../ide/vars'
 import { applyDecorations } from '../ide/decorate'
@@ -192,27 +193,11 @@ function scheduleDecorate() {
   clearTimeout(decorTimer)
   decorTimer = window.setTimeout(() => {
     if (!model) return
-    const keys = { controlKeys: ctlKeys(), playKeys: playKeysSet() }
+    const keys = { controlKeys: controlKeys(schemaMeta.value), playKeys: playKeysSet(schemaMeta.value) }
     decorIds = applyDecorations(monaco, model, decorIds, keys)
   }, 350)
 }
 let decorTimer = 0
-
-function ctlKeys(): Set<string> {
-  const s = new Set<string>()
-  if (!schemaMeta.value) return s
-  for (const sec of schemaMeta.value.task) for (const f of sec.Fields) s.add(f.Name)
-  for (const k of ['chart', 'include', 'values', 'values_from', 'hosts', 'phase', 'tasks_from', 'args']) s.delete(k)
-  return s
-}
-function playKeysSet(): Set<string> {
-  const s = new Set<string>()
-  if (!schemaMeta.value) return s
-  for (const sec of schemaMeta.value.play) for (const f of sec.Fields) s.add(f.Name)
-  s.add('tasks')
-  s.add('handlers')
-  return s
-}
 
 // disposed：onMounted 是长异步链（monaco + schema/modules/hosts 请求），
 // 快速进出路由时 await 之后仍会继续执行——若已卸载还创建 editor/models/
@@ -243,7 +228,7 @@ onMounted(async () => {
     } catch { if (!disposed) hostGroups.value = null }
 
     // 内容：草稿 > 脚手架
-    let content = scaffold
+    const content = scaffold
     try {
       const raw = localStorage.getItem(draftKey())
       if (raw) {
@@ -256,11 +241,13 @@ onMounted(async () => {
 
     fs.create(FILE, content)
     model = monaco.editor.createModel(content, 'yaml', modelURI(FILE))
-    editor = monaco.editor.create(editorRef.value!, editorOptions(monaco))
+    syncLineCount()
+    editor = monaco.editor.create(editorRef.value!, editorOptions())
     bindSuggestKey(monaco, editor)
     editor.setModel(model)
     model.onDidChangeContent(() => {
       dirty.value = true
+      syncLineCount()
       rebuildDomain()
       scheduleDecorate()
       scheduleDraft()
@@ -286,16 +273,23 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   disposed = true
+  // 防抖定时器里的最后一段编辑：卸载时若仍有未落盘改动，先同步补存一次
+  // （localStorage 写是同步的），否则最后 ≤2.5s 的编辑随定时器一起被清掉
+  if (dirty.value && model) saveDraft(model.getValue())
   clearTimeout(draftTimer)
   clearTimeout(decorTimer)
   providers?.dispose()
   providers = null
   editor?.dispose()
-  model?.dispose()
+  model?.dispose() // model dispose 同时解绑 onDidChangeContent，无需单独移除
 })
 
-// 状态栏行数（模板 {{ lines }} 使用）
-const lines = computed(() => (model ? model.getValue().split('\n').length : 0))
+// 状态栏行数：model 是普通 let，computed 追踪不到（求值一次后永不失效，
+// 恒为 0）——改 ref 在 model 创建/切换与内容变更处手动同步
+const lineCount = ref(0)
+function syncLineCount() {
+  lineCount.value = model ? model.getValue().split('\n').length : 0
+}
 </script>
 
 <template>
@@ -354,7 +348,7 @@ const lines = computed(() => (model ? model.getValue().split('\n').length : 0))
     <div ref="editorRef" class="pb-editor" />
     <div class="pb-status">
       <span class="muted">playbook.yaml</span>
-      <span class="muted">{{ lines }} 行</span>
+      <span class="muted">{{ lineCount }} 行</span>
       <span class="grow" />
       <span class="muted">play/任务键 · 模块与参数 · chart 引用（map 形态）· {{ '{{' }} 变量 自动补全 · Alt+Space 手动触发</span>
     </div>

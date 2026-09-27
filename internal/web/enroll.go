@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -116,36 +117,42 @@ func bootstrapCA(caDir string, caDays int) (*caMaterial, error) {
 	m.ctlCertPEM, m.ctlKeyPEM = ctlCertPEM, ctlKeyPEM
 
 	// 控制端 mTLS 客户端（探活 / 远程执行用）：信任自建 CA + ctl 客户端证书
-	cert, err := tls.LoadX509KeyPair(ctlCert, ctlKey)
+	tr, err := newCtlTransport(pemBytes, ctlCertPEM, ctlKeyPEM)
 	if err != nil {
 		return nil, err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(pemBytes) {
-		return nil, errors.New("parse CA pem failed")
-	}
-	m.tlsClient = &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			Proxy: nil, // agent 直连，不走环境代理（HTTP_PROXY 可能把请求带向无关服务）
-			TLSClientConfig: &tls.Config{
-				MinVersion:   tls.VersionTLS12,
-				RootCAs:      pool,
-				Certificates: []tls.Certificate{cert},
-				// 链校验由 RootCAs 完成；主机名（SNI/SAN）校验同样保留——
-				// 逐主机客户端的 ServerName 由 probeClientFor/agentHostModel
-				// 按台账地址设置。此前这里关掉校验再手动补链校验，等于
-				// "任何本 CA 签发的证书都收"：任一台 agent 沦陷即可冒充
-				// 任意其它主机（截获含 become 密码的 plan、伪造执行结果）。
-			},
-		},
-	}
+	m.tlsClient = &http.Client{Timeout: 10 * time.Second, Transport: tr}
 	return m, nil
 }
 
-// clientPins 返回写进 agent 单元的控制端客户端证书 pin 指纹（可多个）。
-// 同时给出证书 DER 指纹与公钥（SPKI）指纹：后者在控制端证书续期
-// （保留密钥对）后依然匹配，避免自动续期把整片 agent 打成不可达。
+// newCtlTransport 按信任链 PEM 构造控制端 mTLS Transport：bootstrapCA 与
+// tlsClientFor 的断言失败兜底共用同一配方（单一来源，避免两处漂移）。
+func newCtlTransport(caPEM, certPEM, keyPEM []byte) (*http.Transport, error) {
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("load control cert: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("parse CA pem failed")
+	}
+	return &http.Transport{
+		Proxy: nil, // agent 直连，不走环境代理（HTTP_PROXY 可能把请求带向无关服务）
+		TLSClientConfig: &tls.Config{
+			MinVersion:   tls.VersionTLS12,
+			RootCAs:      pool,
+			Certificates: []tls.Certificate{cert},
+			// 链校验由 RootCAs 完成；主机名（SNI/SAN）校验同样保留——
+			// 逐主机客户端的 ServerName 由 probeClientFor/agentHostModel
+			// 按台账地址设置。此前这里关掉校验再手动补链校验，等于
+			// "任何本 CA 签发的证书都收"：任一台 agent 沦陷即可冒充
+			// 任意其它主机（截获含 become 密码的 plan、伪造执行结果）。
+		},
+	}, nil
+}
+
+// clientPins 返回写进 agent 单元的控制端客户端证书 pin 指纹（可多个）；
+// DER+SPKI 双指纹的动机见 unit.go 的 agentUnitFile。
 func (s *Server) clientPins() []string {
 	if s.cam == nil {
 		return nil
@@ -203,7 +210,22 @@ func (m *caMaterial) tlsClientFor(serverName string) *http.Client {
 	if c, ok := m.clients[serverName]; ok {
 		return c
 	}
-	base, _ := m.tlsClient.Transport.(*http.Transport)
+	// comma-ok 断言：Transport 为 nil 或被替换为其它 RoundTripper 实现时，
+	// 盲断言会把 nil 交给 Clone() 直接 panic。兜底用 newCtlTransport 按
+	// caMaterial 自持的 PEM 现做同配方 Transport——不能回退
+	// http.DefaultTransport：那会同时丢掉 mTLS 客户端证书与禁用环境代理
+	// 两张安全底牌（丢证书校验等于任一 agent 可冒充其它主机）。
+	base, ok := m.tlsClient.Transport.(*http.Transport)
+	if !ok {
+		var err error
+		if base, err = newCtlTransport(m.caPEM, m.ctlCertPEM, m.ctlKeyPEM); err != nil {
+			// PEM 损坏连兜底配方都建不出来：退回共享 tlsClient（证书按
+			// 连接地址校验）。绝不返回 nil——调用方把 nil 当"明文探测"，
+			// 对纳管主机是被注释明确禁止的安全降级
+			m.clients[serverName] = m.tlsClient
+			return m.tlsClient
+		}
+	}
 	tr := base.Clone()
 	tr.TLSClientConfig = tr.TLSClientConfig.Clone()
 	tr.TLSClientConfig.ServerName = serverName
@@ -272,10 +294,11 @@ func (s *Server) probeClientFor(h *store.Host) *http.Client {
 
 // enrollScriptModel 是下发脚本的模板数据。
 type enrollScriptModel struct {
-	Base     string // server 外部可达基址（https://host:port）
-	Token    string
-	CAFP     string // ca.crt 文件 sha256 hex
-	UnitName string
+	Base      string // server 外部可达基址（https://host:port）
+	Token     string
+	CAFP      string // ca.crt 文件 sha256 hex
+	UnitName  string
+	AgentPort int // token 绑定的 agent 监听端口（store 层已保证 <=0 缺省 7602）
 	// UnitBody 是 systemd 单元内容（含控制端客户端证书 pin 指纹）。
 	// 预渲染成字符串传入：pin 指纹来自 server 状态（ctl.crt），
 	// 模板函数闭包拿不到。
@@ -349,9 +372,10 @@ systemctl enable --now "$UNIT"
 sleep 1
 systemctl is-active --quiet "$UNIT" || { systemctl status "$UNIT" >&2 || true; exit 1; }
 
-# 6. 完成（消费 token、写入 server 台账）
+# 6. 完成（消费 token、写入 server 台账）——agent_port 用 token 绑定值，
+# 使签发时指定的 agent_port 真正生效（此前硬编码 7602，API 字段形同虚设）
 curl -fsSL --cacert "$TMP/ca.crt" -X POST -H 'Content-Type: application/json' \
-  -d '{"agent_port":7602}' "$BASE/enroll/$TOKEN/done" >/dev/null
+  -d '{"agent_port":{{ .AgentPort }}}' "$BASE/enroll/$TOKEN/done" >/dev/null
 
 echo "wdp agent enrolled and running (unit $UNIT)"
 `))
@@ -383,9 +407,12 @@ func (s *Server) handleCreateEnrollToken(w http.ResponseWriter, r *http.Request)
 		ttl = time.Duration(req.TTLMin) * time.Minute
 	}
 	// TTL 上限：一次性凭证不应可签出数年有效期（token 会经 URL 留在反代
-	// 日志与 shell 历史里，窗口越长泄露后的可利用时间越长）。
+	// 日志与 shell 历史里，窗口越长泄露后的可利用时间越长）。超限显式 400
+	// 拒绝而不是静默钳到 24h——调用方（前端/脚本）拿到的是自己请求的 TTL
+	// 还是暗中缩水的 TTL，应当由响应明确告知。
 	if ttl > 24*time.Hour {
-		ttl = 24 * time.Hour
+		writeError(w, http.StatusBadRequest, "ttl_min exceeds the 24h cap (1440)")
+		return
 	}
 	buf := make([]byte, 24)
 	if _, err := rand.Read(buf); err != nil {
@@ -432,7 +459,12 @@ func (s *Server) advertiseBase(r *http.Request) (string, error) {
 		return base, nil
 	}
 	host := r.Host
-	if h, _, err := net.SplitHostPort(r.Host); err == nil {
+	if h, port, err := net.SplitHostPort(r.Host); err == nil {
+		// 端口串同样会原样进入 curl | sudo sh 提示串：非数字/超界（可含
+		// 引号、元字符）必须拒绝，host 部分校验管不到这里
+		if p, perr := strconv.Atoi(port); perr != nil || p < 1 || p > 65535 {
+			return "", errors.New("invalid Host header")
+		}
 		host = h
 	}
 	if net.ParseIP(host) == nil && !hostHeaderNameRe.MatchString(host) {
@@ -484,9 +516,16 @@ func (s *Server) handleEnrollScript(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/x-shellscript; charset=utf-8")
+	// AgentPort 兜底缺省：store 层写入时已保证 <=0 → 7602，这里再防一手
+	// 旧库遗留的 0/负值行（unit 的 --listen 与 done 回报都不接受非法端口）
+	port := t.AgentPort
+	if port <= 0 {
+		port = 7602
+	}
 	_ = enrollScriptTmpl.Execute(w, &enrollScriptModel{
 		Base: shellquote.Quote(base), Token: t.Token, CAFP: s.cam.caFP, UnitName: agentUnitName,
-		UnitBody: agentUnitFile("$BIN_DIR", "$ETC_DIR", "$LOG_FILE", 7602, s.clientPins()),
+		AgentPort: port,
+		UnitBody:  agentUnitFile("$BIN_DIR", "$ETC_DIR", "$LOG_FILE", port, s.clientPins()),
 	})
 }
 
@@ -621,7 +660,13 @@ func (s *Server) handleEnrollClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusGone, err.Error())
+		// 业务错误（过期/已用/被他人 claim）是合法 410；其余是 DB 故障，
+		// 不得按 410 透出原始错误串（err.Error() 常带内部细节，见 httpx 口径）
+		if errors.Is(err, store.ErrTokenUsed) || errors.Is(err, store.ErrTokenExpired) || store.IsBizErr(err) {
+			writeError(w, http.StatusGone, err.Error())
+			return
+		}
+		s.writeInternal(w, err)
 		return
 	}
 	// claim 首次到达时签发逐主机证书（SAN：来源 IP + hostname + 绑定名）
@@ -769,13 +814,54 @@ func (s *Server) handleEnrollDone(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	// 守卫先于消费（消费前的快照做校验）：拒绝路径不能把 token 烧掉——
+	// 目标机修正环境后重试 done 应仍可用。claim 身份落库后不可再变，
+	// 消费前快照上的守卫结论对消费后的 t 同样成立。
+	pre, err := s.st.GetEnrollToken(r.PathValue("token"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "unknown enroll token")
+		return
+	}
+	if err != nil {
+		s.writeInternal(w, err)
+		return
+	}
+	// 从未 claim 过的 token 没有 claim 身份，落账既无名字也无地址——
+	// 与证书交付同口径 410（被拒的撞名 claim 不会落 ClaimHost）。
+	if pre.ClaimHost == "" && pre.ClaimAddress == "" {
+		writeError(w, http.StatusGone, "claim the token first")
+		return
+	}
+	// 落账前的最后一道同名异址守卫（claim 与 done 之间台账可能变化）：
+	// 未绑定主机名的 token 不允许改写既有主机的地址。显式绑定的 token
+	// 是管理员对该主机的重装/迁移授权，放行。
+	if pre.HostName == "" {
+		name := pre.HostName
+		if name == "" {
+			name = pre.ClaimHost
+		}
+		if name == "" {
+			name = pre.ClaimAddress
+		}
+		if existing, gerr := s.st.GetHostByName(safeName(name)); gerr == nil && existing.Address != pre.ClaimAddress {
+			s.logger.Warn("enroll done refused: would hijack ledger address",
+				"name", safeName(name), "ledger_address", existing.Address, "claim_address", pre.ClaimAddress)
+			writeError(w, http.StatusConflict,
+				"host name already exists with a different address; re-enroll with a token bound to this host name")
+			return
+		}
+	}
 	t, err := s.st.ConsumeEnrollToken(r.PathValue("token"))
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "unknown enroll token")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusGone, err.Error())
+		if errors.Is(err, store.ErrTokenUsed) || errors.Is(err, store.ErrTokenExpired) || store.IsBizErr(err) {
+			writeError(w, http.StatusGone, err.Error())
+			return
+		}
+		s.writeInternal(w, err)
 		return
 	}
 	name := t.HostName

@@ -13,13 +13,11 @@ func init() {
 // SetupModule 采集主机 facts 并并入变量域。
 type SetupModule struct{}
 
-// Name 模块名。
 func (m *SetupModule) Name() string { return "setup" }
 
 // ReadOnly 采集 facts 不产生目标机变更。
 func (m *SetupModule) ReadOnly() bool { return true }
 
-// Desc 模块说明。
 func (m *SetupModule) Desc() string {
 	return "collect host facts (OS/network/memory/disk)"
 }
@@ -127,7 +125,6 @@ func (m *SetupModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *SetupModule) Example() string {
 	return `- name: gather facts
   setup:

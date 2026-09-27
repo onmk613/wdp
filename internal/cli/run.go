@@ -17,6 +17,7 @@ import (
 	"wdp/internal/conn"
 	"wdp/internal/executor"
 	"wdp/internal/inventory"
+	"wdp/internal/markerread"
 	"wdp/internal/model"
 	"wdp/internal/playbook"
 	"wdp/internal/release"
@@ -95,9 +96,7 @@ type runOptions struct {
 
 // runTarget 加载目标（chart 或裸 playbook）并执行，返回错误由 cobra 呈现。
 func runTarget(ctx context.Context, target string, opts runOptions) error {
-	if opts.diff && !opts.check {
-		opts.check = true // --diff 基于 check 只读对比，自动启用预演
-	}
+	opts.check = normalizeDiffFlag(opts.diff, opts.check)
 	// 全局墙钟超时从进入本函数起计时：覆盖 chart 解包、inventory 加载与
 	// 交互确认（此前只罩 executor 阶段，长解包/人工确认不消耗超时预算）
 	if cfgTimeout := config.Current().Run.Timeout; cfgTimeout > 0 {
@@ -111,7 +110,48 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		return err
 	}
 
-	eopts := executor.Options{
+	eopts := runExecutorOptions(opts)
+	var plays []*model.Play
+	// hosts 是 SelectPlays(plays, limit) 的单次计算结果：零主机校验与部署
+	// 记录的主机范围共用（chart 路径在装载期已算得，裸 playbook 在此为 nil）
+	var hosts []*model.Host
+	// spec 决定相位语义（是否部署事件/是否留部署记录）；无 chart 上下文
+	// （裸 playbook）按内置缺省判定
+	spec := chart.DefaultPhaseSpec(opts.phase)
+
+	// 相位属性可能来自 chart.yaml phases: 声明（自定义相位声明 release），
+	// 它决定 values 来源与校验门控——先加载 chart 本体再分支
+	if chart.IsChartPath(target) {
+		ch, loaded, lerr := loadChartRun(ctx, target, inv, opts, &eopts)
+		if lerr != nil {
+			return lerr
+		}
+		defer ch.Close()
+		plays, spec, hosts = loaded.plays, loaded.spec, loaded.hosts
+	} else {
+		target, plays, err = loadBarePlaybook(target, opts, &eopts)
+		if err != nil {
+			return err
+		}
+	}
+
+	hosts = resolveRunHosts(inv, plays, inline, hosts, eopts.Limit)
+
+	// 零主机即失败：--limit 命中不到任何 play 的目标主机时，此前会跑完
+	// 空 RECAP 并退出 0，CI 把"什么都没做"当成部署成功。与 apply 的
+	// "--limit matched no plan hosts" 同口径（chart 路径在装载期已过同一
+	// 校验，此处对装载期结果的空判是裸 playbook 路径的兜底）。
+	if len(hosts) == 0 {
+		return noHostsError(opts.limit, target)
+	}
+
+	ex, failed, werr := executeRun(ctx, inv, plays, eopts)
+	return recordRunRelease(target, opts, spec, eopts, hosts, ex, failed, werr)
+}
+
+// runExecutorOptions 从 run 选项与全局配置组装执行器参数。
+func runExecutorOptions(opts runOptions) executor.Options {
+	return executor.Options{
 		Forks:            config.Current().Forks(),
 		Limit:            opts.limit,
 		Tags:             opts.tags,
@@ -126,64 +166,62 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		MaxDownloadBytes: maxDownloadBytes(),
 		MaxUploadBytes:   maxUploadBytes(),
 	}
-	var plays []*model.Play
-	// spec 决定相位语义（是否部署事件/是否留部署记录）；无 chart 上下文
-	// （裸 playbook）按内置缺省判定
-	spec := chart.DefaultPhaseSpec(opts.phase)
+}
 
-	if chart.IsChartPath(target) {
-		// 相位属性可能来自 chart.yaml phases: 声明（自定义相位声明 release），
-		// 它决定 values 来源与校验门控——先加载 chart 本体再分支
-		ch, loaded, lerr := loadChartRun(ctx, target, inv, opts, &eopts)
-		if lerr != nil {
-			return lerr
-		}
-		defer ch.Close()
-		plays, spec = loaded.plays, loaded.spec
-	} else {
-		// 裸 playbook 没有 phase 语义（任务不按相位过滤，--phase 不参与
-		// 任务选择）：显式传非 deploy 相位直接报错，而非静默无效——否则
-		// 相位名还会落进部署记录，污染审计语义（与 apply 对脱离上下文
-		// flag 的显式报错同一原则）
-		if opts.phase != "" && opts.phase != "deploy" {
-			return fmt.Errorf("--phase %q requires a chart target (bare playbooks have no phases); did you mean to run a chart package?", opts.phase)
-		}
-		plays, err = playbook.Load(target)
-		if err != nil {
-			return err
-		}
-		if abs, aerr := filepath.Abs(target); aerr == nil {
-			target = abs
-		}
-		eopts.BaseDir = filepath.Dir(target)
-		// chart 引用预扫描：裸 playbook 的引用解析根是同级 charts/ 目录，
-		// 启动期加载（缺引用/坏 chart 立即失败，而非首个主机执行期报错），
-		// 并把各被引用 chart 的 _helpers.tpl 聚合进渲染引擎
-		refs, eng, rerr := preloadChartRefs(eopts.BaseDir, plays)
-		if rerr != nil {
-			return rerr
-		}
-		eopts.ChartRefs = refs
-		if eng != nil {
-			eopts.Engine = eng
-		}
+// loadBarePlaybook 装载裸 playbook 目标：拒绝非 deploy 相位、规范化绝对
+// 路径（部署记录按绝对路径落盘，返回值带回）并预扫描 chart 引用注入
+// eopts。返回 (规范化后的 target, plays)。
+func loadBarePlaybook(target string, opts runOptions, eopts *executor.Options) (string, []*model.Play, error) {
+	// 裸 playbook 没有 phase 语义（任务不按相位过滤，--phase 不参与
+	// 任务选择）：显式传非 deploy 相位直接报错，而非静默无效——否则
+	// 相位名还会落进部署记录，污染审计语义（与 apply 对脱离上下文
+	// flag 的显式报错同一原则）
+	if opts.phase != "" && opts.phase != "deploy" {
+		return "", nil, fmt.Errorf("--phase %q requires a chart target (bare playbooks have no phases); did you mean to run a chart package?", opts.phase)
 	}
+	plays, err := playbook.Load(target)
+	if err != nil {
+		return "", nil, err
+	}
+	if abs, aerr := filepath.Abs(target); aerr == nil {
+		target = abs
+	}
+	eopts.BaseDir = filepath.Dir(target)
+	// chart 引用预扫描：裸 playbook 的引用解析根是同级 charts/ 目录，
+	// 启动期加载（缺引用/坏 chart 立即失败，而非首个主机执行期报错），
+	// 并把各被引用 chart 的 _helpers.tpl 聚合进渲染引擎
+	refs, eng, rerr := preloadChartRefs(eopts.BaseDir, plays)
+	if rerr != nil {
+		return "", nil, rerr
+	}
+	eopts.ChartRefs = refs
+	if eng != nil {
+		eopts.Engine = eng
+	}
+	return target, plays, nil
+}
 
-	// 内联主机模式：play 的 hosts 模式指向命名组，而内联清单只有 all——
-	// 全部 play 一律作用于全部内联主机（多组编排请使用 inventory 文件）。
+// resolveRunHosts 确定实际执行的目标主机集。内联主机模式：play 的 hosts
+// 模式指向命名组，而内联清单只有 all——全部 play 一律作用于全部内联主机
+// （多组编排请使用 inventory 文件）；改写发生在装载之后、改变了目标范围，
+// 装载期的主机集不可复用。否则复用装载期结果，裸 playbook 装载期未算
+// （hosts 为 nil）在此补算。
+func resolveRunHosts(inv *inventory.Inventory, plays []*model.Play, inline bool, hosts []*model.Host, limit string) []*model.Host {
 	if inline {
 		for _, p := range plays {
 			p.Hosts = "all"
 		}
+		return inv.SelectPlays(plays, limit)
 	}
-
-	// 零主机即失败：--limit 命中不到任何 play 的目标主机时，此前会跑完
-	// 空 RECAP 并退出 0，CI 把"什么都没做"当成部署成功。与 apply 的
-	// "--limit matched no plan hosts" 同口径。
-	if hosts := inv.SelectPlays(plays, eopts.Limit); len(hosts) == 0 {
-		return noHostsError(opts.limit, target)
+	if hosts == nil {
+		return inv.SelectPlays(plays, limit)
 	}
+	return hosts
+}
 
+// executeRun 组装报告器/连接池/执行器并运行 plays（含信号处理与执行
+// 收尾）。返回执行器供部署记录读取统计。
+func executeRun(ctx context.Context, inv *inventory.Inventory, plays []*model.Play, eopts executor.Options) (*executor.Executor, bool, error) {
 	rep, finish := buildReporter()
 	conns := conn.NewManagerWithDefaults(connDefaults())
 	conns.SetConnectConcurrency(2 * config.Current().Forks())
@@ -194,16 +232,16 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 
 	failed := ex.Run(ctx, plays)
 	conns.CloseAll()
-	finish()
+	werr := finish()
+	return ex, failed, werr
+}
 
-	// 部署记录（chart 版本 + values 快照 + 结果统计）。
-	// 预演/列主机/不留痕相位（未声明 release/record 的相位，如 status 与普通
-	// 自定义相位）不产生真实部署，不写审计记录（否则与真实部署无法区分）
+// recordRunRelease 落部署记录（chart 版本 + values 快照 + 结果统计）。
+// 预演/列主机/不留痕相位（未声明 release/record 的相位，如 status 与普通
+// 自定义相位）不产生真实部署，不写审计记录（否则与真实部署无法区分）
+func recordRunRelease(target string, opts runOptions, spec chart.PhaseSpec, eopts executor.Options, hosts []*model.Host, ex *executor.Executor, failed bool, werr error) error {
 	if opts.check || opts.listHosts || !spec.Records() {
-		if failed {
-			return errPlayFailed
-		}
-		return nil
+		return finishPlay(werr, failed)
 	}
 	phaseLabel := opts.phase
 	if phaseLabel == "" {
@@ -222,15 +260,7 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 		// 记录取代表性 values——字典序首台主机（map 迭代随机，取随机首个
 		// 会让同一部署每次运行记录的来源主机不确定；plan 编译路径同口径）
 		if rec.Values == nil {
-			firstHost := ""
-			for h := range eopts.HostValues {
-				if firstHost == "" || h < firstHost {
-					firstHost = h
-				}
-			}
-			if firstHost != "" {
-				rec.Values = eopts.HostValues[firstHost]
-			}
+			rec.Values = markerread.FirstValues(eopts.HostValues)
 		}
 		// 审计记录与 marker 同一脱敏口径：chart 声明的 sensitive_values
 		// 不因"落在控制端"就明文持久化（wdp release show --values 可读）
@@ -238,27 +268,22 @@ func runTarget(ctx context.Context, target string, opts runOptions) error {
 	}
 	// 记录实际作用的主机范围：与 executor 一致取全部 play 的并集并应用
 	// --limit，避免 --limit web1 时审计记录虚报整个 play 的主机清单
-	for _, h := range inv.SelectPlays(plays, eopts.Limit) {
+	// （复用装载期/上方算得的 hosts——executor 不改写 play 的 hosts 模式，
+	// 前后两次计算结果恒等，无需重算）
+	for _, h := range hosts {
 		rec.Hosts = append(rec.Hosts, h.Name)
 	}
-	// 审计记录写失败此前被完全吞掉：磁盘满/权限不足时"部署成功但无记录"
-	// 无声发生，回看与回滚依据随之缺失——至少给一条告警。
-	if id, err := release.Save(rec); err == nil {
-		fmt.Fprintf(os.Stderr, "[release] %s\n", id)
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: failed to write the deployment record: %v\n", err)
-	}
-
-	if failed {
-		return errPlayFailed
-	}
-	return nil
+	return saveReleaseRecord(rec, werr, failed)
 }
 
 // chartRun 是 loadChartRun 的装载结果。
 type chartRun struct {
 	plays []*model.Play
 	spec  chart.PhaseSpec
+	// hosts 是 SelectPlays(plays, limit) 在装载期的计算结果（隐式组名补全
+	// 之后），供调用方复用；inline 改写发生在装载之后会改变目标范围，
+	// 该场景由调用方重算
+	hosts []*model.Host
 }
 
 // noHostsError 是"零主机"的失败口径：--limit 命中不到目标主机，或 play 的
@@ -299,10 +324,13 @@ func loadChartRun(ctx context.Context, target string, inv *inventory.Inventory, 
 			implicit = true
 		}
 	}
+	// SelectPlays 只算一次（隐式组名补全后）：零主机校验、marker 相位取
+	// 主机、碰撞预检三处共用同一 (plays, limit) 的结果
+	hosts := inv.SelectPlays(plays, opts.limit)
 	// 零主机即失败（在可逆性确认与 marker 读取之前）：--limit 命中不到目标
 	// 主机时不该先弹确认再报错，也不该去读一台都没有的 marker。裸任务
 	// 相位命中零主机多半是 inventory 缺同名组，点名提示。
-	if hosts := inv.SelectPlays(plays, opts.limit); len(hosts) == 0 {
+	if len(hosts) == 0 {
 		if implicit && opts.limit == "" {
 			return nil, out, fmt.Errorf("no hosts selected for %s (bare-task phase defaults to the group named after the chart %q; add that group to the inventory or write hosts: explicitly)", target, ch.Meta.Name)
 		}
@@ -346,16 +374,15 @@ func loadChartRun(ctx context.Context, target string, inv *inventory.Inventory, 
 		if opts.listHosts {
 			break
 		}
-		hosts := inv.SelectPlays(plays, opts.limit)
 		hostValues, rerr := resolveMarkerValues(ctx, ch, hosts, opts.valuesFiles, opts.setArgs, spec.Destructive())
 		if rerr != nil {
 			return nil, out, rerr
 		}
 		eopts.HostValues = hostValues
-		for _, v := range hostValues { // 碰撞预检的代表性 values（各主机通常一致）
-			values = v
-			break
-		}
+		// 碰撞预检的代表性 values（各主机通常一致；不一致时按主机名
+		// 字典序取首台——此前 map 迭代随机会让碰撞告警逐次执行漂移，
+		// 与 console 的 FirstHostValues 同口径）
+		values = markerread.FirstValues(hostValues)
 	}
 	// 可逆性确认按 Destructive 门控（deploy/uninstall 及声明对应属性的
 	// 相位）：uninstall 此前因 Release == false 完全跳过确认——唯一会
@@ -373,12 +400,10 @@ func loadChartRun(ctx context.Context, target string, inv *inventory.Inventory, 
 
 	// 同名碰撞预检：被 values 遮蔽的 inventory 变量告警（静默失效是真坑），
 	// inventory_override 白名单生效的键打信息。--list-hosts 不执行任务，跳过。
-	if !opts.listHosts && values != nil {
-		if hosts := inv.SelectPlays(plays, opts.limit); len(hosts) > 0 {
-			reportValueCollisions(os.Stderr, values, hosts, eopts.Chart.Meta.InventoryOverride)
-		}
+	if !opts.listHosts && values != nil && len(hosts) > 0 {
+		reportValueCollisions(os.Stderr, values, hosts, eopts.Chart.Meta.InventoryOverride)
 	}
-	return ch, chartRun{plays: plays, spec: spec}, nil
+	return ch, chartRun{plays: plays, spec: spec, hosts: hosts}, nil
 }
 
 // preloadChartRefs 预加载裸 playbook 引用的 chart（解析根 = playbook 同级

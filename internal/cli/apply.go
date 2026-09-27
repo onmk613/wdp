@@ -139,24 +139,9 @@ type applyOptions struct {
 
 // runApply 执行计划。
 func runApply(ctx context.Context, path string, opts applyOptions) error {
-	if opts.diff && !opts.check {
-		opts.check = true
-	}
-	// 自治专用 flag 脱离 --autonomous 时此前被静默丢弃（漏写 --autonomous 的
-	// 用户会以为 sudo 密码已下发、以为已异步返回）：显式报错而不是假装生效。
-	if !opts.autonomous {
-		if opts.detach {
-			return fmt.Errorf("--detach requires --autonomous (it controls when autonomous submission returns)")
-		}
-		if opts.resume {
-			return fmt.Errorf("--resume requires --autonomous (it resumes from each agent's journal)")
-		}
-		if opts.becomePasswordEnv != "" {
-			return fmt.Errorf("--become-password-env requires --autonomous (the direct path takes the password from the inventory (become_password / become_password_env))")
-		}
-		if opts.rerun {
-			return fmt.Errorf("--rerun requires --autonomous (it overrides the agent-side idempotency of plan submissions)")
-		}
+	opts.check = normalizeDiffFlag(opts.diff, opts.check)
+	if err := validateApplyFlags(opts); err != nil {
+		return err
 	}
 	if cfgTimeout := config.Current().Run.Timeout; cfgTimeout > 0 {
 		var cancel context.CancelFunc
@@ -178,30 +163,10 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 	}
 
 	// 合成 inventory（连接元数据来自计划；RunPlan 会整体接管执行器状态）
-	var hosts []*model.Host
-	seen := map[string]bool{}
-	for _, name := range p.Host() {
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		hp := p.HostPlansOf(name)[0]
-		hosts = append(hosts, hp.Conn.Host(name))
-	}
-	inv := inventory.FromHosts(hosts)
-	var allowed map[string]bool // --limit 允许的主机集（nil = 全部）
-	if opts.limit != "" {
-		limited, lerr := inv.Select(opts.limit)
-		if lerr != nil {
-			return lerr
-		}
-		if len(limited) == 0 {
-			return fmt.Errorf("--limit %s matched no plan hosts", opts.limit)
-		}
-		allowed = make(map[string]bool, len(limited))
-		for _, h := range limited {
-			allowed[h.Name] = true
-		}
+	inv := inventory.FromHosts(planHosts(p))
+	allowed, err := applyLimitSet(inv, opts.limit)
+	if err != nil {
+		return err
 	}
 
 	// 自治执行：分片提交给目标 agent（异步），本控制端只做进度聚合
@@ -216,6 +181,56 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 		return nil
 	}
 
+	ex, failed, werr := executePlanDirect(ctx, inv, p, opts)
+	return recordPlanRelease(path, p, spec, ex, failed, werr, opts.check)
+}
+
+// validateApplyFlags 校验自治专用 flag 的上下文。
+// 自治专用 flag 脱离 --autonomous 时此前被静默丢弃（漏写 --autonomous 的
+// 用户会以为 sudo 密码已下发、以为已异步返回）：显式报错而不是假装生效。
+func validateApplyFlags(opts applyOptions) error {
+	if opts.autonomous {
+		return nil
+	}
+	if opts.detach {
+		return fmt.Errorf("--detach requires --autonomous (it controls when autonomous submission returns)")
+	}
+	if opts.resume {
+		return fmt.Errorf("--resume requires --autonomous (it resumes from each agent's journal)")
+	}
+	if opts.becomePasswordEnv != "" {
+		return fmt.Errorf("--become-password-env requires --autonomous (the direct path takes the password from the inventory (become_password / become_password_env))")
+	}
+	if opts.rerun {
+		return fmt.Errorf("--rerun requires --autonomous (it overrides the agent-side idempotency of plan submissions)")
+	}
+	return nil
+}
+
+// applyLimitSet 把 --limit 收窄为允许的主机集（nil = 全部）；命中不到
+// 任何计划主机时报错。
+func applyLimitSet(inv *inventory.Inventory, limit string) (map[string]bool, error) {
+	var allowed map[string]bool // --limit 允许的主机集（nil = 全部）
+	if limit == "" {
+		return allowed, nil
+	}
+	limited, lerr := inv.Select(limit)
+	if lerr != nil {
+		return nil, lerr
+	}
+	if len(limited) == 0 {
+		return nil, fmt.Errorf("--limit %s matched no plan hosts", limit)
+	}
+	allowed = make(map[string]bool, len(limited))
+	for _, h := range limited {
+		allowed[h.Name] = true
+	}
+	return allowed, nil
+}
+
+// executePlanDirect 组装报告器/连接池/执行器并直连执行计划（含信号处理
+// 与执行收尾）。返回执行器供部署记录读取统计。
+func executePlanDirect(ctx context.Context, inv *inventory.Inventory, p *plan.Plan, opts applyOptions) (*executor.Executor, bool, error) {
 	rep, finish := buildReporter()
 	conns := conn.NewManagerWithDefaults(connDefaults())
 	conns.SetConnectConcurrency(2 * config.Current().Forks())
@@ -239,13 +254,16 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 
 	failed := ex.RunPlan(ctx, p)
 	conns.CloseAll()
-	finish()
+	werr := finish()
+	return ex, failed, werr
+}
 
-	if opts.check || !spec.Records() {
-		if failed {
-			return errPlayFailed
-		}
-		return nil
+// recordPlanRelease 落部署记录（chart 版本 + values 快照 + 结果统计）。
+// 预演与不留痕相位（未声明 release/record 的相位）不产生真实部署，不写
+// 审计记录（否则与真实部署无法区分）
+func recordPlanRelease(path string, p *plan.Plan, spec chart.PhaseSpec, ex *executor.Executor, failed bool, werr error, check bool) error {
+	if check || !spec.Records() {
+		return finishPlay(werr, failed)
 	}
 	rec := &release.Record{
 		Playbook: path,
@@ -258,15 +276,20 @@ func runApply(ctx context.Context, path string, opts applyOptions) error {
 		Failed: failed,
 		Hosts:  p.Host(),
 	}
-	if id, serr := release.Save(rec); serr == nil {
-		fmt.Fprintf(os.Stderr, "[release] %s\n", id)
-	} else {
-		fmt.Fprintf(os.Stderr, "warning: failed to write the deployment record: %v\n", serr)
+	return saveReleaseRecord(rec, werr, failed)
+}
+
+// planHosts 把计划主机清单还原为连接模型（连接元数据编译期固化在计划
+// 里，取各主机首个分片；Host() 已按出现序去重，多 play 同名主机共用
+// 首片的连接）。apply 直连执行、自治回退执行与 apply status 的 --limit
+// 收窄三处共用同一还原口径。
+func planHosts(p *plan.Plan) []*model.Host {
+	names := p.Host()
+	hosts := make([]*model.Host, 0, len(names))
+	for _, name := range names {
+		hosts = append(hosts, p.HostPlansOf(name)[0].Conn.Host(name))
 	}
-	if failed {
-		return errPlayFailed
-	}
-	return nil
+	return hosts
 }
 
 // planPhaseSpec 从计划快照的 chart.yaml 声明合成相位属性（与

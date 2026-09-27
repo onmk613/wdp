@@ -9,16 +9,15 @@ import (
 func Snippet(name string) (string, error) {
 	m, ok := Get(name)
 	if !ok {
-		return "", fmt.Errorf("%s: %q (%s)",
-			"unknown module", name, "see the built-in module list")
+		return "", fmt.Errorf("unknown module: %q (see the built-in module list)", name)
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "# %s — %s\n", name, m.Desc())
 	params := Usage(m)
 	if len(params) == 0 {
-		fmt.Fprintf(&sb, "%s\n", "(parameter docs pending: module does not implement UsageProvider)")
+		sb.WriteString("(parameter docs pending: module does not implement UsageProvider)\n")
 	} else {
-		fmt.Fprintf(&sb, "%s\n", "parameters:")
+		sb.WriteString("parameters:\n")
 		for _, p := range params {
 			def := p.Default
 			if def == "" {

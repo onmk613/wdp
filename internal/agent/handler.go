@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -11,21 +12,19 @@ import (
 	"runtime"
 	"slices"
 	"time"
+
+	"wdp/internal/fsatomic"
 )
 
 // Handler 返回最终 HTTP 处理器。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	// 自检
 	mux.HandleFunc("GET /health", s.handleHealth)
 	// 主机指标（Prometheus 文本格式，对齐 node_exporter 命名）
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
-	// 执行命令
 	mux.HandleFunc("POST /exec", s.handleExec)
-	// 文件传输
 	mux.HandleFunc("PUT /file", s.handleUpload)
 	mux.HandleFunc("GET /file", s.handleDownload)
-	// 解压
 	mux.HandleFunc("POST /archive", s.handleArchive)
 	// 近期日志拉取（控制端用文件记录）
 	mux.HandleFunc("GET /logs", s.handleLogs)
@@ -33,7 +32,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /plan", s.handlePlanSubmit)
 	mux.HandleFunc("GET /plan/status", s.handlePlanStatus)
 	mux.HandleFunc("POST /plan/cancel", s.handlePlanCancel)
-	// 自清理
 	mux.HandleFunc("POST /shutdown", s.handleShutdown)
 	// 证书热更换（控制端临期重签推送；mTLS 模式专用，见 cert.go）
 	mux.HandleFunc("POST /cert", s.handleCert)
@@ -59,8 +57,8 @@ type healthResp struct {
 	Goos     string `json:"goos"`
 	Arch     string `json:"arch"`
 	Pid      int    `json:"pid"`
-	// Build 是二进制发布版本（cli.Version-commit，ldflags 注入）。远程
-	//升级用它判断 agent 新旧；空 = ldflags 未注入的旧版二进制。
+	// Build 是二进制发布版本（cli.Version-commit，ldflags 注入），远程
+	// 升级用它判断 agent 新旧；空 = ldflags 未注入的旧版二进制。
 	Build string `json:"build,omitempty"`
 	// BinPath 是 agent 自身二进制路径（os.Executable）。远程升级把新
 	// 二进制推到同目录做原子替换；旧版 agent 无此字段时由脚本探测兜底。
@@ -135,48 +133,55 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create directory: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".wdp-agent-*")
-	if err != nil {
-		http.Error(w, "failed to create temp file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-
-	// 请求体上限（与 /exec 一致）：无上限 io.Copy 会被大 body 写满磁盘
-	limit := s.maxRequestBodyLimit()
-	n, err := io.Copy(tmp, io.LimitReader(r.Body, limit+1))
-	if err != nil {
-		_ = tmp.Close()
+	// 请求体上限（与 /exec 一致）：无上限 io.Copy 会被大 body 写满磁盘；
+	// 读满上限后仍有多余字节即报 errBodyTooLarge（413），由 fsatomic 的
+	// 失败清理路径删除临时文件。原子落盘细节（fsync/chmod/rename/目录
+	// 同步）收敛在 fsatomic.WriteFile
+	lr := &limitedReader{r: r.Body, remain: s.maxRequestBodyLimit()}
+	if err := fsatomic.WriteFile(path, lr, mode); err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			http.Error(w, "request body exceeds limit", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "write failed: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	if n > limit {
-		_ = tmp.Close()
-		http.Error(w, "request body exceeds limit", http.StatusRequestEntityTooLarge)
-		return
-	}
-	// rename 前 fsync：io.Copy 只进页缓存，断电可能留下空文件/截断文件
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		http.Error(w, "failed to sync file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		http.Error(w, "failed to set permissions: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := tmp.Close(); err != nil {
-		http.Error(w, "failed to close file: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		http.Error(w, "failed to write to disk: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	s.logInfo("upload -> %s (%d bytes, mode=%#o)", path, n, mode.Perm())
+	s.logInfo("upload -> %s (%d bytes, mode=%#o)", path, lr.n, mode.Perm())
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// errBodyTooLarge 表示请求体超过上限（handleUpload 的 413 判定哨兵）。
+var errBodyTooLarge = errors.New("request body exceeds limit")
+
+// limitedReader 读满 remain 字节后仍有多余数据时报 errBodyTooLarge：
+// 替代旧实现的 LimitReader(limit+1)+计数写法（恰好等于上限的 body 仍被
+// 接受，超出即失败），使错误经 fsatomic 的统一失败路径清理临时文件。
+// n 记录实际读取字节数（上传日志用）。
+type limitedReader struct {
+	r      io.Reader
+	remain int64
+	n      int64
+}
+
+func (l *limitedReader) Read(p []byte) (int, error) {
+	if l.remain <= 0 {
+		// 恰好读满还不能判超限：再探一字节区分"等于上限"（底层 EOF，
+		// 透传接受）与"超出上限"（errBodyTooLarge → 413），与旧实现
+		// LimitReader(limit+1)+计数等价
+		var probe [1]byte
+		if n, err := l.r.Read(probe[:]); n > 0 {
+			return 0, errBodyTooLarge
+		} else {
+			return 0, err
+		}
+	}
+	if int64(len(p)) > l.remain {
+		p = p[:l.remain]
+	}
+	n, err := l.r.Read(p)
+	l.remain -= int64(n)
+	l.n += int64(n)
+	return n, err
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {

@@ -6,12 +6,12 @@ package web
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
 
 	"wdp/internal/console"
+	"wdp/internal/fmtutil"
 	"wdp/internal/model"
 	"wdp/internal/store"
 )
@@ -44,7 +44,6 @@ type ExecRequest struct {
 // 请求长期占住执行闸门与连接
 const maxExecTimeoutSec = 3600
 
-// ExecHostResult 单主机结果。
 // ExecHostResult 一台主机的执行结果（console 实现的别名，API 契约不变）。
 type ExecHostResult = console.ExecHostResult
 
@@ -69,8 +68,18 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	if req.TimeoutSec > 0 {
 		timeout = req.TimeoutSec
 	}
-	hosts := make([]*store.Host, 0, len(req.HostIDs))
+	// 保序去重：重复 ID 会让闸门对同一把锁二次 TryLock 恒失败，3 秒后
+	// 以"被其它执行占用"409 误导用户（实际只是自己重复提交了同一台）
+	seen := make(map[int64]bool, len(req.HostIDs))
+	uniqIDs := make([]int64, 0, len(req.HostIDs))
 	for _, id := range req.HostIDs {
+		if !seen[id] {
+			seen[id] = true
+			uniqIDs = append(uniqIDs, id)
+		}
+	}
+	hosts := make([]*store.Host, 0, len(uniqIDs))
+	for _, id := range uniqIDs {
 		if h, err := s.st.GetHost(id); err == nil {
 			hosts = append(hosts, h)
 		}
@@ -115,10 +124,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 执行脱离请求生命周期：挂 server 后台 ctx 而非 r.Context()。此前
-	// 直连请求 ctx，用户关标签页/网络抖动 → ctx 取消 → agent 端对进程组
-	// SIGKILL——远端脚本停在半完成状态，对变更类脚本是数据损坏。代价是
-	// 断连后响应写往死连接（无害），执行结果仍完整落在 run 记录里。
+	// 执行脱离请求生命周期（挂后台 ctx 而非 r.Context()），动机见 background()
 	execCtx, cancelExec := context.WithCancel(s.background())
 	defer cancelExec()
 	results := s.execOnHosts(execCtx, hosts, req.Script, timeout, runID)
@@ -168,7 +174,8 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := s.st.GetRun(id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "run not found")
+		// 此前一切错误当 404：DB 故障会被伪装成"记录不存在"误导运维
+		s.writeStoreErr(w, err)
 		return
 	}
 	tasks, err := s.st.RunTasks(id)
@@ -186,11 +193,7 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.st.DeleteRun(id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "run not found")
-			return
-		}
-		s.writeInternal(w, err)
+		s.writeStoreErr(w, err)
 		return
 	}
 	s.audit(r, "delete", "run", fmt.Sprintf("#%d", id), "任务明细一并删除")
@@ -219,11 +222,14 @@ func (s *Server) handleBatchDeleteRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": okN, "failed": len(req.IDs) - okN})
 }
 
+// truncate 超长任务明细截断。截断点回退到完整 UTF-8 序列边界：按字节
+// 硬切多字节字符会留下乱码尾字节（任务输出常含中文）。实现与 executor
+// 共用 fmtutil.TruncateUTF8（全仓唯一实现）。
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "\n... (truncated)"
+	return fmtutil.TruncateUTF8(s, n) + "\n... (truncated)"
 }
 
 // agentHostModelWithScheme 是 ExecService 的 HostModel 注入：台账行 →

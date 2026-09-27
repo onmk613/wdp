@@ -8,8 +8,6 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
-
-	"wdp/internal/render"
 )
 
 func init() { Register(&DebugModule{}) }
@@ -17,15 +15,12 @@ func init() { Register(&DebugModule{}) }
 // DebugModule 打印变量/消息。
 type DebugModule struct{}
 
-// Name 模块名。
 func (m *DebugModule) Name() string { return "debug" }
 
-// Desc 模块说明。
 func (m *DebugModule) Desc() string {
 	return "print a variable or a message (playbook debugging)"
 }
 
-// Params 参数文档。
 func (m *DebugModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "var", Type: "string", Desc: "variable name (e.g. a register'd result, or result.stdout): prints its value as YAML"},
@@ -34,31 +29,45 @@ func (m *DebugModule) Params() []ParamDoc {
 }
 
 // Run 执行：var 按点路径在主机变量域解析，msg 经模板渲染后原样输出。
+// msg/var 显式给了但类型不是字符串时直接失败：静默跳过会落到
+// "requires var or msg"，把"类型写错"（如 msg: 42）误导成"参数没给"。
 func (m *DebugModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	res := &Result{Msg: ""}
-	if msg, ok := args["msg"].(string); ok && msg != "" {
-		eng := rc.Engine
-		if eng == nil {
-			eng = render.DefaultEngine()
+	if raw := args["msg"]; raw != nil {
+		msg, ok := raw.(string)
+		if !ok {
+			return Fail("debug: msg must be a string, got %T", raw)
 		}
-		if rendered, err := eng.Render(msg, rc.Vars); err == nil {
+		if msg != "" {
+			// msg 渲染失败显式失败（fail-loud，对齐 template 的口径）：
+			// 调试工具吞错会把模板笔误伪装成原文输出，排查被误导
+			rendered, err := rc.engine().Render(msg, rc.Vars)
+			if err != nil {
+				return Fail("debug: msg rendering failed: %v", err)
+			}
 			msg = rendered
+			res.Msg += msg
 		}
-		res.Msg += msg
 	}
-	if v, ok := args["var"].(string); ok && v != "" {
-		val, found := resolveVarPath(rc.Vars, v)
-		if !found {
-			return Fail("debug: variable %q not found", v)
+	if raw := args["var"]; raw != nil {
+		v, ok := raw.(string)
+		if !ok {
+			return Fail("debug: var must be a string, got %T", raw)
 		}
-		b, err := yaml.Marshal(val)
-		if err != nil {
-			return Fail("debug: marshal %q: %v", v, err)
+		if v != "" {
+			val, found := resolveVarPath(rc.Vars, v)
+			if !found {
+				return Fail("debug: variable %q not found", v)
+			}
+			b, err := yaml.Marshal(val)
+			if err != nil {
+				return Fail("debug: marshal %q: %v", v, err)
+			}
+			if res.Msg != "" {
+				res.Msg += "\n"
+			}
+			res.Msg += fmt.Sprintf("%s =\n%s", v, string(b))
 		}
-		if res.Msg != "" {
-			res.Msg += "\n"
-		}
-		res.Msg += fmt.Sprintf("%s =\n%s", v, string(b))
 	}
 	if res.Msg == "" {
 		return Fail("debug: requires var or msg")

@@ -79,3 +79,37 @@ func tail(s string, n int) string {
 	}
 	return s[len(s)-n:]
 }
+
+// TestRequestRedactsSensitiveHeaders 请求/响应头的凭据遮蔽：trace 级
+// httpdump 会把报文整段落日志并经 /logs 远程拉取——Authorization/Cookie
+// 等头携带 mTLS 之外的会话凭据，必须替换值而保留键名。
+func TestRequestRedactsSensitiveHeaders(t *testing.T) {
+	r := httptest.NewRequest("POST", "/exec", strings.NewReader(`{"a":1}`))
+	r.Header.Set("Authorization", "Bearer eyJhbGciOi9ub3Rmb3Jva2Vub3dpdGguLi4")
+	r.Header.Set("Cookie", "session=sekrit-session-id; other=1")
+	r.Header.Set("Proxy-Authorization", "Basic dXNlcjpwYXNz")
+	r.Header.Set("X-Api-Key", "key-1234567890")
+	r.Header.Set("Content-Type", "application/json")
+	dump := Request(r)
+	for _, secret := range []string{"eyJhbGciOi9ub3Rmb3Jva2Vub3dpdGguLi4", "sekrit-session-id", "dXNlcjpwYXNz", "key-1234567890"} {
+		if strings.Contains(dump, secret) {
+			t.Fatalf("敏感头值应被遮蔽: %s", dump)
+		}
+	}
+	for _, key := range []string{"Authorization:", "Cookie:", "Proxy-Authorization:", "X-Api-Key:", "Content-Type: application/json"} {
+		if !strings.Contains(dump, key) {
+			t.Fatalf("键名与普通头应保留: %q in %s", key, dump)
+		}
+	}
+
+	resp := Response(http.StatusOK, r.Header.Clone(), []byte(`{"ok":true}`), false)
+	h := http.Header{}
+	h.Add("Set-Cookie", "token=resp-session-token; Path=/")
+	resp = Response(http.StatusOK, h, []byte(`{}`), false)
+	if strings.Contains(resp, "resp-session-token") {
+		t.Fatalf("Set-Cookie 值应被遮蔽: %s", resp)
+	}
+	if !strings.Contains(resp, "Set-Cookie: <redacted>") {
+		t.Fatalf("Set-Cookie 键名应保留: %s", resp)
+	}
+}

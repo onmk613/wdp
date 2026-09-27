@@ -73,7 +73,7 @@ func setAppScopes(q execer, id int64, pools, groups []string) error {
 // CreateApp 新建应用并写入首个版本（tgz 已由调用方落盘）。
 func (s *Store) CreateApp(name, note, labels string, pools, groups []string, version, tgzPath, sha string, size int64, phases []string) (int64, error) {
 	if strings.TrimSpace(name) == "" {
-		return 0, fmt.Errorf("app name is required")
+		return 0, Bizf("app name is required")
 	}
 	if version == "" {
 		version = "v1"
@@ -127,7 +127,6 @@ func (s *Store) ListApps() ([]*App, error) {
 		if err := rows.Scan(&a.ID, &a.Name, &a.Note, &a.LatestVersion, &a.Labels, &a.CreatedAt, &a.UpdatedAt, &a.VersionCount, &pools, &groups); err != nil {
 			return nil, err
 		}
-		// 排序保证输出稳定：group_concat 无 ORDER BY，行序不定会让结果抖动
 		if pools != "" {
 			a.Pools = strings.Split(pools, ",")
 			slices.Sort(a.Pools)
@@ -157,7 +156,6 @@ func (s *Store) GetApp(id int64) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 排序保证输出稳定：group_concat 无 ORDER BY，行序不定会让结果抖动
 	if pools != "" {
 		a.Pools = strings.Split(pools, ",")
 		slices.Sort(a.Pools)
@@ -200,7 +198,7 @@ var ErrVersionExists = errors.New("version already exists")
 // 版本号已存在返回 ErrVersionExists。
 func (s *Store) AddVersion(appID int64, version, tgzPath, sha string, size int64, note string, pools, groups []string, labels string, phases []string) error {
 	if version == "" {
-		return fmt.Errorf("version is required")
+		return Bizf("version is required")
 	}
 	var existing int64
 	err := s.db.QueryRow(`SELECT id FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&existing)
@@ -221,6 +219,16 @@ func (s *Store) AddVersion(appID int64, version, tgzPath, sha string, size int64
 	// 版本落库与 latest 指针同事务：否则 latest 更新失败会留下"有新版本
 	// 但默认版本还指向旧的"不一致
 	return s.tx(func(q execer) error {
+		// 应用须存在（app_versions 无外键）：否则版本行落库、apps 的
+		// UPDATE 静默 0 行，函数返回 nil——制品指向不存在应用（口径同
+		// UpdateVersionScopes）
+		var latest string
+		if err := q.QueryRow(`SELECT latest_version FROM apps WHERE id = ?`, appID).Scan(&latest); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
 		if _, err := q.Exec(`INSERT INTO app_versions (app_id, version, tgz_path, sha256, size, note, pools, groups, labels, phases, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			appID, version, tgzPath, sha, size, note, scopeJSON(pools), scopeJSON(groups), labels, scopeJSON(phases), nowUTC()); err != nil {
 			if isUniqueErr(err) {
@@ -233,7 +241,7 @@ func (s *Store) AddVersion(appID int64, version, tgzPath, sha string, size int64
 	})
 }
 
-// scopeJSON 版本级 scope 列编码（” = 未设置，仅迁移前旧行）。
+// scopeJSON 版本级 scope 列编码（空串 = 未设置，仅迁移前旧行）。
 func scopeJSON(list []string) string {
 	if len(list) == 0 {
 		return "[]"
@@ -245,7 +253,7 @@ func scopeJSON(list []string) string {
 	return string(b)
 }
 
-// parseStrings 解码 JSON 字符串数组列（” 或 '[]' = nil）。
+// parseStrings 解码 JSON 字符串数组列（空串或 '[]' = nil）。
 func parseStrings(s string) []string {
 	if s == "" || s == "[]" {
 		return nil
@@ -257,7 +265,7 @@ func parseStrings(s string) []string {
 	return out
 }
 
-// VersionPhases 某版本 chart 的可用相位（” 旧行返回 nil）。
+// VersionPhases 某版本 chart 的可用相位（空串旧行返回 nil）。
 func (s *Store) VersionPhases(appID int64, version string) ([]string, error) {
 	var phases string
 	err := s.db.QueryRow(`SELECT phases FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&phases)
@@ -270,7 +278,7 @@ func (s *Store) VersionPhases(appID int64, version string) ([]string, error) {
 	return parseStrings(phases), nil
 }
 
-// VersionScopes 读某版本的池/组/标签。列值为 ”（迁移前旧行）时返回
+// VersionScopes 读某版本的池/组/标签。列值为空串（迁移前旧行）时返回
 // ok=false，调用方回退应用级 scope（旧行为）。
 func (s *Store) VersionScopes(appID int64, version string) (pools, groups []string, labels string, ok bool, err error) {
 	var pj, gj string
@@ -323,28 +331,35 @@ func (s *Store) AppByName(name string) (*App, error) {
 }
 
 // DeleteVersion 删除版本；删的是最新版时以剩余最新版顶替，无剩余则清空。
-// 版本删除与 latest 重算同事务，错误传播（吞错会留下没人重算的旧 latest）。
+// 「读版本 / 读 latest / 重算 / 删除 / 回写」全部收进单事务：预读放在
+// 事务外时，窗口内并发的 AddVersion（已置 latest=新版本）会被本事务按
+// 陈旧预读覆盖回写（库里存在 V3 但 latest 停在 V1）。事务内查询一律
+// 走 q（见 tx 注释）。
 func (s *Store) DeleteVersion(appID, versionID int64) (string, error) {
 	var version, tgz string
-	if err := s.db.QueryRow(`SELECT version, tgz_path FROM app_versions WHERE id = ? AND app_id = ?`, versionID, appID).Scan(&version, &tgz); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", ErrNotFound
+	err := s.tx(func(q execer) error {
+		if err := q.QueryRow(`SELECT version, tgz_path FROM app_versions WHERE id = ? AND app_id = ?`, versionID, appID).Scan(&version, &tgz); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
 		}
-		return "", err
-	}
-	a, err := s.GetApp(appID)
-	if err != nil {
-		return "", err
-	}
-	var latest string
-	if a.LatestVersion == version {
-		// 预读删除后的最新版（等价于删除后 ORDER BY id DESC LIMIT 1，排除本行；
-		// 查询须在事务外——单连接下事务内嵌套查询会死锁）
-		if err := s.db.QueryRow(`SELECT version FROM app_versions WHERE app_id = ? AND id != ? ORDER BY id DESC LIMIT 1`, appID, versionID).Scan(&latest); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return "", err
+		var latest string
+		if err := q.QueryRow(`SELECT latest_version FROM apps WHERE id = ?`, appID).Scan(&latest); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
 		}
-	}
-	err = s.tx(func(q execer) error {
+		next := latest
+		if latest == version {
+			// 删除后的最新版（等价于删除后 ORDER BY id DESC LIMIT 1，排除
+			// 本行）；无剩余版本时 Scan 得 ErrNoRows，latest 清空
+			next = ""
+			if err := q.QueryRow(`SELECT version FROM app_versions WHERE app_id = ? AND id != ? ORDER BY id DESC LIMIT 1`, appID, versionID).Scan(&next); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+		}
 		res, err := q.Exec(`DELETE FROM app_versions WHERE id = ?`, versionID)
 		if err != nil {
 			return err
@@ -352,13 +367,16 @@ func (s *Store) DeleteVersion(appID, versionID int64) (string, error) {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return ErrNotFound
 		}
-		if a.LatestVersion == version {
-			_, err = q.Exec(`UPDATE apps SET latest_version = ?, updated_at = ? WHERE id = ?`, latest, nowUTC(), appID)
+		if latest == version {
+			_, err = q.Exec(`UPDATE apps SET latest_version = ?, updated_at = ? WHERE id = ?`, next, nowUTC(), appID)
 		} else {
 			_, err = q.Exec(`UPDATE apps SET updated_at = ? WHERE id = ?`, nowUTC(), appID)
 		}
 		return err
 	})
+	if errors.Is(err, ErrNotFound) {
+		return "", ErrNotFound
+	}
 	if err != nil {
 		return "", err
 	}
@@ -427,23 +445,33 @@ func (s *Store) UpdateVersionScopes(appID int64, version string, pools, groups [
 	if err := validLabels(labels); err != nil {
 		return false, err
 	}
-	var latest string
-	err = s.db.QueryRow(`SELECT latest_version FROM apps WHERE id = ?`, appID).Scan(&latest)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, ErrNotFound
-	}
+	// latest 读取与版本行 UPDATE 同事务：预读在外时，窗口内并发的
+	// SetLatestVersion 换掉默认版本后，这里按陈旧 latest 判 isLatest，
+	// 调用方会错误地（不）回写应用级 scope。事务内查询一律走 q
+	// （见 tx 注释）。
+	err = s.tx(func(q execer) error {
+		var latest string
+		if err := q.QueryRow(`SELECT latest_version FROM apps WHERE id = ?`, appID).Scan(&latest); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		res, err := q.Exec(`UPDATE app_versions SET pools = ?, groups = ?, labels = ? WHERE app_id = ? AND version = ?`,
+			scopeJSON(pools), scopeJSON(groups), labels, appID, version)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		isLatest = version == latest
+		return nil
+	})
 	if err != nil {
 		return false, err
 	}
-	res, err := s.db.Exec(`UPDATE app_versions SET pools = ?, groups = ?, labels = ? WHERE app_id = ? AND version = ?`,
-		scopeJSON(pools), scopeJSON(groups), labels, appID, version)
-	if err != nil {
-		return false, err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return false, ErrNotFound
-	}
-	return version == latest, nil
+	return isLatest, nil
 }
 
 // DeleteApp 删除应用与全部版本记录（磁盘制品路径由调用方清理）。

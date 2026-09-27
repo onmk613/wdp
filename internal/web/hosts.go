@@ -4,9 +4,9 @@ package web
 // inventory_ops/enroll/sshinstall/upgrade 各自文件）。
 
 import (
-	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"wdp/internal/store"
 )
@@ -22,20 +22,62 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.filterHosts(r, verbHostView, hosts))
 }
 
+// createHostReq 是 POST /api/hosts 的请求体。不再裸解码 store.Host：
+// 整体解码会让客户端注入 ID/Status/CreatedAt/AllowPlaintext 等服务端
+// 字段（AllowPlaintext 是通道信任开关，注入即绕过 handleUpdateHost 的
+// host:enroll 门控）。字段不带 json tag：本 API 响应序列化 store.Host 为
+// PascalCase（AgentPort 等），请求侧同口径；编码器大小写不敏感，既有的
+// 小写 name/address 形态同样命中。ID/状态/时间戳/AllowPlaintext 一律
+// 服务端自定，新建主机恒为明文关闭，开启只能走 PUT 的 host:enroll 门。
+type createHostReq struct {
+	Name      string
+	Address   string
+	AgentPort int
+	Pools     []string
+	Groups    []string
+	Labels    string // JSON 对象文本（与 store.Host.Labels 同口径）
+}
+
 func (s *Server) handleCreateHost(w http.ResponseWriter, r *http.Request) {
-	var h store.Host
-	if !decodeJSON(w, r, &h) {
+	var req createHostReq
+	if !decodeJSON(w, r, &req) {
 		return
+	}
+	// 校验与批量导入（handleImportHosts）同口径：name 必填且字符集同
+	// safeName（裸解码入库会让含 "/"、空格等字符的名字直接进台账，而逐行
+	// 校验的导入拒绝同名——两条建档路径一套标准；非法名字也无法作为逐主
+	// 机证书文件名安全落盘）；address 必填；端口 0 = 默认 7602，越界拒绝
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if req.Name != safeName(req.Name) {
+		writeError(w, http.StatusBadRequest, "name has invalid characters (allowed: letters, digits, . _ -)")
+		return
+	}
+	if strings.TrimSpace(req.Address) == "" {
+		writeError(w, http.StatusBadRequest, "address is required")
+		return
+	}
+	if req.AgentPort < 0 || req.AgentPort > 65535 {
+		writeError(w, http.StatusBadRequest, "agent_port out of range (1-65535)")
+		return
+	}
+	h := store.Host{
+		Name: req.Name, Address: req.Address, AgentPort: req.AgentPort,
+		Pools: req.Pools, Groups: req.Groups, Labels: req.Labels,
 	}
 	id, err := s.st.CreateHost(&h)
 	if err != nil {
-		// 重名是用户可见的 400；其余（DB/IO）走 500 脱敏——裸 SQL 错误串
+		// 重名是用户可见的 400；其余业务校验（labels 格式、池/组名）走
+		// writeStoreErr 同口径回 400，DB/IO 走 500 脱敏——裸 SQL 错误串
 		// 会暴露内部表结构
 		if store.IsUniqueErr(err) {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("主机 %q 已存在", h.Name))
 			return
 		}
-		s.writeInternal(w, err)
+		s.writeStoreErr(w, err)
 		return
 	}
 	h.ID = id
@@ -60,19 +102,29 @@ func (s *Server) handleUpdateHost(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, ok := s.checkHost(w, r, verbHostEdit, id); !ok {
+	cur, ok := s.checkHost(w, r, verbHostEdit, id)
+	if !ok {
 		return
 	}
 	var h store.Host
 	if !decodeJSON(w, r, &h) {
 		return
 	}
+	// 新归属是写入语义：scope 级 host:edit 只能把主机改到授权覆盖的池/组/
+	// 标签内（与批量 assign 同口径；matchScope"任一命中"不够——那会把
+	// 主机挪进任意池扩大可见面，或借标签间接扩大 label 型授权面）
+	if bad := s.scopeWriteCheck(r, verbHostEdit, h.Pools, h.Groups, labelKeySlice(h.Labels)); bad != "" {
+		writeError(w, http.StatusForbidden, "forbidden: target "+bad+"s outside your host:edit scope")
+		return
+	}
+	// allow_plaintext 是通道信任模型开关（置 true 即让该主机的执行/部署
+	// 走明文 HTTP），收敛到 host:enroll：host:edit 只改台账不改通道
+	if h.AllowPlaintext != cur.AllowPlaintext && !s.permsOf(permUser(r)).canVerb(verbHostEnroll) {
+		writeError(w, http.StatusForbidden, "forbidden: changing allow_plaintext requires "+verbHostEnroll)
+		return
+	}
 	if err := s.st.UpdateHost(id, &h); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "host not found")
-			return
-		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	updated, err := s.st.GetHost(id)

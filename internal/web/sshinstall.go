@@ -96,7 +96,8 @@ func (s *Server) handleSSHInstall(w http.ResponseWriter, r *http.Request) {
 		HostKeyCheck: verifyHostKey, ConnectTimeoutSec: 10,
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	// 执行脱离请求生命周期（同 exec/upgrade 口径），动机见 background()
+	ctx, cancel := context.WithTimeout(s.background(), 10*time.Minute)
 	defer cancel()
 
 	result, err := s.sshInstall(ctx, host, name, agentPort)
@@ -131,9 +132,15 @@ func (s *Server) sshInstall(ctx context.Context, host *model.Host, name string, 
 		return nil, fmt.Errorf("no binary for platform %s (run the server from a build.sh bin directory)", platform)
 	}
 
-	// 2. 逐主机证书（SAN = 地址 + 台账名；已存在则复用——重装幂等）
+	// 2. 逐主机证书（SAN = 地址 + 台账名；已存在则复用——重装幂等）。
+	// Stat 失败（权限/IO）不得当"已存在"跳过签发：后续上传读不到证书
+	// 才暴错，既误导又留下半装状态，此处直接中止
 	crt, key := s.hostCertPaths(name)
-	if _, err := os.Stat(crt); errors.Is(err, os.ErrNotExist) {
+	_, statErr := os.Stat(crt)
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		return nil, fmt.Errorf("stat host cert: %w", statErr)
+	}
+	if errors.Is(statErr, os.ErrNotExist) {
 		sans := []string{host.Address}
 		if name != host.Address {
 			sans = append(sans, name)

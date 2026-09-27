@@ -27,7 +27,7 @@ type Server struct {
 	tlsCertFile string
 	tlsKeyFile  string
 
-	// 无认证启动, 一般纯内网安全环境
+	// 无认证模式：仅适合隔离环境，见 serve() 内告警
 	allowNoAuth bool
 	// 是否自清理
 	cleanupOnShutdown atomic.Bool
@@ -126,11 +126,8 @@ func (s *Server) AllowNoAuth(on bool) {
 	s.allowNoAuth = on
 }
 
-// SetIdleTimeout 设置空闲自动退出周期
+// SetIdleTimeout 设置空闲自动退出周期（<=0 表示关闭）。
 func (s *Server) SetIdleTimeout(d time.Duration) {
-	if d <= 0 {
-		d = 0
-	}
 	s.idleTimeout = d
 }
 
@@ -212,11 +209,22 @@ func (s *Server) serve(ln net.Listener) error {
 	if err := s.checkAuthSafety(); err != nil {
 		return err
 	}
+	// 僵尸 run 收割必须先于任何请求：此刻 planManager 为空，磁盘上的
+	// running 状态必然没有进程支撑（上一进程崩溃/被杀留下的），此后
+	// 新提交的 run 才是本进程真实持有的
+	s.reapZombieRuns()
 	idle := "off"
 	if s.idleTimeout > 0 {
 		idle = s.idleTimeout.String()
 	}
 	s.logInfo("wdp agent %s listening on %s (mtls=%v, idle_timeout=%s)", Version, s.Listen, s.material.Load() != nil, idle)
+	if s.material.Load() == nil {
+		// 无 mTLS 运行（回环默认或 --allow-no-auth）。回环不是安全边界：
+		// 同机**所有用户**的进程都能连上 127.0.0.1，以 agent 身份（常为
+		// root）执行任意命令——共享主机/多用户服务器上等于本地提权。
+		// 高亮告警；文档口径为仅限单用户/专用主机。
+		s.logWarn("WARNING: running WITHOUT authentication on %s — any local process can execute commands as this agent; use mTLS (--ca/--cert/--key) unless this is a single-user machine", s.Listen)
+	}
 	srv := &http.Server{
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,

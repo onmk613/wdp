@@ -23,6 +23,29 @@ func Redact(s string) string {
 	return sensitiveRe.ReplaceAllString(s, `"$1"$2"***"`)
 }
 
+// redactedHeader 是敏感头值的统一占位（键名保留：排障仍能看到哪些头在场）。
+const redactedHeader = "<redacted>"
+
+// sensitiveHeaders 是必须遮蔽值的报文头白名单（键按小写比较）。trace 级
+// httpdump 会把请求/响应报文整段落进日志，且日志可经 agent /logs 端点
+// 远程拉取：Authorization/Cookie 等头携带 mTLS 之外的会话凭据（token、
+// 会话 cookie、代理凭据），明文落日志等于给这套认证体系开旁路。
+var sensitiveHeaders = map[string]bool{
+	"authorization":       true,
+	"proxy-authorization": true,
+	"cookie":              true,
+	"set-cookie":          true,
+	"x-api-key":           true,
+}
+
+// headerValues 敏感头整体替换值，其余原样。
+func headerValues(k string, vv []string) []string {
+	if !sensitiveHeaders[strings.ToLower(k)] {
+		return vv
+	}
+	return []string{redactedHeader}
+}
+
 // Request 格式化请求报文
 func Request(r *http.Request) string {
 	var b strings.Builder
@@ -31,7 +54,7 @@ func Request(r *http.Request) string {
 		fmt.Fprintf(&b, "Host: %s\r\n", r.Host)
 	}
 	for k, vv := range r.Header {
-		for _, v := range vv {
+		for _, v := range headerValues(k, vv) {
 			fmt.Fprintf(&b, "%s: %s\r\n", k, v)
 		}
 	}
@@ -57,12 +80,13 @@ func Request(r *http.Request) string {
 	return b.String()
 }
 
-// Response 格式化响应报文
+// Response 格式化响应报文（敏感头同口径遮蔽：Set-Cookie 是服务端下发的
+// 会话凭据，落 trace 日志与请求头同险）
 func Response(status int, h http.Header, body []byte, truncated bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "HTTP/1.1 %d %s\r\n", status, http.StatusText(status))
 	for k, vv := range h {
-		for _, v := range vv {
+		for _, v := range headerValues(k, vv) {
 			fmt.Fprintf(&b, "%s: %s\r\n", k, v)
 		}
 	}

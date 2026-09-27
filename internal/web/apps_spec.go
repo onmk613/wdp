@@ -45,7 +45,7 @@ func (s *Server) handleGetSpec(w http.ResponseWriter, r *http.Request) {
 	}
 	tgz, err := s.st.VersionTgz(id, version)
 	if err != nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("version %s not found", version))
+		s.writeStoreErr(w, err)
 		return
 	}
 	ch, err := chart.LoadWithLimits(tgz, chart.Limits{})
@@ -72,17 +72,15 @@ func (s *Server) handleGetSpec(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, spec)
 }
 
-func (s *Server) writeSpecErr(w http.ResponseWriter, err error, baseVersion string) {
+// writeSpecErr spec 端点错误分流：console 业务校验错回 400 原文，其余
+// （底本版本不存在 / DB 故障）走 writeStoreErr 统一 404/400/500。
+func (s *Server) writeSpecErr(w http.ResponseWriter, err error) {
 	var be *console.BizError
 	if errors.As(err, &be) {
 		writeError(w, http.StatusBadRequest, be.Error())
 		return
 	}
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("base version %s not found", baseVersion))
-		return
-	}
-	s.writeInternal(w, err)
+	s.writeStoreErr(w, err)
 }
 
 // handleCreateSpec 新建应用（图形化创建：名称/版本/描述/步骤/文件）。
@@ -100,7 +98,7 @@ func (s *Server) handleCreateSpec(w http.ResponseWriter, r *http.Request) {
 	}
 	workDir, err := s.apps.PrepareWorkspace(0, "", req.Name, &req.specReq)
 	if err != nil {
-		s.writeSpecErr(w, err, "")
+		s.writeSpecErr(w, err)
 		return
 	}
 	defer os.RemoveAll(workDir)
@@ -133,16 +131,13 @@ func (s *Server) handleCreateSpec(w http.ResponseWriter, r *http.Request) {
 		if !s.artifactReferenced(req.Name, req.Version) {
 			os.Remove(final)
 		}
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	s.audit(r, "create", "app", req.Name, "图形化创建 "+req.Version)
 	s.logger.Info("app created from spec", "name", req.Name, "version", req.Version)
-	app, _ := s.st.GetApp(id)
-	writeJSON(w, http.StatusCreated, app)
+	s.replyApp(w, id, http.StatusCreated)
 }
-
-// bizError spec 物化过程的业务错误（结构/语法/一致性校验不过）——
 
 func (s *Server) handleSaveSpec(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
@@ -174,49 +169,37 @@ func (s *Server) handleSaveSpec(w http.ResponseWriter, r *http.Request) {
 	}
 	workDir, err := s.apps.PrepareWorkspace(id, baseVersion, app.Name, &req)
 	if err != nil {
-		s.writeSpecErr(w, err, baseVersion)
+		s.writeSpecErr(w, err)
 		return
 	}
 	defer os.RemoveAll(workDir)
 
-	// 预检、打包与入库整体进临界区（理由同 handleUploadChart）：
-	// packAndStore 直接写目标路径，重复版本会覆盖存档
-	s.uploadMu.Lock()
-	defer s.uploadMu.Unlock()
-	exists, herr := s.st.HasVersion(id, req.Version)
-	if herr != nil {
-		// 约束：预检出错不得当"不存在"放行
-		s.writeInternal(w, herr)
-		return
-	}
-	if exists {
-		writeError(w, http.StatusBadRequest, versionExistsMsg(app.Name, req.Version, store.ErrVersionExists))
-		return
-	}
-	// DB 行丢失但制品文件残留时同样按版本已存在拒绝：rename 会覆盖它
-	if _, serr := os.Stat(s.appTgzPath(app.Name, req.Version)); serr == nil {
-		writeError(w, http.StatusBadRequest, versionExistsMsg(app.Name, req.Version, store.ErrVersionExists))
-		return
-	}
-	final, sha, size, err := s.apps.PackAndStore(workDir, app.Name, req.Version)
-	if err != nil {
-		s.writeInternal(w, err)
-		return
-	}
-	phases, perr := chartPhasesOf(final)
-	if perr != nil {
-		os.Remove(final)
-		s.writeInternal(w, fmt.Errorf("load packed chart: %w", perr))
-		return
-	}
-	note := fmt.Sprintf("edited from %s", baseVersion)
-	if err := s.st.AddVersion(id, req.Version, final, sha, size, note, req.Pools, req.Groups, req.Labels, phases); err != nil {
-		// 约束：ErrVersionExists = 该路径制品已被先到的入库版本引用，删除
-		// 会毁掉其制品；其余错误才清理本次归位
-		if !errors.Is(err, store.ErrVersionExists) {
-			os.Remove(final)
-		}
-		writeError(w, http.StatusBadRequest, versionExistsMsg(app.Name, req.Version, err))
+	// 预检、打包与入库整体进临界区：packAndStore 直接写目标路径，重复
+	// 版本会覆盖存档（并发与清理约束见 storeVersion）
+	var phases []string
+	if !s.storeVersion(w, app.Name, req.Version,
+		func() (*store.App, bool) { return app, true },
+		nil,
+		func() (string, string, int64, error) {
+			final, sha, size, err := s.apps.PackAndStore(workDir, app.Name, req.Version)
+			if err != nil {
+				return "", "", 0, err
+			}
+			// 相位清单从成品读回（spec 写入的相位文件打包后回读，保证库里
+			// 的相位与制品一致）；失败时清理归位
+			ph, perr := chartPhasesOf(final)
+			if perr != nil {
+				os.Remove(final)
+				return "", "", 0, fmt.Errorf("load packed chart: %w", perr)
+			}
+			phases = ph
+			return final, sha, size, nil
+		},
+		func(_ *store.App, final, sha string, size int64) error {
+			note := fmt.Sprintf("edited from %s", baseVersion)
+			return s.st.AddVersion(id, req.Version, final, sha, size, note, req.Pools, req.Groups, req.Labels, phases)
+		},
+	) {
 		return
 	}
 	if err := s.st.UpdateAppScopes(id, req.Description, req.Pools, req.Groups, req.Labels); err != nil {
@@ -224,6 +207,5 @@ func (s *Server) handleSaveSpec(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "update", "app", app.Name, "编辑器保存版本 "+req.Version+"（底本 "+baseVersion+"）")
 	s.logger.Info("app spec saved", "name", app.Name, "version", req.Version, "base", baseVersion)
-	updated, _ := s.st.GetApp(id)
-	writeJSON(w, http.StatusOK, updated)
+	s.replyApp(w, id, http.StatusOK)
 }

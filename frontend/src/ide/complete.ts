@@ -13,7 +13,8 @@ import type { MonacoNs } from './monaco'
 import type { ModuleMeta, SchemaMeta } from '../api'
 import type { ChartFS } from './fs'
 import { yamlCtx, inTemplateExpr, templateExprKind } from './ctx'
-import { controlKeys } from './schemas'
+import { controlKeys, playKeysSet } from './keys'
+import { taskChartRef } from './chartref'
 import type { VarDomain } from './vars'
 import { subchartNames, phaseNames, handlerNames, resolvePathPrefix } from './vars'
 
@@ -29,14 +30,6 @@ export interface CompleteDeps {
 
 // 模块键写法（写在模块位置，不进控制键候选）
 const MODULE_POSITION = new Set(['chart', 'include'])
-
-function playKeySet(meta: SchemaMeta): Set<string> {
-  const s = new Set<string>()
-  for (const sec of meta.play) for (const f of sec.Fields) s.add(f.Name)
-  s.add('tasks')
-  s.add('handlers')
-  return s
-}
 
 function docMarkdown(m: ModuleMeta): string {
   const rows = (m.params || [])
@@ -97,7 +90,7 @@ const FUNC_DOCS: Record<string, string> = {
   trunc: '截断到 N 字符：`{{ trunc 5 $s }}`',
   abbrev: '超长时中间省略（保头尾）',
   initials: '取各单词首字母',
-  randAlpha: '随机字母串：`{{ randAlphaNum 8 }}`（常用生成随机口令/后缀）',
+  randAlpha: '随机字母串：`{{ randAlpha 8 }}`（常用生成随机口令/后缀）',
   randAlphaNum: '随机字母数字串：`{{ randAlphaNum 8 }}`',
   randNumeric: '随机数字串：`{{ randNumeric 6 }}`',
   wrap: '按宽度折行：`{{ wrap 80 $text }}`',
@@ -249,10 +242,10 @@ export function registerProviders(monaco: MonacoNs, deps: CompleteDeps): Monaco.
         startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
         startColumn: word.startColumn, endColumn: word.endColumn,
       }
-      const ctx = yamlCtx(model.getValue(), position, controlKeys(meta), playKeySet(meta), deps.rootDefaultIsTask ? deps.rootDefaultIsTask() : true)
+      const ctx = yamlCtx(model.getValue(), position, controlKeys(meta), playKeysSet(meta), deps.rootDefaultIsTask ? deps.rootDefaultIsTask() : true)
       if (!ctx) return { suggestions: [] }
 
-      if (ctx.kind === 'value') return { suggestions: valueSuggestions(deps, ctx.key, ctx.module, ctx.quoted, range, K) }
+      if (ctx.kind === 'value') return { suggestions: valueSuggestions(deps, ctx.key, ctx.module, ctx.quoted, range, K, model, position) }
 
       const suggestions: Monaco.languages.CompletionItem[] = []
       const lineText = model.getLineContent(position.lineNumber)
@@ -363,6 +356,11 @@ export function registerProviders(monaco: MonacoNs, deps: CompleteDeps): Monaco.
       const expr = inTemplateExpr(lineBefore)
       if (expr === null) return { suggestions: [] }
       const kind = templateExprKind(expr)
+      // 叶子变量接受后自动闭合 }}（用户常忘写右括号）；已有 }} 不重复。
+      // 空格风格说明：Go template 中 {{.x}} 与 {{ .x }} 等价，不影响执行，
+      // 这里跟随用户已输入风格，只在闭合处补一个空格
+      const needsClose = (): boolean =>
+        !model.getLineContent(position.lineNumber).slice(position.column - 1).trimStart().startsWith('}}')
       const word = model.getWordUntilPosition(position)
       const range: Monaco.IRange = {
         startLineNumber: position.lineNumber, endLineNumber: position.lineNumber,
@@ -387,16 +385,11 @@ export function registerProviders(monaco: MonacoNs, deps: CompleteDeps): Monaco.
         const res = expr.trim() === '.' || expr.trim() === ''
           ? { node: { name: '', children: domain.roots }, rest: '', chain: [] as string[] }
           : resolvePathPrefix(domain, expr)
-        // 叶子变量接受后自动闭合 }}（用户常忘写右括号）；已有 }} 不重复。
-        // 空格风格说明：Go template 中 {{.x}} 与 {{ .x }} 等价，不影响执行，
-        // 这里跟随用户已输入风格，只在闭合处补一个空格
-        const restOfLine = model.getLineContent(position.lineNumber).slice(position.column - 1)
-        const needsClose = !restOfLine.trimStart().startsWith('}}')
         if (res) {
           for (const child of Object.values(res.node.children || {})) {
             if (res.rest && !child.name.startsWith(res.rest)) continue
             const leaf = !child.children || Object.keys(child.children).length === 0
-            out.push(makeItem(child.name, K.Variable, child.name + (leaf && needsClose ? ' }}' : ''), range, {
+            out.push(makeItem(child.name, K.Variable, child.name + (leaf && needsClose() ? ' }}' : ''), range, {
               detail: [...res.chain, child.name].join('.') + (child.children ? ' ↧' : '') + (child.detail ? ` · ${child.detail}` : ''),
               doc: varDoc([...res.chain, child.name].join('.'), child.detail, !!child.children),
               sort: '0' + child.name,
@@ -416,11 +409,9 @@ export function registerProviders(monaco: MonacoNs, deps: CompleteDeps): Monaco.
       for (const fn of domain.funcs) {
         out.push(makeItem(fn, K.Function, fn, range, { detail: '模板函数', doc: funcDoc(fn), sort: '1' + fn }))
       }
-      const restOfLine2 = model.getLineContent(position.lineNumber).slice(position.column - 1)
-      const needsClose2 = !restOfLine2.trimStart().startsWith('}}')
       for (const root of Object.values(domain.roots)) {
         const leaf = !root.children || Object.keys(root.children).length === 0
-        out.push(makeItem('.' + root.name, K.Variable, '.' + root.name + (leaf && needsClose2 ? ' }}' : ''), range, {
+        out.push(makeItem('.' + root.name, K.Variable, '.' + root.name + (leaf && needsClose() ? ' }}' : ''), range, {
           detail: root.detail || '变量',
           doc: varDoc(root.name, root.detail, !!root.children),
           sort: '0' + root.name,
@@ -444,6 +435,7 @@ const MODE_ENUMS = ['"0755"', '"0644"', '"0600"', '"0750"', '"0700"', '"0640"', 
 function valueSuggestions(
   deps: CompleteDeps, key: string, module: string | undefined, quoted: boolean,
   range: Monaco.IRange, K: typeof Monaco.languages.CompletionItemKind,
+  model: Monaco.editor.ITextModel, position: Monaco.Position,
 ): Monaco.languages.CompletionItem[] {
   const fs = deps.fs
   const meta = deps.meta()
@@ -527,11 +519,17 @@ function valueSuggestions(
       }))
     case 'tasks_from':
     case 'phase': {
-      // 当前任务的 chart: 值决定相位域；拿不到就给根相位
-      let sub: string | undefined
-      for (const content of fileMap.values()) {
-        const m = content.match(/^\s*chart:\s*([A-Za-z0-9][\w.-]*)\s*$/m)
-        if (m) { sub = m[1]; break }
+      // 相位域 = 引用对象：优先取光标所在任务的 chart 值（taskChartRef 按
+      // ctx.ts 的缩进语义定位任务块——多 chart 引用时各任务各归各的域）。
+      // 定位失败（光标不在任务块内/本任务不是 chart 引用/引用名是模板
+      // 变量）回退旧启发式：扫全部文件取第一个 chart: 键——多 chart 引用
+      // 场景可能取错域，仅兜底
+      let sub = taskChartRef(model.getValue(), position)
+      if (!sub) {
+        for (const content of fileMap.values()) {
+          const m = content.match(/^\s*chart:\s*([A-Za-z0-9][\w.-]*)\s*$/m)
+          if (m) { sub = m[1]; break }
+        }
       }
       return phaseNames(paths, sub).map((p) => ({
         ...mk(p, sub ? `${sub} 相位` : '相位', '引用 chart 的相位（对应 <相位名>.yaml）：deploy=部署，uninstall=卸载；缺省 deploy', '0'),

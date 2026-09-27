@@ -54,10 +54,13 @@ func leafTemplate(name string, sans []string, profile Profile, days int) (*x509.
 				return nil, fmt.Errorf("invalid email SAN %q", s)
 			}
 			tpl.EmailAddresses = append(tpl.EmailAddresses, addr)
-		case net.ParseIP(s) != nil:
-			tpl.IPAddresses = append(tpl.IPAddresses, net.ParseIP(s))
 		default:
-			tpl.DNSNames = append(tpl.DNSNames, s)
+			// IP 字面量解析一次复用（原先 case 与 append 各调一次 ParseIP）
+			if ip := net.ParseIP(s); ip != nil {
+				tpl.IPAddresses = append(tpl.IPAddresses, ip)
+			} else {
+				tpl.DNSNames = append(tpl.DNSNames, s)
+			}
 		}
 	}
 	return tpl, nil

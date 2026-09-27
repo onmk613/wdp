@@ -46,8 +46,8 @@ myapp/
 `wdp schema chart` 查看（`--json` 机器可读）；下表是同一份清单的注释版。
 
 ```yaml
-name: myapp                     # 必需
-version: 0.1.0
+name: myapp                     # 必需（字母数字开头，可用 . _ -）
+version: 0.1.0                  # 同字符集约束：会拼进打包产物文件名与 marker，非法即拒
 description: 我的应用
 
 required:                       # 必填 values 点路径：合并后缺失任何一项立即报错
@@ -189,7 +189,7 @@ wdp run ./myapp -i prod.yaml \
 - 内置变量（inventory_hostname/groups/…）与主机 facts（setup/stat）穿透子 chart 作用域
 - 子 chart 的 handlers 合并进父 play（重名告警忽略；含全部相位的 handlers）；
   父 play 的 strategy/become/environment 对子任务生效
-- `charts/` 支持多级嵌套
+- `charts/` 支持多级嵌套；只支持**目录形式**子 chart（Helm 惯例的 `charts/foo-1.0.0.tgz` 打包形态不受支持，加载时显式报错并提示解包为目录）
 
 ### 入口相位：tasks_from
 

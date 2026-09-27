@@ -78,8 +78,8 @@ async function submitCreate() {
 // ---- 行内角色切换 / 禁用 ----
 async function changeRole(row: User, role: string) {
   try {
-    users.value = await api<User[]>('PUT', `/api/users/${row.ID}`, { role })
-    ElMessage.success(`${row.Name} 角色 → ${role}`)
+    users.value = await api<User[]>('PUT', `/api/users/${row.id}`, { role })
+    ElMessage.success(`${row.name} 角色 → ${role}`)
   } catch (e) {
     ElMessage.error((e as Error).message)
     load()
@@ -87,18 +87,18 @@ async function changeRole(row: User, role: string) {
 }
 
 async function toggleDisabled(row: User) {
-  const to = !row.Disabled
+  const to = !row.disabled
   if (to) {
     try {
-      await ElMessageBox.confirm(`禁用 ${row.Name}？其全部在线会话将被踢下线。`, '禁用用户', { type: 'warning' })
+      await ElMessageBox.confirm(`禁用 ${row.name}？其全部在线会话将被踢下线。`, '禁用用户', { type: 'warning' })
     } catch {
       return // 用户取消确认，不是错误
     }
   }
   // 确认与请求分开 try：请求失败要明确报错，不能与「取消」混在一个空 catch 里
   try {
-    users.value = await api<User[]>('PUT', `/api/users/${row.ID}`, { disabled: to })
-    ElMessage.success(to ? `已禁用 ${row.Name}（会话已踢）` : `已启用 ${row.Name}`)
+    users.value = await api<User[]>('PUT', `/api/users/${row.id}`, { disabled: to })
+    ElMessage.success(to ? `已禁用 ${row.name}（会话已踢）` : `已启用 ${row.name}`)
   } catch (e) {
     ElMessage.error((e as Error).message)
   }
@@ -106,13 +106,13 @@ async function toggleDisabled(row: User) {
 
 async function removeUser(row: User) {
   try {
-    await ElMessageBox.confirm(`删除用户 ${row.Name}？其追加授权一并删除。`, '删除用户', { type: 'warning' })
+    await ElMessageBox.confirm(`删除用户 ${row.name}？其追加授权一并删除。`, '删除用户', { type: 'warning' })
   } catch {
     return
   }
   try {
-    users.value = await api<User[]>('DELETE', `/api/users/${row.ID}`)
-    ElMessage.success(`已删除 ${row.Name}`)
+    users.value = await api<User[]>('DELETE', `/api/users/${row.id}`)
+    ElMessage.success(`已删除 ${row.name}`)
   } catch (e) {
     ElMessage.error((e as Error).message)
   }
@@ -138,8 +138,8 @@ async function submitReset() {
   }
   passLoading.value = true
   try {
-    await api('PUT', `/api/users/${passUser.value.ID}/password`, { password: passForm.password })
-    ElMessage.success(`已重置 ${passUser.value.Name} 的密码（其旧会话已失效）`)
+    await api('PUT', `/api/users/${passUser.value.id}/password`, { password: passForm.password })
+    ElMessage.success(`已重置 ${passUser.value.name} 的密码（其旧会话已失效）`)
     passVisible.value = false
   } catch (e) {
     ElMessage.error((e as Error).message)
@@ -163,7 +163,7 @@ const scopeValueOptions = computed(() => ({
 
 function openScopes(row: User) {
   scopeUser.value = row
-  scopeRows.value = (row.Scopes || []).map((s) => ({ verb: s.verb, kind: s.kind, value: s.value }))
+  scopeRows.value = (row.scopes || []).map((s) => ({ verb: s.verb, kind: s.kind, value: s.value }))
   if (!scopeRows.value.length) scopeRows.value = [{ verb: 'host:edit', kind: 'pool', value: '' }]
   scopeVisible.value = true
 }
@@ -190,10 +190,10 @@ async function submitScopes() {
   if (!scopeUser.value) return
   scopeLoading.value = true
   try {
-    await api('PUT', `/api/users/${scopeUser.value.ID}/scopes`, {
+    await api('PUT', `/api/users/${scopeUser.value.id}/scopes`, {
       scopes: scopeRows.value.filter((r) => r.kind === '' || r.value),
     })
-    ElMessage.success(`已更新 ${scopeUser.value.Name} 的追加授权`)
+    ElMessage.success(`已更新 ${scopeUser.value.name} 的追加授权`)
     scopeVisible.value = false
     await load()
   } catch (e) {
@@ -231,7 +231,7 @@ async function kickSession(row: SessionInfo) {
         <el-table-column prop="Name" label="用户名" min-width="120" />
         <el-table-column label="角色" width="140">
           <template #default="{ row }">
-            <el-select :model-value="row.Role" size="small" @change="(v: string) => changeRole(row, v)">
+            <el-select :model-value="row.role" size="small" @change="(v: string) => changeRole(row, v)">
               <el-option value="admin" label="admin" />
               <el-option value="operator" label="operator" />
               <el-option value="viewer" label="viewer" />
@@ -240,16 +240,16 @@ async function kickSession(row: SessionInfo) {
         </el-table-column>
         <el-table-column label="状态" width="90">
           <template #default="{ row }">
-            <el-tag v-if="row.Disabled" type="danger" size="small">已禁用</el-tag>
-            <el-tag v-else-if="row.Online" type="success" size="small">在线</el-tag>
+            <el-tag v-if="row.disabled" type="danger" size="small">已禁用</el-tag>
+            <el-tag v-else-if="row.online" type="success" size="small">在线</el-tag>
             <el-tag v-else type="info" size="small" effect="plain">离线</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="追加授权" min-width="240">
           <template #default="{ row }">
-            <template v-if="row.Scopes && row.Scopes.length">
+            <template v-if="row.scopes && row.scopes.length">
               <el-tag
-                v-for="(s, i) in row.Scopes" :key="i" size="small" effect="plain" class="tag"
+                v-for="(s, i) in row.scopes" :key="i" size="small" effect="plain" class="tag"
                 :type="s.kind === 'pool' ? 'warning' : s.kind === 'group' ? 'info' : 'success'"
               >
                 {{ s.verb }}@{{ s.kind || '全部' }}{{ s.value ? '=' + s.value : '' }}
@@ -259,14 +259,14 @@ async function kickSession(row: SessionInfo) {
           </template>
         </el-table-column>
         <el-table-column prop="CreatedAt" label="创建时间" min-width="165">
-          <template #default="{ row }"><span class="muted">{{ row.CreatedAt }}</span></template>
+          <template #default="{ row }"><span class="muted">{{ row.created_at }}</span></template>
         </el-table-column>
         <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
             <el-button link :icon="Key" @click="openScopes(row)">授权</el-button>
             <el-button link @click="openReset(row)">重置密码</el-button>
-            <el-button link :type="row.Disabled ? 'success' : 'warning'" @click="toggleDisabled(row)">
-              {{ row.Disabled ? '启用' : '禁用' }}
+            <el-button link :type="row.disabled ? 'success' : 'warning'" @click="toggleDisabled(row)">
+              {{ row.disabled ? '启用' : '禁用' }}
             </el-button>
             <el-button link type="danger" :icon="Delete" @click="removeUser(row)" />
           </template>
@@ -277,7 +277,13 @@ async function kickSession(row: SessionInfo) {
     <el-card shadow="never" class="block">
       <template #header><span>在线会话（空闲 2 小时自动失效；server 重启全量失效）</span></template>
       <el-table :data="sessions" size="small">
-        <el-table-column prop="token" label="会话" min-width="140" />
+        <el-table-column label="会话" min-width="140">
+          <template #default="{ row }">
+            <!-- token 明文不整串展示（截图/投屏即泄露）；截前 8 位够辨识，
+                 完整值挂 title 按需查看 -->
+            <span :title="row.token">{{ row.token.slice(0, 8) }}…</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="user" label="用户" min-width="120" />
         <el-table-column prop="expires" label="过期时间" min-width="165" />
         <el-table-column label="操作" width="110" fixed="right">
@@ -315,7 +321,7 @@ async function kickSession(row: SessionInfo) {
     </el-dialog>
 
     <!-- 追加授权（scope 行编辑） -->
-    <el-dialog v-model="scopeVisible" :title="`追加授权 · ${scopeUser?.Name || ''}`" width="640px">
+    <el-dialog v-model="scopeVisible" :title="`追加授权 · ${scopeUser?.name || ''}`" width="640px">
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px"
         title="覆盖语义：某权限点一旦配了作用域行，即取代该点的全局授予——viewer + host:edit@池 是提权；给 host:view 配作用域则是把可见性收窄到该范围。" />
       <div v-for="(row, i) in scopeRows" :key="i" class="scope-row">
@@ -345,7 +351,7 @@ async function kickSession(row: SessionInfo) {
     </el-dialog>
 
     <!-- 重置密码 -->
-    <el-dialog v-model="passVisible" :title="`重置密码 · ${passUser?.Name || ''}`" width="420px">
+    <el-dialog v-model="passVisible" :title="`重置密码 · ${passUser?.name || ''}`" width="420px">
       <el-form label-width="80px">
         <el-form-item label="新密码" required>
           <el-input v-model="passForm.password" type="password" show-password placeholder="至少 8 位" />

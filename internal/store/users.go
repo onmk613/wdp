@@ -3,13 +3,13 @@ package store
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 
 	_ "modernc.org/sqlite"
 )
 
-// User 是控制台账号（MVP 单管理员；密码 bcrypt 散列）。
+// User 是控制台账号（角色 admin/operator/viewer，可按作用域追加授权；
+// 密码 bcrypt 散列）。
 type User struct {
 	ID           int64
 	Name         string
@@ -26,9 +26,6 @@ type UserScope struct {
 	Value string `json:"value"`
 }
 
-// EnrollToken 是一条主机纳管凭证：随机 token + TTL + 单次成功使用。
-// claim 阶段记录执行脚本的 hostname 与来源地址（证书 SAN 用），done 阶段
-
 func (s *Store) CountUsers() (int, error) {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
@@ -37,11 +34,24 @@ func (s *Store) CountUsers() (int, error) {
 	return n, nil
 }
 
-// CreateUser 新增账号（密码须为 bcrypt 散列；role 缺省 viewer——共享
-// 环境新用户最小权限起步，由管理员提权）。
+// validUserRole 校验角色枚举（与 web 层 builtinRoles 同一集合）。store
+// 不能反向依赖 web（web 导入 store），domain 层独立兜底：web 已把非法
+// 角色映射/拒绝，这里防的是绕过 web 直写 store 的调用方——任意串一旦
+// 入库，perm 语义会把空值当 operator、把未知值也当 operator 处理。
+func validUserRole(role string) bool {
+	switch role {
+	case "admin", "operator", "viewer":
+		return true
+	}
+	return false
+}
+
+// CreateUser 新增账号（密码须为 bcrypt 散列；role 必填且限
+// admin/operator/viewer——缺省语义由调用方显式决定，不再隐式补 viewer：
+// 空 role 入库会被 perm 当 operator，新账号静默拿到高于 viewer 的权限）。
 func (s *Store) CreateUser(name, passwordHash, role string) error {
-	if role == "" {
-		role = "viewer"
+	if !validUserRole(role) {
+		return Bizf("invalid role %q (admin | operator | viewer)", role)
 	}
 	_, err := s.db.Exec(`INSERT INTO users (name, password_hash, role, created_at) VALUES (?, ?, ?, ?)`, name, passwordHash, role, nowUTC())
 	return err
@@ -51,7 +61,7 @@ func (s *Store) CreateUser(name, passwordHash, role string) error {
 // （显式配置的管理员密码：改值后重启即改密）。
 func (s *Store) SetUserPassword(name, passwordHash string) error {
 	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("user name is required")
+		return Bizf("user name is required")
 	}
 	_, err := s.db.Exec(`INSERT INTO users (name, password_hash, created_at) VALUES (?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET password_hash = excluded.password_hash`,
@@ -105,32 +115,71 @@ func (s *Store) ListUsers() ([]*User, error) {
 	return out, rows.Err()
 }
 
-// UpdateUser 更新角色/禁用态（空字段保持不变）。
+// UpdateUser 更新角色/禁用态（空字段保持不变；role 非空时须为合法枚举）。
+// 最后一个活跃 admin 的降级/禁用在此原子拒绝：预检若只放 web 层
+// （CountAdmins 与 UPDATE 分离），并发双降级会同时通过预检、事后系统
+// 失去任何可用管理者。读取与 COUNT 同事务后，web 的预检退化为提前给
+// 出友好提示的快路径，语义与这里一致（Bizf → web 层自然 400）。
 func (s *Store) UpdateUser(id int64, role string, disabled *bool) error {
-	u, err := s.UserByID(id)
-	if err != nil {
+	// 空 = 保持不变（web 的 PATCH 语义）；非空非法值拒绝——store 层
+	// 兜底，理由见 validUserRole
+	if role != "" && !validUserRole(role) {
+		return Bizf("invalid role %q (admin | operator | viewer)", role)
+	}
+	return s.tx(func(q execer) error {
+		var curRole string
+		var curDisabled bool
+		if err := q.QueryRow(`SELECT role, disabled FROM users WHERE id = ?`, id).Scan(&curRole, &curDisabled); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		newRole, newDisabled := curRole, curDisabled
+		if role != "" {
+			newRole = role
+		}
+		if disabled != nil {
+			newDisabled = *disabled
+		}
+		// 目标当前是活跃 admin 且更新后将不再是（降级或禁用）：须还有
+		// 其他活跃 admin，否则拒绝（COUNT 与 UPDATE 同事务，杜绝窗口）
+		if curRole == "admin" && !curDisabled && (newRole != "admin" || newDisabled) {
+			var others int
+			if err := q.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?`, id).Scan(&others); err != nil {
+				return err
+			}
+			if others == 0 {
+				return Bizf("cannot demote/disable the last admin")
+			}
+		}
+		_, err := q.Exec(`UPDATE users SET role = ?, disabled = ? WHERE id = ?`, newRole, newDisabled, id)
 		return err
-	}
-	if role != "" {
-		u.Role = role
-	}
-	if disabled != nil {
-		u.Disabled = *disabled
-	}
-	res, err := s.db.Exec(`UPDATE users SET role = ?, disabled = ? WHERE id = ?`, u.Role, u.Disabled, id)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
+	})
 }
 
-// DeleteUser 删除账号及其授权（保留最后一个 admin 由调用方把关）。
+// DeleteUser 删除账号及其授权。最后一个活跃 admin 同样在此原子拒绝
+// （理由与 UpdateUser 相同：web 预检与 DELETE 分离存在并发双删窗口）。
 func (s *Store) DeleteUser(id int64) error {
 	// 账号与授权同事务：账号删掉而授权残留即为指向不存在账号的孤儿行
 	return s.tx(func(q execer) error {
+		var curRole string
+		var curDisabled bool
+		if err := q.QueryRow(`SELECT role, disabled FROM users WHERE id = ?`, id).Scan(&curRole, &curDisabled); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		if curRole == "admin" && !curDisabled {
+			var others int
+			if err := q.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0 AND id != ?`, id).Scan(&others); err != nil {
+				return err
+			}
+			if others == 0 {
+				return Bizf("cannot delete the last admin")
+			}
+		}
 		res, err := q.Exec(`DELETE FROM users WHERE id = ?`, id)
 		if err != nil {
 			return err

@@ -17,7 +17,6 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -51,7 +50,9 @@ func (s *Server) handleUpgradeHost(w http.ResponseWriter, r *http.Request) {
 	}
 	h, err := s.st.GetHost(id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "host not found")
+		// DB 故障≠主机不存在（writeStoreErr 分流，不再一律 404 把 500
+		// 掩盖成"删过了"误导运维）
+		s.writeStoreErr(w, err)
 		return
 	}
 	// 执行闸门：升级替换二进制期间不能并行跑部署脚本（同步请求限时获取）
@@ -65,12 +66,13 @@ func (s *Server) handleUpgradeHost(w http.ResponseWriter, r *http.Request) {
 		Force bool `json:"force"`
 	}
 	if r.Body != nil {
-		_ = decodeJSONBody(w, r, &req)
+		// 空/坏 JSON 不再静默按 force=false 继续：decode 失败即 400/413
+		//（与包内其他端点同口径，decodeJSON 失败时已写好响应）
+		if !decodeJSON(w, r, &req) {
+			return
+		}
 	}
-	// 升级流程同样脱离请求生命周期（与 exec.go 的口径一致）：断连 →
-	// ctx 取消 → 上传/替换中途被打断，目标机残留 .wdp-upgrade-* 临时
-	// 文件甚至二进制已换未重启的半完成态。代价是断连后响应写往死连接
-	//（无害），结果仍随响应前尽力写出。
+	// 升级流程同样脱离请求生命周期，动机见 background()
 	res := s.upgradeAgent(s.background(), h, req.Force)
 	if res.OK {
 		s.audit(r, "upgrade", "agent", h.Name, fmt.Sprintf("%s → %s", orUnknown(res.From), res.To))
@@ -82,13 +84,6 @@ func (s *Server) handleUpgradeHost(w http.ResponseWriter, r *http.Request) {
 		code = http.StatusBadGateway
 	}
 	writeJSON(w, code, res)
-}
-
-// decodeJSONBody 与 decodeJSON 同口径：上限 1MiB（无上限的解码可被恶意
-// 大体撑爆内存）。
-func decodeJSONBody(w http.ResponseWriter, r *http.Request, v any) error {
-	defer r.Body.Close()
-	return json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(v)
 }
 
 func orUnknown(v string) string {
@@ -149,15 +144,15 @@ func (s *Server) upgradeAgent(ctx context.Context, h *store.Host, force bool) Up
 		res.Detail = "打开二进制失败: " + err.Error()
 		return res
 	}
+	defer f.Close()
+	// 上传超时 5 分钟只封顶本次 UploadFile：uctx 不外传，后续 exec/探活
+	// 等待仍挂外层 ctx，defer 释放不改变超时的生效范围
 	uctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
 	if err := ac.UploadFile(uctx, tmp, f, 0o755); err != nil {
-		cancel()
-		f.Close()
 		res.Detail = "上传失败: " + err.Error()
 		return res
 	}
-	f.Close()
-	cancel()
 
 	// 5. 原子替换 + 重启。systemd restart 会杀掉 agent 自身 → 该 exec 的
 	//    HTTP 响应大概率中断，错误是预期，转入探活等待。

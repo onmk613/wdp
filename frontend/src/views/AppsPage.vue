@@ -9,6 +9,7 @@ import { Delete, Download, EditPen, PriceTag, Refresh, Star, Upload } from '@ele
 import { api, upload, appDownloadURL, type App, type AppVersion, type GroupEntry, type LabelDef, type Pool } from '../api'
 import LabelRows from '../components/LabelRows.vue'
 import { can } from '../auth'
+import { parseLabels } from '../lib/format'
 
 const router = useRouter()
 
@@ -39,14 +40,6 @@ async function load(silent = false) {
     if (!silent) ElMessage.error((e as Error).message)
   } finally {
     loading.value = false
-  }
-}
-
-function parseLabels(json: string): Record<string, string> {
-  try {
-    return JSON.parse(json || '{}')
-  } catch {
-    return {}
   }
 }
 
@@ -166,7 +159,9 @@ async function deleteVersion(app: App, v: AppVersion) {
     return
   }
   try {
-    versions[app.ID] = await api<AppVersion[]>('DELETE', `/api/apps/${app.ID}/versions/${v.ID}`)
+    // 版本列表不再消费 DELETE 响应：load() 会对展开行强制重拉版本
+    //（loadVersions(id, true)），此处再赋值就是同一份数据拉两遍
+    await api<AppVersion[]>('DELETE', `/api/apps/${app.ID}/versions/${v.ID}`)
     ElMessage.success('已删除')
     await load()
   } catch (e) {

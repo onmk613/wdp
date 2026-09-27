@@ -20,11 +20,10 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 	if name == "" {
 		name = p.Hosts
 	}
+	e.Rep.PlayStart(name, hostNames(hosts))
 	if e.Opts.ListHosts {
-		e.Rep.PlayStart(name, hostNames(hosts))
 		return false
 	}
-	e.Rep.PlayStart(name, hostNames(hosts))
 
 	stats := map[string]*model.Stats{}
 	e.statsMu.Lock()

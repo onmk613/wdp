@@ -1,7 +1,7 @@
 package console
 
 // chart 文件系统助手：安全路径拼接、chart 内写文件、目录复制、打包与
-// 摘要（从 web 迁入；上传与编辑器保存共用同一套实现）。
+// 摘要（上传与编辑器保存共用同一套实现）。
 
 import (
 	"archive/tar"
@@ -16,7 +16,7 @@ import (
 	"strings"
 )
 
-// packChart 把 chart 目录打包为 tgz（排序遍历，确定性输出）。
+// PackChart 把 chart 目录打包为 tgz（排序遍历，确定性输出）。
 func PackChart(srcDir, dstTgz string) error {
 	out, err := os.OpenFile(dstTgz, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
@@ -29,7 +29,11 @@ func PackChart(srcDir, dstTgz string) error {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() {
+		// 只收普通文件（与 CopyDir/ReadSpecFromDir 口径对齐）：符号链接在
+		// WalkDir 里 d.IsDir() 为 false，后续 os.Stat/os.Open 却会跟随它，
+		// 把链接目标的内容打进制品（可经下载端点外带；Lstat 权限位还是
+		// 0777）。解包侧（chart/tgz.go）已拒绝越界链接，这里独立挡一层。
+		if d.Type().IsRegular() {
 			paths = append(paths, path)
 		}
 		return nil
@@ -82,7 +86,7 @@ func PackChart(srcDir, dstTgz string) error {
 	return err
 }
 
-// copyDir 递归复制目录（保存修改时以底本版本为工作台）。
+// CopyDir 递归复制目录（保存修改时以底本版本为工作台）。
 func CopyDir(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -124,7 +128,7 @@ func CopyDir(src, dst string) error {
 	})
 }
 
-// writeChartFile 写入 chart 内文件（路径相对 chart 根，禁止越界）。
+// WriteChartFile 写入 chart 内文件（路径相对 chart 根，禁止越界）。
 func WriteChartFile(root, rel, content string) error {
 	abs, err := SecureJoin(root, filepath.ToSlash(rel))
 	if err != nil {
@@ -136,7 +140,7 @@ func WriteChartFile(root, rel, content string) error {
 	return os.WriteFile(abs, []byte(content), 0o644)
 }
 
-// secureJoin 路径安全拼接（拒绝越出 root 的路径，含 .. 与符号链接逃逸）。
+// SecureJoin 路径安全拼接（拒绝越出 root 的路径，含 .. 与符号链接逃逸）。
 func SecureJoin(root, rel string) (string, error) {
 	clean := filepath.Clean("/" + rel)
 	abs := filepath.Join(root, clean)
@@ -146,7 +150,7 @@ func SecureJoin(root, rel string) (string, error) {
 	return abs, nil
 }
 
-// fileSha256 计算文件 sha256（十六进制）。
+// FileSha256 计算文件 sha256（十六进制）。
 func FileSha256(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {

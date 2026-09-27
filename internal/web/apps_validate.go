@@ -14,7 +14,6 @@ import (
 
 	"wdp/internal/chart"
 	"wdp/internal/console"
-	"wdp/internal/store"
 )
 
 // validateIssue 是一条校验发现（与 chart.LintIssue 对应的 API 形态）。
@@ -67,11 +66,7 @@ func (s *Server) handleValidateSpec(w http.ResponseWriter, r *http.Request) {
 			}})
 			return
 		}
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("base version %s not found", baseVersion))
-			return
-		}
-		s.writeInternal(w, err)
+		s.writeStoreErr(w, err)
 		return
 	}
 	defer os.RemoveAll(workDir)

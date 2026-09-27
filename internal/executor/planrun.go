@@ -79,6 +79,9 @@ func (e *Executor) RunPlan(ctx context.Context, p *plan.Plan) bool {
 		}
 		seen[name] = true
 		for _, hp := range p.HostPlansOf(name) {
+			// 取首条 HostPlan 的连接元数据：假定同名主机在各 play 分片
+			// 的 Conn 一致；若不一致（端口/凭据演进），后续 play 全部沿用
+			// 首条且无告警——plan 编译当前不校验分片间一致性。
 			hosts = append(hosts, hp.Conn.Host(name))
 			break
 		}

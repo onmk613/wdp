@@ -41,7 +41,7 @@ watch(
     if (!exampleEl.value) return
     if (!exampleEditor) {
       exampleEditor = monaco.editor.create(exampleEl.value, {
-        ...editorOptions(monaco),
+        ...editorOptions(),
         readOnly: true,
         minimap: { enabled: false },
         scrollBeyondLastLine: false,
@@ -84,7 +84,7 @@ watch(
 <template>
   <div class="bottom-panel">
     <div class="panel-head">
-      <el-radio-group :model-value="panel === 'none' ? tab : tab" size="small" @update:model-value="onTab">
+      <el-radio-group :model-value="tab" size="small" @update:model-value="onTab">
         <el-radio-button value="problems">问题（{{ problems.length }}）</el-radio-button>
         <el-radio-button value="doc">模块文档</el-radio-button>
       </el-radio-group>

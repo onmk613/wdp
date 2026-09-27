@@ -126,6 +126,49 @@ func TestRBACRoleAndScope(t *testing.T) {
 	}
 }
 
+// TestHostUpdateScopeWrite 单台 PUT /api/hosts 的写入校验回归：新归属
+// （池/组/标签）必须整体落在 host:edit 授权内（与批量 assign 同口径），
+// allow_plaintext 开关收敛到 host:enroll——此前 PUT 整体替换请求体，
+// scoped 用户可把主机挪进任意池扩大可见面，或把已纳管主机降级明文。
+func TestHostUpdateScopeWrite(t *testing.T) {
+	s, st := newAppServer(t, 18772)
+	h := s.Handler()
+	admin := loginSession2(t, s, "e2e-pass-1")
+
+	st.CreateHost(&store.Host{Name: "ha", Address: "127.0.0.1", AgentPort: 1, Pools: []string{"pool-a"}})
+	hostsAll, _ := st.ListHosts("")
+	var haID int64
+	for _, hh := range hostsAll {
+		if hh.Name == "ha" {
+			haID = hh.ID
+		}
+	}
+	scoped := newUserSession(t, h, admin, "scopedw", "scoped-Pass1", "viewer")
+	do(t, h, "PUT", fmt.Sprintf("/api/users/%d/scopes", userIDByName(t, st, "scopedw")), map[string]any{
+		"scopes": []map[string]any{{"verb": "host:edit", "kind": "pool", "value": "pool-a"}},
+	}, &admin)
+
+	// 授权外目标池：403（写入校验，matchScope"任一命中"不够）
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "Pools": []string{"pool-b"}}, &scoped); rec.Code != http.StatusForbidden {
+		t.Fatalf("scoped 挪出授权池应 403: %d %s", rec.Code, rec.Body)
+	}
+	// 授权外标签键同样拒绝（labels 驱动 label 型授权面）
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "Pools": []string{"pool-a"}, "Labels": `{"zone":"dmz"}`}, &scoped); rec.Code != http.StatusForbidden {
+		t.Fatalf("scoped 打授权外标签应 403: %d %s", rec.Code, rec.Body)
+	}
+	// 授权内目标值放行
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "Pools": []string{"pool-a"}}, &scoped); rec.Code != http.StatusOK {
+		t.Fatalf("授权内改动应 200: %d %s", rec.Code, rec.Body)
+	}
+	// allow_plaintext 是通道信任模型开关：host:edit 不带 host:enroll 不可改
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "allow_plaintext": true}, &scoped); rec.Code != http.StatusForbidden {
+		t.Fatalf("scoped 置 allow_plaintext 应 403: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "allow_plaintext": true}, &admin); rec.Code != http.StatusOK {
+		t.Fatalf("admin 置 allow_plaintext 应 200: %d %s", rec.Code, rec.Body)
+	}
+}
+
 // TestExecTargetsIsolation 执行目标资源裁剪：scoped 用户的目标清单只含
 // 授权范围内的主机，restricted=true；全局用户拿全量。
 func TestExecTargetsIsolation(t *testing.T) {

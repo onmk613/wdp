@@ -25,15 +25,12 @@ var commonShells = []string{"/sbin/nologin", "/bin/false", "/bin/bash"}
 // 系统级变更不可回滚（与 package 模块同样视为不可逆操作，不登记回滚日志）。
 type UserModule struct{}
 
-// Name 模块名。
 func (m *UserModule) Name() string { return "user" }
 
-// Desc 模块说明。
 func (m *UserModule) Desc() string {
 	return "manage system users (create/delete/attribute correction)"
 }
 
-// Params 参数文档。
 func (m *UserModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "name", Type: "string", Desc: "user name"},
@@ -49,7 +46,6 @@ func (m *UserModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *UserModule) Example() string {
 	return `# create a deploy user and add it to the docker group
 - name: create the deploy user
@@ -95,7 +91,7 @@ type userReq struct {
 func parseUserArgs(args map[string]any) (*userReq, *Result) {
 	name, ok := argStr(args, "name")
 	if !ok || name == "" {
-		return nil, Fail("%s", "user requires a name parameter")
+		return nil, Fail("user requires a name parameter")
 	}
 	state, ok := parseState(args, "present", userStates...)
 	if !ok {
@@ -145,7 +141,7 @@ func userAbsent(rc *RunContext, name string, exists bool) *Result {
 		return &Result{Msg: fmt.Sprintf("user %s does not exist", name)}
 	}
 	if !rc.Become {
-		return Fail("%s", "deleting a user requires become: true")
+		return Fail("deleting a user requires become: true")
 	}
 	if rc.CheckMode {
 		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] user %s would be removed (including home)", name)}
@@ -165,7 +161,7 @@ func userAbsent(rc *RunContext, name string, exists bool) *Result {
 // userCreate 创建缺失用户（useradd flags 组装；check 模式输出创建内容 diff）。
 func userCreate(rc *RunContext, u *userReq) *Result {
 	if !rc.Become {
-		return Fail("%s", "creating a user requires become: true")
+		return Fail("creating a user requires become: true")
 	}
 	var flags []string
 	if u.system {
@@ -210,7 +206,7 @@ func userCreate(rc *RunContext, u *userReq) *Result {
 			if u.home != "" {
 				d = append(d, "+ home "+u.home)
 			}
-			res.Diff = joinLines(d)
+			res.Diff = strings.Join(d, "\n")
 		}
 		return res
 	}
@@ -237,10 +233,10 @@ func userModify(rc *RunContext, u *userReq) *Result {
 	if rc.CheckMode {
 		res := &Result{
 			Changed: true,
-			Msg:     fmt.Sprintf("[check] user %s: would adjust %s", u.name, strings.Join(drift, "、")),
+			Msg:     fmt.Sprintf("[check] user %s: would adjust %s", u.name, strings.Join(drift, ", ")),
 		}
 		if rc.DiffMode { // 与其他模块一致：Diff 仅在 --diff 下填充
-			res.Diff = joinLines(diffLines)
+			res.Diff = strings.Join(diffLines, "\n")
 		}
 		return res
 	}
@@ -400,7 +396,6 @@ func userPasswd(rc *RunContext, name string) (string, string, *Result) {
 	return home, shell, nil
 }
 
-// containsStr 简易包含判断（小列表线性扫即可）。
 // joinSorted 逗号连接（已排序列表展示用）。
 func joinSorted(items []string) string {
 	return strings.Join(items, ",")

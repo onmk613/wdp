@@ -49,6 +49,14 @@ func OpenJournal(path string) (*Journal, error) {
 }
 
 // Append 写入一条记录（分配递增 seq；fsync 保证断电后已提交条目不丢）。
+// 游标语义：seq 是"增量拉取的 since 游标"（ReadJournal 以 e.Seq > since
+// 过滤），跳号无害——写失败（Write/Sync 出错）不回滚 seq：
+//   - 失败条目不落盘（或只有半截坏行，ReadJournal 的坏行容错会跳过），
+//     下一条成功条目 seq 更大，增量拉取照常命中，不漏读；
+//   - 反而若回滚 seq，部分写入成功后（Write 报错但字节已入页缓存）下一条
+//     会复用同一 seq，同 seq 双行在增量游标语义下有重复消费风险。
+//
+// Marshal 失败发生在任何字节落盘之前，回滚安全，故仅该路径回退。
 func (j *Journal) Append(e JournalEntry) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()

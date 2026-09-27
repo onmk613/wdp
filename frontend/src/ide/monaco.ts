@@ -2,55 +2,64 @@
 // 本地打包（内网部署，禁止 CDN）、yaml 诊断由 monaco-yaml 提供、
 // gotemplate 自定义语言（{{ }} 模板文件的着色）。
 //
-// 所有 provider 的注册在 setupMonaco 一次性完成（幂等），语言特性拿到
-// 的是共享的 IDE 上下文对象（fs/schema/modules），内容变化时上下文自身
-// 更新即可，无需反复注册 provider。
+// 补全 provider 不在此注册：每个 IDE 视图挂载时经 complete.ts 的
+// registerProviders 注册（provider 在 monaco 语言层全局生效，视图卸载
+// 时 dispose，否则路由往返会叠加）。语言特性闭包捕获共享的上下文对象
+// （fs/schema/modules），内容变化时上下文自身更新即可，无需反复注册。
 
 import type * as Monaco from 'monaco-editor'
+import type { MonacoYamlOptions } from 'monaco-yaml'
 
 export type MonacoNs = typeof Monaco
+
+// loadMonaco 把实例挂到 window（worker 与跨模块 late-binding 共用），
+// 此处给出声明，消掉散落的 (window as any)
+declare global {
+  interface Window {
+    __wdpMonaco?: MonacoNs
+  }
+}
 
 let monacoPromise: Promise<MonacoNs> | null = null
 
 export function modelURI(path: string): Monaco.Uri {
-  // 自定义 scheme：fileMatch 按完整 uri 匹配，路径即 chart 相对路径
-  return (monacoRef() as any).Uri.parse(`wdpchart:/${path}`)
+  // 自定义 scheme：fileMatch 按完整 uri 匹配，路径即 chart 相对路径。
+  // 调用点都在 loadMonaco() 完成之后；未加载即调用属程序错误，显式报出
+  const monaco = monacoRef()
+  if (!monaco) throw new Error('Monaco 尚未加载：modelURI 需在 loadMonaco() 之后调用')
+  return monaco.Uri.parse(`wdpchart:/${path}`)
 }
 
 function monacoRef(): MonacoNs | null {
-  return (window as any).__wdpMonaco ?? null
-}
-
-// IDE 上下文：provider 闭包捕获这份可变对象（内容变化时 AppIDE 更新它）
-export interface IDECtx {
-  getText: (path: string) => string | undefined // 当前文件内容（fs/草稿为准）
-  listPaths: () => string[] // 全部未删除文件
+  return window.__wdpMonaco ?? null
 }
 
 export async function loadMonaco(): Promise<MonacoNs> {
   if (monacoPromise) return monacoPromise
   monacoPromise = (async () => {
-    const [monaco, yamlMod, editorWorker, yamlWorker] = await Promise.all([
+    // Vite ?worker 导入形如 { default: new () => Worker }（无内置类型）
+    type WorkerMod = { default: new () => Worker }
+    const [monaco, yamlMod, editorWorkerMod, yamlWorkerMod] = await Promise.all([
       import('monaco-editor'),
       import('monaco-yaml'),
-      import('monaco-editor/esm/vs/editor/editor.worker?worker'),
-      import('monaco-yaml/yaml.worker?worker'),
+      import('monaco-editor/esm/vs/editor/editor.worker?worker') as Promise<WorkerMod>,
+      import('monaco-yaml/yaml.worker?worker') as Promise<WorkerMod>,
     ])
-    ;(window as any).__wdpMonaco = monaco
-    ;(self as any).MonacoEnvironment = {
+    window.__wdpMonaco = monaco
+    const monacoEnv: Monaco.Environment = {
       getWorker(_: string, label: string) {
-        if (label === 'yaml') return new (yamlWorker as any).default()
-        return new (editorWorker as any).default()
+        return label === 'yaml' ? new yamlWorkerMod.default() : new editorWorkerMod.default()
       },
     }
+    ;(self as unknown as { MonacoEnvironment: Monaco.Environment }).MonacoEnvironment = monacoEnv
     // monaco-yaml 注册 yaml 语言与诊断；schema 由 schemas.ts 按文件装配后
     // 重新调用 configureMonacoYaml 更新（可重复配置，返回 IDisposable 不持有）
     // completion 关闭：键补全由 complete.ts 的 provider 独占（模块名/
     // 参数/控制键带中文文档与骨架）。schema 补全开着会出第二套同名
     // 候选（when/become/name/chart…两份，且无文档），用户看到重复项。
     // validate（语法+schema 类型校验）与 hover（字段文档）保留
-    ;(yamlMod as any).configureMonacoYaml(monaco, {
-      enableSchemaRequests: false,
+    yamlMod.configureMonacoYaml(monaco, {
+      enableSchemaRequest: false,
       validate: true,
       completion: false,
       hover: true,
@@ -66,9 +75,9 @@ export async function loadMonaco(): Promise<MonacoNs> {
 
 // configureYaml 重新装配 monaco-yaml 的 schema 集合（文件增删/改名后
 // 调用；fire-and-forget，调用方不等待）
-export function configureYaml(opts: any): void {
+export function configureYaml(opts: MonacoYamlOptions): void {
   void loadMonaco().then((monaco) => {
-    void import('monaco-yaml').then((m: any) => m.configureMonacoYaml(monaco, opts))
+    void import('monaco-yaml').then((m) => m.configureMonacoYaml(monaco, opts))
   })
 }
 
@@ -132,7 +141,7 @@ export function bindSuggestKey(monaco: MonacoNs, editor: Monaco.editor.IStandalo
     editor.trigger('keyboard', 'editor.action.triggerSuggest', null))
 }
 
-export function editorOptions(monaco: MonacoNs): Monaco.editor.IStandaloneEditorConstructionOptions {
+export function editorOptions(): Monaco.editor.IStandaloneEditorConstructionOptions {
   return {
     theme: 'wdp',
     automaticLayout: true,
@@ -163,7 +172,6 @@ export function editorOptions(monaco: MonacoNs): Monaco.editor.IStandaloneEditor
   }
 }
 
-// languageFor 按路径选语言
 export function languageFor(path: string): string {
   if (/\.ya?ml$/.test(path)) return 'yaml'
   if (/\.tpl$/.test(path)) return 'gotemplate'

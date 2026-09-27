@@ -11,6 +11,7 @@ import (
 
 // Manager 按主机懒建立并复用连接，play 结束时统一关闭。
 // 建连并发由信号量限制，防止大规模主机瞬时握手洪峰。
+// Get 返回的连接带自愈语义（healing.go）：失效自动作废、下次操作前重建。
 type Manager struct {
 	mu     sync.Mutex
 	conns  map[string]Conn
@@ -30,12 +31,43 @@ func NewManagerWithDefaults(dc *Defaults) *Manager {
 	return &Manager{conns: map[string]Conn{}, defaults: dc}
 }
 
-// SetConnectConcurrency 设置并发建连上限（应在首次 Get 前调用）。
+// SetConnectConcurrency 设置并发建连上限（应在首次 Get 前调用；已设置
+// 的上限不可再改）。connectSem 的写在本包 m.mu 内、dial 侧在锁内快照
+// 引用后于锁外 acquire——否则并发 Set 与正在进行的 dial 对该字段的
+// 读写是数据竞争。Get 的获取路径全程不在持 m.mu 时进入 dial，锁序
+// 单向（m.mu 不会被 dial 反向持有），无死锁风险。
 func (m *Manager) SetConnectConcurrency(n int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if n <= 0 || m.connectSem != nil {
 		return
 	}
 	m.connectSem = make(chan struct{}, n)
+}
+
+// dial 建立一条新连接（建连限流 + 握手全程不持 m.mu：锁内握手会把并发
+// 建连退化成串行，使限流形同虚设）。healingConn 重建时复用同一路径。
+func (m *Manager) dial(ctx context.Context, h *model.Host) (Conn, error) {
+	m.mu.Lock()
+	sem := m.connectSem // 锁内快照：与 SetConnectConcurrency 的写入互斥
+	m.mu.Unlock()
+	if sem != nil {
+		select {
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	c, err := NewConnection(h, m.defaults)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.Connect(ctx); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("host %s connection failed: %w", h.Name, err)
+	}
+	return c, nil
 }
 
 // Get 返回主机的活动连接，必要时建立。
@@ -51,25 +83,9 @@ func (m *Manager) Get(ctx context.Context, h *model.Host) (Conn, error) {
 	}
 	m.mu.Unlock()
 
-	// 建连限流（握手在锁外进行，允许并发）
-	if m.connectSem != nil {
-		select {
-		case m.connectSem <- struct{}{}:
-			defer func() { <-m.connectSem }()
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-
-	// 握手全程不持锁（锁内握手会把并发建连退化成串行，使限流形同虚设）；
-	// 并发下对同一主机的重复建连在落表时收敛，输家关闭自己多余的连接。
-	c, err := NewConnection(h, m.defaults)
+	c, err := m.dial(ctx, h)
 	if err != nil {
 		return nil, err
-	}
-	if err := c.Connect(ctx); err != nil {
-		_ = c.Close()
-		return nil, fmt.Errorf("host %s connection failed: %w", h.Name, err)
 	}
 
 	m.mu.Lock()
@@ -83,12 +99,13 @@ func (m *Manager) Get(ctx context.Context, h *model.Host) (Conn, error) {
 		_ = c.Close()
 		return old, nil
 	}
-	m.conns[h.Name] = c
+	hc := &healingConn{mgr: m, host: h, inner: c}
+	m.conns[h.Name] = hc
 	m.mu.Unlock()
-	return c, nil
+	return hc, nil
 }
 
-// CloseAll 关闭全部连接（幂等）。
+// CloseAll 关闭全部连接（幂等）。关闭的是自愈包装，包装再关底层连接。
 func (m *Manager) CloseAll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()

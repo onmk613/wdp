@@ -112,7 +112,7 @@ func TaskFieldSections() []model.FieldSection {
 			},
 			Example: `
 - name: 用指定版本部署 jdk 子 chart 的安装相位
-  chart: jdk
+  chart: {name: jdk}
   vars: {version: "17", mirror: "https://mirror.internal"}
   tasks_from: install
 `,

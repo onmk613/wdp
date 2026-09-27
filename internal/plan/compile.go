@@ -37,21 +37,30 @@ type CompileOptions struct {
 	// inventory_override。
 	HostValues map[string]map[string]any
 
-	Limits chart.Limits // 加载上限（tgz 解包等）
+	Limits chart.Limits // 加载上限（tgz 解包等）；Compile 便捷入口加载 target 时使用，CompileChart 忽略
 }
 
-// Compile 编译执行计划。target 是 chart 目录或 .tgz；inv 提供主机选择与
-// 内置变量快照；valuesFiles/setArgs 是 -f/--set 覆盖（仅部署相位使用）。
+// Compile 编译执行计划（便捷入口：自行按 target 加载 chart）。target 是
+// chart 目录或 .tgz；inv 提供主机选择与内置变量快照；valuesFiles/setArgs
+// 是 -f/--set 覆盖（仅部署相位使用）。已持有 chart 的调用方（marker 相位
+// 需先加载 chart 读相位与主机）走 CompileChart 免去二次加载。
 func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []string, opts CompileOptions) (*Plan, error) {
-	phase := opts.Phase
-	if phase == "" {
-		phase = "deploy"
-	}
 	ch, err := chart.LoadWithLimits(target, opts.Limits)
 	if err != nil {
 		return nil, err
 	}
 	defer ch.Close()
+	return CompileChart(ch, inv, valuesFiles, setArgs, opts)
+}
+
+// CompileChart 在已加载的 chart 上编译执行计划（参数语义同 Compile）。
+// chart 的生命周期归调用方：编译期间须保持打开（tgz 形态挂着解包临时
+// 目录），结束后自行 Close。
+func CompileChart(ch *chart.Chart, inv *inventory.Inventory, valuesFiles, setArgs []string, opts CompileOptions) (*Plan, error) {
+	phase := opts.Phase
+	if phase == "" {
+		phase = "deploy"
+	}
 
 	plays, err := ch.PhasePlays(phase)
 	if err != nil {
@@ -59,34 +68,9 @@ func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []str
 	}
 	spec := ch.PhaseSpecFor(phase)
 
-	values := map[string]any{}
-	switch spec.EffectiveValuesFrom() {
-	case chart.ValuesFromChart:
-		values, err = ch.BuildValues(valuesFiles, setArgs)
-		if err != nil {
-			return nil, err
-		}
-		// 与 run 同门控：只有部署事件相位强制 required + schema
-		if spec.Release {
-			if err := ch.ValidateRequired(values); err != nil {
-				return nil, err
-			}
-			if err := ch.ValidateValuesSchema(values); err != nil {
-				return nil, err
-			}
-			if err := ch.ValidateSubchartsSchema(values); err != nil {
-				return nil, err
-			}
-		}
-	default: // ValuesFromMarker
-		if len(opts.HostValues) == 0 {
-			return nil, fmt.Errorf("phase %q resolves values from host release markers; pass the resolved per-host values (compile after reading markers)", phase)
-		}
-		// 代表性 values 必须确定：map 迭代随机会让两次编译产出不同
-		// Plan.Values/PlanID，破坏"逐字节相同 plan.json"的内容寻址承诺。
-		// 取主机名字典序首个。
-		first := slices.Sorted(maps.Keys(opts.HostValues))[0]
-		values = opts.HostValues[first]
+	values, err := compileValues(ch, phase, spec, valuesFiles, setArgs, opts.HostValues)
+	if err != nil {
+		return nil, err
 	}
 
 	files, payloads, err := snapshotFiles(ch.Dir)
@@ -108,7 +92,60 @@ func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []str
 		Files:      files,
 		Payloads:   payloads,
 	}
-	// idx 按主机顺序统一编号（journal 的 (主机, 任务) 键要求主机内唯一且稳定）
+	p.Hosts = compileHostPlans(inv, ch, plays, phase, values, opts, facts)
+	// via 中继根的连接元数据单列：中继机不一定是部署目标，其连接信息不
+	// 在 Hosts 里；自治提交按根分组时需要
+	if relays := compileRelays(inv, p.Hosts); len(relays) > 0 {
+		p.Relays = relays
+	}
+	if err := p.FillID(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// compileValues 按相位语义解析代表性 values：部署事件相位取 chart 默认
+// values + 覆盖并过 required/schema 校验；marker 相位要求调用方传入逐
+// 主机还原值，代表值取主机名字典序首个。
+func compileValues(ch *chart.Chart, phase string, spec chart.PhaseSpec, valuesFiles, setArgs []string, hostValues map[string]map[string]any) (map[string]any, error) {
+	values := map[string]any{}
+	switch spec.EffectiveValuesFrom() {
+	case chart.ValuesFromChart:
+		var err error
+		values, err = ch.BuildValues(valuesFiles, setArgs)
+		if err != nil {
+			return nil, err
+		}
+		// 与 run 同门控：只有部署事件相位强制 required + schema
+		if spec.Release {
+			if err := ch.ValidateRequired(values); err != nil {
+				return nil, err
+			}
+			if err := ch.ValidateValuesSchema(values); err != nil {
+				return nil, err
+			}
+			if err := ch.ValidateSubchartsSchema(values); err != nil {
+				return nil, err
+			}
+		}
+	default: // ValuesFromMarker
+		if len(hostValues) == 0 {
+			return nil, fmt.Errorf("phase %q resolves values from host release markers; pass the resolved per-host values (compile after reading markers)", phase)
+		}
+		// 代表性 values 必须确定：map 迭代随机会让两次编译产出不同
+		// Plan.Values/PlanID，破坏"逐字节相同 plan.json"的内容寻址承诺。
+		// 取主机名字典序首个。
+		first := slices.Sorted(maps.Keys(hostValues))[0]
+		values = hostValues[first]
+	}
+	return values, nil
+}
+
+// compileHostPlans 按 play × host 编译主机计划：连接元数据（含 via 链）、
+// 主机 values 与变量域快照在此冻结，任务树解析为计划镜像。
+// idx 按主机顺序统一编号（journal 的 (主机, 任务) 键要求主机内唯一且稳定）
+func compileHostPlans(inv *inventory.Inventory, ch *chart.Chart, plays []*model.Play, phase string, values map[string]any, opts CompileOptions, facts map[string]map[string]any) []*HostPlan {
+	var hostPlans []*HostPlan
 	counters := map[string]int{}
 	for playIdx, play := range plays {
 		hosts := inv.SelectPlays([]*model.Play{play}, opts.Limit)
@@ -141,14 +178,17 @@ func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []str
 				n += countResolved(resolved)
 			}
 			counters[h.Name] = n
-			p.Hosts = append(p.Hosts, hp)
+			hostPlans = append(hostPlans, hp)
 		}
 	}
-	// via 中继根的连接元数据单列：中继机不一定是部署目标，其连接信息不
-	// 在 Hosts 里；自治提交按根分组时需要
+	return hostPlans
+}
+
+// compileRelays 收集 via 中继根的连接元数据（不在 Hosts 里的非目标中继机）。
+func compileRelays(inv *inventory.Inventory, hostPlans []*HostPlan) map[string]HostConn {
 	relays := map[string]HostConn{}
 	targets := map[string]bool{}
-	for _, hp := range p.Hosts {
+	for _, hp := range hostPlans {
 		targets[hp.Host] = true
 	}
 	for _, h := range inv.Hosts {
@@ -159,13 +199,7 @@ func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []str
 			}
 		}
 	}
-	if len(relays) > 0 {
-		p.Relays = relays
-	}
-	if err := p.FillID(); err != nil {
-		return nil, err
-	}
-	return p, nil
+	return relays
 }
 
 // countResolved 统计任务树节点数（block 子任务递归计入 idx 空间）。
@@ -409,53 +443,63 @@ func rollbackOf(t *model.Task) string {
 // 分发或 apply 时经 --chart-dir 本地补齐——plan 是配置与意图的载体。
 const payloadDirName = "packages"
 
+// snapshotFileEnt 是 walk 期缓存的文件条目：相对路径 + 目录项自带的
+// FileInfo。快照循环里再逐个 os.Stat 既多一倍系统调用，也引入 walk 与
+// stat 之间文件被替换的观察口径漂移（TOCTOU）——统一以 walk 时刻的
+// d.Info() 为准。
+type snapshotFileEnt struct {
+	rel  string
+	info fs.FileInfo
+}
+
 // snapshotFiles 以确定序快照 chart 目录树：packages/ 与超限大文件记录为
 // PayloadRef（路径+尺寸+sha256，不进 plan 本体），其余小文件嵌入 base64。
 func snapshotFiles(dir string) (map[string]string, []PayloadRef, error) {
 	files := map[string]string{}
 	var payloads []PayloadRef
-	var paths []string
+	var ents []snapshotFileEnt
 	var total int64
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		rel, rerr := filepath.Rel(dir, path)
 		if rerr != nil {
 			return rerr
 		}
-		if !d.Type().IsRegular() {
-			return nil
+		info, ierr := d.Info()
+		if ierr != nil {
+			return ierr
 		}
-		paths = append(paths, rel)
+		ents = append(ents, snapshotFileEnt{rel: rel, info: info})
 		return nil
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to snapshot chart files: %w", err)
 	}
-	sort.Strings(paths)
-	for _, rel := range paths {
-		info, err := os.Stat(filepath.Join(dir, rel))
-		if err != nil {
-			return nil, nil, err
-		}
-		if info.Size() > maxFileBytes || isPayloadPath(rel) {
-			sum, err := fileSHA256(filepath.Join(dir, rel))
+	sort.Slice(ents, func(i, j int) bool { return ents[i].rel < ents[j].rel })
+	for _, ent := range ents {
+		path := filepath.Join(dir, ent.rel)
+		if ent.info.Size() > maxFileBytes || isPayloadPath(ent.rel) {
+			sum, err := fileSHA256(path)
 			if err != nil {
 				return nil, nil, err
 			}
-			payloads = append(payloads, PayloadRef{Path: rel, Size: info.Size(), SHA256: sum})
+			payloads = append(payloads, PayloadRef{Path: ent.rel, Size: ent.info.Size(), SHA256: sum})
 			continue
 		}
-		total += info.Size()
+		total += ent.info.Size()
 		if total > maxTotalBytes {
 			return nil, nil, fmt.Errorf("chart tree exceeds the %d MiB plan total; move large payloads out of the chart (artifact module distributes them by URL)", maxTotalBytes>>20)
 		}
-		data, err := os.ReadFile(filepath.Join(dir, rel))
+		data, err := os.ReadFile(path)
 		if err != nil {
 			return nil, nil, err
 		}
-		files[rel] = base64.StdEncoding.EncodeToString(data)
+		files[ent.rel] = base64.StdEncoding.EncodeToString(data)
 	}
 	return files, payloads, nil
 }

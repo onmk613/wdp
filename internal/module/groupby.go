@@ -2,7 +2,6 @@ package module
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 )
 
@@ -22,10 +21,8 @@ func init() {
 // hosts 选择与 .groups 内置变量从下一批次/play 起可见。
 type GroupByModule struct{}
 
-// Name 模块名。
 func (m *GroupByModule) Name() string { return "group_by" }
 
-// Desc 模块说明。
 func (m *GroupByModule) Desc() string {
 	return "build dynamic groups from vars/facts (used by later plays host selection)"
 }
@@ -37,7 +34,7 @@ func (m *GroupByModule) Run(_ *RunContext, args map[string]any, free string) *Re
 		name = strings.TrimSpace(n)
 	}
 	if name == "" {
-		return Fail("%s", "group_by requires a group name (name parameter or free-form)")
+		return Fail("group_by requires a group name (name parameter or free-form)")
 	}
 	group := name
 	if prefix, ok := argStr(args, "prefix"); ok && prefix != "" {
@@ -46,21 +43,6 @@ func (m *GroupByModule) Run(_ *RunContext, args map[string]any, free string) *Re
 	return &Result{Groups: []string{group}, Msg: fmt.Sprintf("joined dynamic group %s", group)}
 }
 
-// SortGroups 排序去重组名列表（executor 聚合辅助）。
-func SortGroups(groups []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0, len(groups))
-	for _, g := range groups {
-		if !seen[g] {
-			seen[g] = true
-			out = append(out, g)
-		}
-	}
-	slices.Sort(out)
-	return out
-}
-
-// Params 参数文档。
 func (m *GroupByModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "name", Type: "string", Desc: "group name expression (the rendered template becomes the group name; free-form works too)"},
@@ -69,7 +51,6 @@ func (m *GroupByModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *GroupByModule) Example() string {
 	return `- name: group hosts dynamically by OS family
   group_by: 'os_{{ .os.family }}'

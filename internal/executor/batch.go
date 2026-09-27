@@ -186,29 +186,26 @@ func (e *Executor) flushHandlers(ctx context.Context, p *model.Play, runs []*hos
 }
 
 // recordResult 计入统计（含子 chart 子任务路径）。
+// 两条路径统一持 statsMu：stats 与 e.stats 是同一个 map（runPlay 整体替换
+// e.stats = stats 后逐层传入），子 chart/block 路径在 fanOut goroutine 内
+// 并发到达（stats==nil 走 e.stats），主流程路径（stats 显式传入）此前靠
+// "写点都在 fanOut 的 wg.Wait() 之后"的隐式时序保证安全——该约定脆弱
+// （任何新增的并发写点都会静默破坏它），纯收紧为恒持锁消除整类竞争。
+// statsMu 无重入场景（LastStats/mergeStats 均在 play 边界调用），无死锁风险。
 func (e *Executor) recordResult(hr *hostRun, r *model.TaskResult, stats map[string]*model.Stats, ignore bool) {
-	if stats == nil {
-		// 子 chart/block 子任务路径在 fanOut goroutine 内并发到达：
-		// e.stats 的读取与缺失键的 get-or-create 必须整体在 statsMu 内——
-		// 锁外读并写 map 在并发 fan-out 下是未定义行为（当前恰好被
-		// prepareBatchRuns 预填掩盖，一旦有未预填主机即并发写 map 崩溃）
-		e.statsMu.Lock()
-		defer e.statsMu.Unlock()
-		if e.stats == nil {
-			return
-		}
-		s := e.stats[hr.host.Name]
-		if s == nil {
-			s = &model.Stats{}
-			e.stats[hr.host.Name] = s
-		}
-		countResult(s, r, ignore)
+	e.statsMu.Lock()
+	defer e.statsMu.Unlock()
+	m := stats
+	if m == nil {
+		m = e.stats
+	}
+	if m == nil {
 		return
 	}
-	s, ok := stats[hr.host.Name]
-	if !ok {
+	s := m[hr.host.Name]
+	if s == nil {
 		s = &model.Stats{}
-		stats[hr.host.Name] = s
+		m[hr.host.Name] = s
 	}
 	countResult(s, r, ignore)
 }
@@ -241,7 +238,7 @@ type fanResult struct {
 // fanOut 将任务并发派发到所有存活主机。
 func (e *Executor) fanOut(ctx context.Context, p *model.Play, task *model.Task, runs []*hostRun) []fanResult {
 	if task.ChartRef == "" && task.Block == nil {
-		if _, _, ok := module.Resolve(task.Module, e.allScriptModuleDirs(runs)); !ok {
+		if _, _, ok := module.Resolve(task.Module, e.batchScriptDirs(runs)); !ok {
 			out := make([]fanResult, 0, len(runs))
 			for _, hr := range runs {
 				if !hr.alive {
@@ -262,41 +259,59 @@ func (e *Executor) fanOut(ctx context.Context, p *model.Play, task *model.Task, 
 		return e.fanOutRunOnce(ctx, p, task, runs)
 	}
 
-	sem := make(chan struct{}, e.Opts.Forks)
+	// 固定 worker 池（数量 = forks）：此前"先全量起 goroutine、信号量在
+	// goroutine 内获取"的写法在万级主机同刻创建万级 goroutine（每个约
+	// 8KB 栈起步 + hostRun 闭包引用），内存尖峰与调度抖动都不可控；池化
+	// 后存活 goroutine 恒为 min(forks, 存活主机数)。行为不变：主机处理
+	// 顺序本就并发无序，结果经 mu 保护的 out 聚合，消费方（runBatchTasks/
+	// flushHandlers）按 host 字段取用、不依赖完成顺序；全部派发的主机
+	// 仍都会被处理（jobs 由 worker 排空，ctx 取消时任务自身快速失败）。
+	targets := make([]*hostRun, 0, len(runs))
+	for _, hr := range runs {
+		if hr.alive {
+			targets = append(targets, hr)
+		}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	workers := min(e.Opts.Forks, len(targets))
+	jobs := make(chan *hostRun)
 	var wg sync.WaitGroup
 	var mu sync.Mutex
-	out := make([]fanResult, 0, len(runs))
-	for _, hr := range runs {
-		if !hr.alive {
-			continue
-		}
+	out := make([]fanResult, 0, len(targets))
+	for range workers {
 		wg.Add(1)
-		go func(hr *hostRun) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			res := e.runTaskOnHost(ctx, p, task, hr)
-			mu.Lock()
-			out = append(out, fanResult{hr, res})
-			mu.Unlock()
-		}(hr)
+			for hr := range jobs {
+				res := e.runTaskOnHost(ctx, p, task, hr)
+				mu.Lock()
+				out = append(out, fanResult{hr, res})
+				mu.Unlock()
+			}
+		}()
 	}
+	for _, hr := range targets {
+		jobs <- hr
+	}
+	close(jobs)
 	wg.Wait()
 	return out
 }
 
-// allScriptModuleDirs 汇总批次内全部主机的脚本模块查找目录（chart 根 + 各 playbook 目录）。
-func (e *Executor) allScriptModuleDirs(runs []*hostRun) []string {
-	if e.Opts.Chart == nil {
-		return nil
-	}
-	dirs := []string{e.Opts.BaseDir}
+// batchScriptDirs 返回批次预检查用的脚本模块查找目录：取首个主机的
+// scriptModuleDirs（与执行侧同源同顺序）。fanOut 只跑 play 级任务，
+// 此刻各 hr.baseDir 均等于 BaseDir——hr.baseDir 只在 runChartTask 的
+// 单主机作用域内切换，chart 内任务走 runTaskOnHost、不经过 fanOut，
+// 批内不存在混合 baseDir 的场景。
+func (e *Executor) batchScriptDirs(runs []*hostRun) []string {
 	for _, hr := range runs {
-		if hr != nil && hr.baseDir != "" {
-			dirs = append(dirs, hr.baseDir)
+		if hr != nil {
+			return e.scriptModuleDirs(hr)
 		}
 	}
-	return dirs
+	return nil
 }
 
 // fanOutRunOnce 处理 run_once：首台存活主机执行，结果复制到其余存活主机。

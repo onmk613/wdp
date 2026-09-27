@@ -115,6 +115,8 @@ func hostNames(hosts []*model.Host) []string {
 
 // randSuffix 生成不可预测的临时路径后缀（回滚快照目录），
 // 避免 UnixNano 可预测路径在远端 /tmp 被预创建符号链接劫持。
+// crypto/rand 失败的回退会退回可预测的 UnixNano——失败极罕见，
+// 但严格说重新引入了上述劫持面。
 func randSuffix() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {

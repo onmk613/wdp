@@ -6,6 +6,9 @@ package console
 // chart 目录的链接）原文回给读 spec 的调用方。
 
 import (
+	"archive/tar"
+	"compress/gzip"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,5 +90,53 @@ func TestCopyDirSkipsSymlink(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dst, "values.yaml")); err != nil {
 		t.Fatalf("普通文件应照常复制: %v", err)
+	}
+}
+
+// TestPackChartSkipsSymlink 打包与 CopyDir/ReadSpecFromDir 同口径：只收
+// 普通文件。符号链接经 os.Stat/os.Open 跟随会把目标内容打进 tgz 制品，
+// 制品又可经下载端点外带——打包是制品生成的入口，必须独立挡一层。
+func TestPackChartSkipsSymlink(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOP-SECRET-CONTENT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	writeMinimalChart(t, dir)
+	if err := os.Symlink(secret, filepath.Join(dir, "leak.txt")); err != nil {
+		t.Skipf("符号链接不可用: %v", err)
+	}
+	tgz := filepath.Join(t.TempDir(), "chart.tgz")
+	if err := PackChart(dir, tgz); err != nil {
+		t.Fatal(err)
+	}
+	// 解包检查：链接不应进制品，正常文件应在
+	f, err := os.Open(tgz)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	names := map[string]bool{}
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		names[hdr.Name] = true
+		if hdr.Name == "leak.txt" {
+			t.Fatal("符号链接不应被打进制品")
+		}
+	}
+	if !names["values.yaml"] || !names["templates/app.conf.tpl"] {
+		t.Fatalf("普通文件应照常打包: %v", names)
 	}
 }

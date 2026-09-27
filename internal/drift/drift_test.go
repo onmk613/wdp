@@ -57,16 +57,16 @@ func TestClassifyStates(t *testing.T) {
 	}
 	want := map[string]string{
 		"ok": "OK", "drifted": "DRIFTED", "outdated": "OUTDATED",
-		"missing": "NOT-DEPLOYED", "unreachable": "UNREACHABLE", "failed": "UNREACHABLE",
+		"missing": "NOT-DEPLOYED", "unreachable": "UNREACHABLE", "failed": "FAILED",
 	}
 	for host, state := range want {
 		if got[host].State != state {
 			t.Errorf("%s: state = %q, want %q (detail=%q)", host, got[host].State, state, got[host].Detail)
 		}
 	}
-	// 失败口径：DRIFTED + UNREACHABLE（NOT-DEPLOYED/OUTDATED 只列出）
+	// 失败口径：DRIFTED + FAILED + UNREACHABLE（NOT-DEPLOYED/OUTDATED 只列出）
 	if failed != 3 {
-		t.Fatalf("failed = %d, want 3（drifted/unreachable/failed）", failed)
+		t.Fatalf("failed = %d, want 3（drifted/failed/unreachable）", failed)
 	}
 	// DRIFTED 且 marker 为 v2 时附字段级差异
 	if !strings.Contains(got["drifted"].Detail, "port") {

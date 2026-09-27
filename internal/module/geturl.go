@@ -4,15 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 )
-
-// maxDownloadBytes 控制端单次下载的响应体上限（与 chart 解包 2GiB 上限对齐）。
-// 无上限时，指向异常/恶意 URL 的下载可在超时窗口内累积数 GB 内存导致 OOM。
-const maxDownloadBytes = 2 << 30
 
 func init() {
 	Register(&GetURLModule{})
@@ -22,15 +19,12 @@ func init() {
 // putFile 分发，复用其幂等/备份/回滚/check/diff 语义。
 type GetURLModule struct{}
 
-// Name 模块名。
 func (m *GetURLModule) Name() string { return "get_url" }
 
-// Desc 模块说明。
 func (m *GetURLModule) Desc() string {
 	return "download a URL to the remote host (sha256 verified, idempotent)"
 }
 
-// Params 参数文档。
 func (m *GetURLModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "url", Type: "string", Desc: "download URL (http/https), GET issued from the control node"},
@@ -45,7 +39,6 @@ func (m *GetURLModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *GetURLModule) Example() string {
 	return `- name: download and distribute a binary (sha256 verify + idempotent)
   get_url:
@@ -62,28 +55,28 @@ func (m *GetURLModule) Example() string {
 func (m *GetURLModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	url, ok := argStr(args, "url")
 	if !ok || url == "" {
-		return Fail("%s", "get_url requires a url parameter")
+		return Fail("get_url requires a url parameter")
 	}
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("%s", "get_url requires a dest parameter")
+		return Fail("get_url requires a dest parameter")
 	}
 	wantSum, _ := argStr(args, "sha256")
 	wantSum = strings.ToLower(strings.TrimSpace(wantSum))
 	if wantSum != "" && !isSHA256Hex(wantSum) {
-		return Fail("%s", "sha256 parameter must be a 64-character hex string")
+		return Fail("sha256 parameter must be a 64-character hex string")
 	}
 
-	mode := int64(0o644) // 缺省 0644（始终显式下发，覆盖上传缺省）
+	mode := fs.FileMode(0o644) // 缺省 0644（始终显式下发，覆盖上传缺省）
 	if mv, ok := argMode(args, "mode"); ok {
-		mode = int64(mv.Perm())
+		mode = mv.Perm()
 	}
 	owner, _ := argStr(args, "owner")
 	group, _ := argStr(args, "group")
 	backup, _ := argBool(args, "backup")
 	timeoutSecs, ok := argSecs(args, "timeout_secs", 30)
 	if !ok || timeoutSecs <= 0 {
-		return Fail("%s", "timeout_secs must be a positive integer")
+		return Fail("timeout_secs must be a positive integer")
 	}
 	headers, bad := headerMapArg(args, "headers")
 	if bad != nil {
@@ -111,7 +104,7 @@ func (m *GetURLModule) Run(rc *RunContext, args map[string]any, _ string) *Resul
 		}
 	}
 
-	changed, res := putFile(rc, data, dest, mode, backup, true, owner, group)
+	changed, res := putFile(rc, putFileOpts{data: data, dest: dest, mode: &mode, backup: backup, owner: owner, group: group})
 	if res != nil {
 		return res // 失败或 check 预估（含 --diff 内容差异）直接透传
 	}
@@ -123,41 +116,33 @@ func (m *GetURLModule) Run(rc *RunContext, args map[string]any, _ string) *Resul
 }
 
 // skipDownload 处理远端校验和已一致时的收尾：check 模式仅预估属性变更，
-// 实模式校正权限/属主（内容不动，无备份与回滚登记需求）。
+// 实模式校正权限/属主（内容不动，无备份与回滚登记需求，走 fixAttrs）。
 // 属主漂移与权限漂移同权重估/校正（此前 check 漏报属主、实跑修复不报 changed）。
-func (m *GetURLModule) skipDownload(rc *RunContext, dest string, mode int64, owner, group string) *Result {
-	if (owner != "" || group != "") && !rc.Become {
-		return Fail("setting owner/group requires become: true (%s)", dest)
-	}
-	ownerDrift := false
-	if owner != "" || group != "" {
-		co, cg, ok, obad := remoteOwnerGroup(rc, dest)
-		if obad != nil {
-			return obad
-		}
-		ownerDrift = !ok || (owner != "" && co != owner) || (group != "" && cg != group)
+func (m *GetURLModule) skipDownload(rc *RunContext, dest string, mode fs.FileMode, owner, group string) *Result {
+	if bad := requireBecomeForOwner(rc, owner, group, dest); bad != nil {
+		return bad
 	}
 	if rc.CheckMode {
-		would := ownerDrift
+		would := false
+		if owner != "" || group != "" {
+			drift, obad := ownerGroupDrift(rc, dest, owner, group)
+			if obad != nil {
+				return obad
+			}
+			would = drift
+		}
 		if cur, ok, mbad := remoteMode(rc, dest); mbad != nil {
 			return mbad
-		} else if ok && cur != mode {
+		} else if ok && cur != int64(mode.Perm()) {
 			would = true
 		}
 		return &Result{Changed: would, Msg: fmt.Sprintf("[check] %s content is unchanged (sha256 matches)", dest)}
 	}
-	changed := false
-	if fixed, bad := chmodIfDiffers(rc, dest, mode); bad != nil {
+	fixedMode, fixedOwner, bad := fixAttrs(rc, dest, &mode, owner, group)
+	if bad != nil {
 		return bad
-	} else if fixed {
-		changed = true
 	}
-	if ownerDrift {
-		if bad := chownPath(rc, dest, owner, group); bad != nil {
-			return bad
-		}
-		changed = true
-	}
+	changed := fixedMode || fixedOwner
 	msg := fmt.Sprintf("%s content is unchanged (sha256 matches, download skipped)", dest)
 	if changed {
 		msg = fmt.Sprintf("%s attributes corrected (content unchanged)", dest)
@@ -190,10 +175,12 @@ func (m *GetURLModule) fetch(rc *RunContext, url string, headers map[string]stri
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		return nil, Fail("download failed %s: HTTP %d", url, resp.StatusCode)
 	}
-	// 响应体上限：RunContext 注入值优先（CLI/配置文件），否则内置默认 2GiB
+	// 响应体上限：RunContext 注入值优先（CLI/配置文件），否则内置缺省
+	// 2GiB（defaultTransferLimit：无上限时异常/恶意 URL 的下载可在超时
+	// 窗口内累积数 GB 内存导致控制端 OOM）
 	limit := rc.MaxDownloadBytes
 	if limit <= 0 {
-		limit = maxDownloadBytes
+		limit = defaultTransferLimit
 	}
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		if n, perr := strconv.ParseInt(cl, 10, 64); perr == nil && n > limit {

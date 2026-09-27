@@ -199,3 +199,41 @@ webservers:
 		t.Fatalf("父组 agent_port 应生效（children 展开）: %+v", h)
 	}
 }
+
+// TestSelectLimitedKeepsInputSlice SelectLimited 的 copy 语义回归：过滤
+// 结果不得改写传入切片的底层数组——调用方把 Select 的结果数组留作它用
+// （如缓存全量清单）时，就地复用会被静默改写成过滤后的内容。
+func TestSelectLimitedKeepsInputSlice(t *testing.T) {
+	inv := load(t)
+	hosts, err := inv.Select("all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hosts) < 2 {
+		t.Fatalf("样例应至少有两台主机: %d", len(hosts))
+	}
+	backup := make([]string, len(hosts))
+	for i, h := range hosts {
+		backup[i] = h.Name
+	}
+	limited, err := inv.SelectLimited("all", "web1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(limited) != 1 || limited[0].Name != "web1" {
+		t.Fatalf("limit 应收窄到 web1: %+v", limited)
+	}
+	// 原切片内容应保持全量（不被 limit 过滤就地改写）
+	got := make([]string, len(hosts))
+	for i, h := range hosts {
+		got[i] = h.Name
+	}
+	if len(got) != len(backup) {
+		t.Fatalf("原切片长度被改写: %d != %d", len(got), len(backup))
+	}
+	for i := range backup {
+		if got[i] != backup[i] {
+			t.Fatalf("原切片内容被改写: [%d] %s != %s", i, got[i], backup[i])
+		}
+	}
+}

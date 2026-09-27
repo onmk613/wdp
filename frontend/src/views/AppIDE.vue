@@ -5,28 +5,35 @@
 //
 // 数据流：ChartFS 是唯一状态源；Monaco model 的内容变化回写 fs，
 // 文件操作（树）改 fs 后同步 model/标签。保存与校验体由 fs 统一序列化。
+//
+// 结构：model/标签/viewState 生命周期在 ide/useEditorTabs；暂存-保存
+// 状态机与离开路由守卫在 ide/useDraftFlow；文件操作与撤销栈在
+// ide/useFileOps。本组件保留初始化链、schema/变量域联动、校验与问题
+// 面板、光标文档联动，以及草稿恢复的整体重建（跨三者，是集成点）。
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { onBeforeRouteLeave, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { ArrowLeft, RefreshLeft } from '@element-plus/icons-vue'
 import type * as Monaco from 'monaco-editor'
 import {
   api, type AppSpec, type GroupEntry, type ModuleMeta, type Pool, type SchemaMeta,
 } from '../api'
 import {
-  ChartFS, chartYAMLDescription, chartYAMLVersion, nextVersion,
-  patchChartYAMLDescription, patchChartYAMLVersion, type DraftPayload,
+  ChartFS, chartYAMLDescription, chartYAMLVersion, nextVersion, type DraftPayload,
 } from '../ide/fs'
-import { loadMonaco, editorOptions, bindSuggestKey, languageFor, modelURI, type MonacoNs } from '../ide/monaco'
-import { applyYamlSchemas, controlKeys, fetchSchema } from '../ide/schemas'
+import { loadMonaco, editorOptions, bindSuggestKey, type MonacoNs } from '../ide/monaco'
+import { applyYamlSchemas, fetchSchema } from '../ide/schemas'
+import { controlKeys, playKeysSet } from '../ide/keys'
 import { registerProviders } from '../ide/complete'
 import { buildVarDomain, type VarDomain } from '../ide/vars'
 import { DraftStore } from '../ide/draft'
 import { applyMarkers, runValidate, type ProblemItem } from '../ide/validate'
-import { applyDecorations } from '../ide/decorate'
 import FileTree from '../components/ide/FileTree.vue'
 import BottomPanel from '../components/ide/BottomPanel.vue'
 import SaveDialog from '../components/ide/SaveDialog.vue'
+import { useEditorTabs } from '../ide/useEditorTabs'
+import { useDraftFlow } from '../ide/useDraftFlow'
+import { useFileOps } from '../ide/useFileOps'
 
 const props = defineProps<{
   appId: number // 0 = 新建
@@ -42,17 +49,9 @@ const loading = ref(true)
 const fs = new ChartFS()
 const monacoRef = shallowRef<MonacoNs | null>(null)
 const editorRef = ref<HTMLElement>()
-let editor: Monaco.editor.IStandaloneCodeEditor | null = null
 // 补全 provider 的释放句柄：注册在 monaco 语言层全局生效，卸载必须
 // dispose（不释放则路由往返叠加，候选出现多份）
 let providers: Monaco.IDisposable | null = null
-const models = new Map<string, Monaco.editor.ITextModel>()
-const viewStates = new Map<string, ReturnType<NonNullable<Monaco.editor.IStandaloneCodeEditor['saveViewState']>>>()
-const decorIds = new Map<string, string[]>()
-
-// 标签页
-const tabs = ref<string[]>([])
-const active = ref('')
 
 // 元数据
 const schemaMeta = shallowRef<SchemaMeta | null>(null)
@@ -68,16 +67,56 @@ const problems = ref<ProblemItem[]>([])
 const panel = ref<'none' | 'problems' | 'doc'>('none')
 const cursorModule = ref<ModuleMeta | null>(null)
 
-// 暂存与保存
+// 暂存与保存（状态机本体在 useDraftFlow，这里只保留构造参数与校验态）
 const isCreate = computed(() => props.appId === 0)
 const draftStore = new DraftStore(isCreate.value ? `new:${props.newName || ''}` : String(props.appId))
-const draftInfo = ref<{ payload: DraftPayload; updated_at: string } | null>(null)
-const draftStatus = ref('')
-const saving = ref(false)
-const saveVisible = ref(false)
+const validating = ref(false)
 
 // 变更版本号（任何 fs/model 内容或文件操作都推进，驱动自动暂存与域刷新）
 const dirtyCount = computed(() => fs.dirtyCount())
+
+// ---- Monaco model/标签/viewState 生命周期 ----
+const tabsApi = useEditorTabs({
+  fs,
+  monacoRef,
+  schemaMeta: () => schemaMeta.value,
+  // onContentChanged 是下方的函数声明（提升），model 内容变化时才调用
+  onContentChange: onContentChanged,
+})
+const {
+  tabs, active, models, ensureModel, dropModel, openTab, setActive, closeTab, scheduleDecorate,
+  setEditor, getEditor, clearTimers: clearDecorTimers, dispose: disposeTabs,
+} = tabsApi
+
+// ---- 暂存-保存状态机与离开守卫 ----
+const {
+  draftInfo, draftStatus, saving, saveVisible, stashed,
+  scheduleAutosave, manualDraft, discardDraft, setSuppressAutosave,
+  onBeforeUnload, openSave, onSaveConfirm, leaveDialog, onLeaveChoice,
+  dispose: disposeDraft,
+} = useDraftFlow({
+  fs,
+  draftStore,
+  validating,
+  loading,
+  isCreate: () => isCreate.value,
+  appId: () => props.appId,
+  openTabs: () => tabs.value,
+  activeTab: () => active.value,
+  models,
+  existingVersions,
+  // doValidate 是函数声明（提升）：校验本体留在组件（问题面板/markers 归这）
+  validate: doValidate,
+  isReady: () => initialized,
+})
+
+// ---- 文件操作与撤销栈 ----
+const { fileOps, onTreeOp, undoFileOp, onDocKeydown } = useFileOps({
+  fs,
+  tabsApi,
+  // onFsMutated 同为提升的函数声明
+  onMutate: onFsMutated,
+})
 
 // 左侧目录树宽度可拖拽调整（分隔条 mousedown → document mousemove）
 const treeWidth = ref(240)
@@ -88,7 +127,7 @@ function onSplitterDown(e: MouseEvent) {
 }
 function onSplitterMove(e: MouseEvent) {
   if (!dragging.value) return
-  // 树容器起点近似为 0（Console 主内容区内），用 clientX 直接换算
+  // 按 .ide-root 实际左缘换算，兼容布局偏移
   const root = document.querySelector('.ide-root') as HTMLElement | null
   if (!root) return
   const left = root.getBoundingClientRect().left
@@ -100,14 +139,10 @@ function onSplitterUp() {
 onMounted(() => {
   document.addEventListener('mousemove', onSplitterMove)
   document.addEventListener('mouseup', onSplitterUp)
-  window.addEventListener('wdp-unauthorized', onUnauthorizedEvt)
-  window.addEventListener('focus', onWinFocus)
 })
 onBeforeUnmount(() => {
   document.removeEventListener('mousemove', onSplitterMove)
   document.removeEventListener('mouseup', onSplitterUp)
-  window.removeEventListener('wdp-unauthorized', onUnauthorizedEvt)
-  window.removeEventListener('focus', onWinFocus)
 })
 
 const title = computed(() =>
@@ -117,81 +152,7 @@ const subtitle = computed(() =>
   isCreate.value ? '保存后正式入库' : `底本 ${fs.baseVersion} · 保存即生成新版本（版本不可覆盖）`,
 )
 
-// ---- Monaco model 管理 ----
-function ensureModel(path: string): Monaco.editor.ITextModel | null {
-  const monaco = monacoRef.value
-  const f = fs.get(path)
-  if (!monaco || !f) return null
-  let m = models.get(path)
-  if (m) return m
-  m = monaco.editor.createModel(f.content, languageFor(path), modelURI(path))
-  models.set(path, m)
-  m.onDidChangeContent(() => {
-    const file = fs.get(path)
-    if (file && !file.binary && file.content !== m!.getValue()) file.content = m!.getValue()
-    onContentChanged(path)
-  })
-  scheduleDecorate(path)
-  return m
-}
-
-function dropModel(path: string) {
-  models.get(path)?.dispose()
-  models.delete(path)
-  viewStates.delete(path)
-  decorIds.delete(path)
-}
-
-function openTab(path: string) {
-  const f = fs.get(path)
-  if (!f || f.binary) {
-    if (f?.binary) ElMessage.info(`${path} 是二进制文件（随包保留，不可编辑）`)
-    return
-  }
-  if (!tabs.value.includes(path)) tabs.value.push(path)
-  setActive(path)
-}
-
-function setActive(path: string) {
-  if (active.value && editor) viewStates.set(active.value, editor.saveViewState())
-  active.value = path
-  const m = ensureModel(path)
-  if (m && editor) {
-    editor.setModel(m)
-    const vs = viewStates.get(path)
-    if (vs) editor.restoreViewState(vs)
-    editor.focus()
-  }
-}
-
-function closeTab(path: string) {
-  const i = tabs.value.indexOf(path)
-  if (i < 0) return
-  tabs.value.splice(i, 1)
-  viewStates.delete(path)
-  if (active.value === path) {
-    const next = tabs.value[Math.min(i, tabs.value.length - 1)] || ''
-    active.value = ''
-    if (next) setActive(next)
-    else editor?.setModel(null)
-  }
-}
-
-// ---- 内容变化联动（debounce） ----
-let decorTimers = new Map<string, number>()
-function scheduleDecorate(path: string) {
-  const monaco = monacoRef.value
-  if (!monaco || !schemaMeta.value) return
-  const old = decorTimers.get(path)
-  if (old) clearTimeout(old)
-  decorTimers.set(path, window.setTimeout(() => {
-    const m = models.get(path)
-    if (!m || !/\.ya?ml$/.test(path)) return
-    const keys = { controlKeys: ctlKeys(), playKeys: playKeysSet() }
-    decorIds.set(path, applyDecorations(monaco, m, decorIds.get(path) || [], keys))
-  }, 350))
-}
-
+// ---- 变量域（debounce 重建） ----
 let domainTimer = 0
 function scheduleDomain() {
   clearTimeout(domainTimer)
@@ -215,6 +176,13 @@ function onContentChanged(path: string) {
   scheduleAutosave()
 }
 
+// 树操作落地后的联动（与内容变化同款，只是不重复调度装饰）
+function onFsMutated() {
+  stashed.value = false
+  scheduleDomain()
+  scheduleAutosave()
+}
+
 // 根目录 yaml 集合变化（新相位/重命名）→ 重新装配 schema
 const rootYamlKey = computed(() =>
   fs.allFiles().filter((f) => !f.deleted && /^([A-Za-z0-9_-]+)\.yaml$/.test(f.path)).map((f) => f.path).sort().join(','),
@@ -234,18 +202,6 @@ watch(valuesSchemaKey, () => {
   schemaTimer = window.setTimeout(applySchemas, 400)
 })
 
-function ctlKeys(): Set<string> {
-  return schemaMeta.value ? controlKeys(schemaMeta.value) : new Set()
-}
-function playKeysSet(): Set<string> {
-  const s = new Set<string>()
-  if (!schemaMeta.value) return s
-  for (const sec of schemaMeta.value.play) for (const f of sec.Fields) s.add(f.Name)
-  s.add('tasks')
-  s.add('handlers')
-  return s
-}
-
 function applySchemas() {
   const meta = schemaMeta.value
   if (!meta) return
@@ -254,148 +210,9 @@ function applySchemas() {
   applyYamlSchemas(paths, meta, valuesSchema)
 }
 
-// ---- 文件操作（树 → model/标签同步 + 撤销栈） ----
-interface FileOp { kind: string; path: string; to?: string; prevContent?: string }
-const fileOps = ref<FileOp[]>([])
-
-function onTreeOp(ev: { kind: string; path: string; to?: string }) {
-  if (ev.kind === 'create') {
-    ensureModel(ev.path)
-  } else if (ev.kind === 'edit') {
-    // chart.yaml 被树操作（相位声明）改写：同步 model
-    const m = models.get(ev.path)
-    const f = fs.get(ev.path)
-    if (m && f && m.getValue() !== f.content) m.setValue(f.content)
-  } else if (ev.kind === 'rename') {
-    const from = ev.path, to = ev.to!
-    dropModel(from)
-    const f = fs.get(to)
-    const i = tabs.value.indexOf(from)
-    if (i >= 0) tabs.value.splice(i, 1, to)
-    if (f) {
-      const nm = ensureModel(to)
-      if (nm) nm.setValue(f.content)
-    }
-    if (active.value === from) active.value = to
-    if (f && !tabs.value.includes(to)) tabs.value.push(to)
-    ElMessage.success(`已重命名 ${from} → ${to}`)
-  } else if (ev.kind === 'delete') {
-    dropModel(ev.path)
-    closeTab(ev.path)
-  } else if (ev.kind === 'restore') {
-    ensureModel(ev.path)
-  }
-  fileOps.value.push(ev as FileOp)
-  stashed.value = false
-  scheduleDomain()
-  scheduleAutosave()
-}
-
-// 文件操作撤销（焦点不在编辑器时 Ctrl+Z）
-function undoFileOp() {
-  const op = fileOps.value.pop()
-  if (!op) return
-  if (op.kind === 'create') {
-    fs.remove(op.path)
-    dropModel(op.path)
-    closeTab(op.path)
-  } else if (op.kind === 'delete') {
-    fs.restore(op.path)
-    ensureModel(op.path)
-  } else if (op.kind === 'rename') {
-    const err = fs.rename(op.to!, op.path)
-    if (err) {
-      fileOps.value.push(op) // 撤销失败（如旧路径被占用）：操作保留可重试
-      ElMessage.warning(`撤销重命名失败：${err}`)
-      return
-    }
-    onTreeOp({ kind: 'rename', path: op.to!, to: op.path })
-    fileOps.value.pop() // 撤销不入栈
-  } else if (op.kind === 'edit') {
-    // 树操作对文件的程序化改写（相位声明写 chart.yaml）：按快照还原
-    if (op.prevContent !== undefined) {
-      const f = fs.get(op.path)
-      if (f) {
-        f.content = op.prevContent
-        const m = models.get(op.path)
-        if (m && m.getValue() !== op.prevContent) m.setValue(op.prevContent)
-      }
-    }
-  }
-  stashed.value = false
-  scheduleDomain()
-  scheduleAutosave()
-}
-
-// 暂存安全标记：true = 当前改动已成功暂存（离开不再弹确认框）。
-// 会话失效（401）标记：停止自动暂存——否则每 2.5s 一轮 401，全局事件
-// 反复把路由推向登录页，离开守卫会跟着反复弹框（曾在编辑中被循环打断）。
-// 窗口重新获得焦点时探测一次会话（用户可能在别的标签重新登录了），
-// 恢复则解除标记并续上自动暂存
-const stashed = ref(false)
-const authDead = ref(false)
-const onUnauthorizedEvt = () => { authDead.value = true }
-async function onWinFocus() {
-  if (!authDead.value) return
-  try {
-    await api('GET', '/api/me')
-    authDead.value = false
-    draftStatus.value = ''
-    scheduleAutosave()
-  } catch { /* 会话仍失效：维持暂停 */ }
-}
-
-function onDocKeydown(e: KeyboardEvent) {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
-    const t = e.target as HTMLElement
-    if (t.closest('.monaco-editor') || t.closest('input,textarea,[contenteditable]')) return
-    if (!fileOps.value.length) return
-    e.preventDefault()
-    undoFileOp()
-  }
-}
-
-// ---- 暂存 ----
-let autosaveTimer = 0
-let suppressAutosave = false
-function scheduleAutosave() {
-  if (suppressAutosave) return
-  clearTimeout(autosaveTimer)
-  autosaveTimer = window.setTimeout(autoDraft, 2500)
-}
-async function autoDraft() {
-  if (!fs.isDirty() || suppressAutosave || loading.value || authDead.value) return
-  try {
-    await draftStore.save(fs.toDraftPayload(tabs.value, active.value), fs.baseVersion)
-    stashed.value = true
-    draftStatus.value = `已自动暂存 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`
-  } catch {
-    stashed.value = false
-    if (authDead.value) {
-      draftStatus.value = '登录已失效：暂存中断（本地仍有快照）'
-      return
-    }
-    // 瞬时网络故障：10s 后重试（此前只显示「重试中」却不排重试，下一次
-    // 内容变化前暂存一直停摆）
-    draftStatus.value = '自动暂存失败（重试中）'
-    clearTimeout(autosaveTimer)
-    autosaveTimer = window.setTimeout(autoDraft, 10000)
-  }
-}
-async function manualDraft() {
-  try {
-    await draftStore.save(fs.toDraftPayload(tabs.value, active.value), fs.baseVersion)
-    stashed.value = true
-    draftStatus.value = `已暂存 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`
-    ElMessage.success('已暂存（跨设备可恢复）')
-  } catch (e) {
-    ElMessage.error(`暂存失败：${(e as Error).message}`)
-  }
-}
-
 // 草稿恢复：整体重建 fs 与 models
 function restoreDraft(payload: DraftPayload) {
-  suppressAutosave = true
+  setSuppressAutosave(true)
   for (const p of [...models.keys()]) dropModel(p)
   fs.loadFromDraft(payload)
   for (const f of fs.textFiles()) ensureModel(f.path)
@@ -407,7 +224,7 @@ function restoreDraft(payload: DraftPayload) {
   rebuildDomain()
   fileOps.value = []
   draftInfo.value = null
-  suppressAutosave = false
+  setSuppressAutosave(false)
   stashed.value = true // 恢复的内容本身来自暂存
 }
 
@@ -418,13 +235,7 @@ async function onRestoreFromBanner() {
   ElMessage.success('草稿已恢复')
 }
 
-async function discardDraft() {
-  await draftStore.clear()
-  draftInfo.value = null
-}
-
 // ---- 校验 ----
-const validating = ref(false)
 // 失败返回 null（区别于「校验通过、无发现」的 []）：保存门禁据它中止——
 // 此前失败被吞成 []，网络错误/500/越权都会被当成「校验通过」直接放行保存
 async function doValidate(): Promise<ProblemItem[] | null> {
@@ -452,111 +263,28 @@ function currentChartVersion(): string {
   return nextVersion(fs.baseVersion, existingVersions.value)
 }
 
-// ---- 保存 ----
-function openSave() {
-  // 校验阶段（validating）也占着保存流程：不加门禁的话，慢校验期间再点
-  // 保存/Ctrl+S 会并发跑两份 onSaveConfirm，第二个 PUT 因版本已存在报
-  // "保存失败"误导用户（第一次实际已成功）
-  if (validating.value || saving.value) return
-  if (!fs.isDirty() && !isCreate.value) {
-    ElMessage.info('没有改动')
-    return
-  }
-  saveVisible.value = true
-}
-
-async function onSaveConfirm(v: { version: string; description: string; pools: string[]; groups: string[]; labels: string }) {
-  if (validating.value || saving.value) return
-  // saving 覆盖全程（校验 + 警告确认 + 提交）：期间按钮 loading、Ctrl+S
-  // 与重复确认都被挡住，杜绝并发 PUT
-  saving.value = true
-  try {
-    // 1) 版本号/描述同步写进 chart.yaml（文件与库一致）
-    const chart = fs.get('chart.yaml')
-    if (chart) {
-      let content = chart.content
-      const desc = v.description.trim()
-      if (chartYAMLVersion(content) !== v.version) content = patchChartYAMLVersion(content, v.version)
-      // 有 description 行则替换（旧值不残留），没有则追加；空描述不动文件
-      if (desc) content = patchChartYAMLDescription(content, desc)
-      if (content !== chart.content) {
-        const m = models.get('chart.yaml')
-        chart.content = content
-        if (m && m.getValue() !== content) m.setValue(content)
-      }
-    }
-    fs.description = v.description
-    fs.pools = v.pools
-    fs.groups = v.groups
-    fs.labels = v.labels
-
-    // 2) 校验门禁：ERROR 阻断（已确认的决策），WARN 确认后放行。校验请求
-    // 本身失败（网络/500/越权）同样阻断——失败不等于通过
-    const ps = await doValidate()
-    if (!ps) {
-      ElMessage.error('校验未能完成，已取消保存（内容未被提交）')
-      return
-    }
-    const errors = ps.filter((p) => p.level === 'ERROR')
-    if (errors.length) {
-      ElMessage.error(`校验未通过：${errors.length} 个错误（已定位到文件，修正后再保存）`)
-      return
-    }
-    const warns = ps.filter((p) => p.level === 'WARN')
-    if (warns.length) {
-      try {
-        await ElMessageBox.confirm(`校验发现 ${warns.length} 个警告（见问题面板）。仍要保存？`, '警告', {
-          confirmButtonText: '仍要保存', cancelButtonText: '回去修改', type: 'warning',
-        })
-      } catch { return }
-    }
-
-    // 3) 保存
-    const body = fs.toSaveBody(v.version)
-    if (isCreate.value) {
-      const app = await api<{ ID: number; Name: string }>('POST', '/api/apps/spec', { ...body, name: fs.name })
-      ElMessage.success(`应用 ${app.Name}@${v.version} 已创建`)
-      await draftStore.clear()
-      fs.markSaved(v.version)
-      existingVersions.value.push(v.version)
-      // URL 修正为编辑态（同路由 query 变化触发一次重建，重载新版本）
-      void router.replace({ path: '/apps/ide', query: { app: String(app.ID), base: v.version } })
-    } else {
-      await api('PUT', `/api/apps/${props.appId}/spec`, body)
-      ElMessage.success(`已保存版本 ${v.version}`)
-      await draftStore.clear()
-      fs.markSaved(v.version)
-      existingVersions.value.push(v.version)
-      draftStatus.value = ''
-    }
-  } catch (e) {
-    ElMessage.error(`保存失败：${(e as Error).message}`)
-  } finally {
-    saving.value = false
-  }
-}
-
 // ---- 光标联动文档面板 ----
 function onCursorChange(e: Monaco.editor.ICursorPositionChangedEvent) {
   cursorPos.value = { line: e.position.lineNumber, col: e.position.column }
   const monaco = monacoRef.value
-  const m = editor?.getModel()
+  const m = getEditor()?.getModel()
   if (!monaco || !m) return
-  const text = m.getValue()
-  const lines = text.split('\n')
-  const line = lines[e.position.lineNumber - 1] || ''
+  // 逐行读取（getLineContent）而非 getValue()+split：光标每次移动都触发，
+  // 512KB 上限的文件上每键 O(n) 字符串分配会造成可感卡顿；扫描窗口至多
+  // 60 行，行级读取是 O(60)
+  const line = m.getLineContent(e.position.lineNumber) || ''
   // 从当前行向上找最近的模块键（同任务块内）
-  const ctl = ctlKeys()
-  const pk = playKeysSet()
+  const ctl = controlKeys(schemaMeta.value)
+  const pk = playKeysSet(schemaMeta.value)
   const keyRe = /^(\s*)(-\s+)?([\w.][\w-]*)\s*:/
   let found: string | null = null
   const indent = line.match(/^ */)![0].length
-  for (let i = e.position.lineNumber - 1; i >= 0 && i >= e.position.lineNumber - 60; i--) {
-    const l = lines[i] || ''
+  for (let i = e.position.lineNumber; i >= 1 && i >= e.position.lineNumber - 59; i--) {
+    const l = m.getLineContent(i) || ''
     const mm = l.match(keyRe)
     if (!mm) continue
     const li = mm[1].length + (mm[2] ? mm[2].length : 0)
-    if (i === e.position.lineNumber - 1 || li <= indent) {
+    if (i === e.position.lineNumber || li <= indent) {
       const k = mm[3]
       if (!ctl.has(k) && !pk.has(k) && k !== 'name' && k !== 'tasks' && k !== 'handlers') {
         found = k
@@ -591,30 +319,23 @@ onMounted(async () => {
     if (disposed) return
     monacoRef.value = monaco
 
-    const [schema, mods, ps, gs] = await Promise.all([
+    // 主机名单独 catch：值补全的候选拿不到不阻断编辑器加载（组名复用
+    // 同一批的 gs，不重复请求 /api/groups）
+    const [schema, mods, ps, gs, hosts] = await Promise.all([
       fetchSchema(),
       api<ModuleMeta[]>('GET', '/api/modules'),
       api<Pool[]>('GET', '/api/pools'),
       api<GroupEntry[]>('GET', '/api/groups'),
+      api<{ Name: string }[]>('GET', '/api/hosts').catch(() => null),
     ])
     if (disposed) return
     schemaMeta.value = schema
     modulesMeta.value = mods
     pools.value = ps
     groups.value = gs
-
-    // 主机/组名（hosts 值补全）
-    try {
-      const [hosts, hgroups] = await Promise.all([
-        api<{ Name: string }[]>('GET', '/api/hosts'),
-        api<{ Name: string }[]>('GET', '/api/groups'),
-      ])
-      if (disposed) return
-      hostGroups.value = {
-        hosts: hosts.map((h) => h.Name),
-        groups: hgroups.map((g) => g.Name),
-      }
-    } catch { hostGroups.value = null }
+    hostGroups.value = hosts
+      ? { hosts: hosts.map((h) => h.Name), groups: gs.map((g) => g.Name) }
+      : null
 
     // 加载内容：编辑模式读 spec；新建模式脚手架
     if (!isCreate.value) {
@@ -634,13 +355,14 @@ onMounted(async () => {
     // 编辑器与 model
     await nextTick()
     if (disposed) return
-    editor = monaco.editor.create(editorRef.value!, {
-      ...editorOptions(monaco),
+    const ed = monaco.editor.create(editorRef.value!, {
+      ...editorOptions(),
       glyphMargin: true,
     })
-    bindSuggestKey(monaco, editor)
-    editor.onDidChangeCursorPosition(onCursorChange)
-    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, openSave)
+    setEditor(ed)
+    bindSuggestKey(monaco, ed)
+    ed.onDidChangeCursorPosition(onCursorChange)
+    ed.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, openSave)
     for (const f of fs.textFiles()) ensureModel(f.path)
 
     providers = registerProviders(monaco, {
@@ -685,63 +407,17 @@ function draftDiffers(p: DraftPayload): boolean {
   return pick(p) !== pick(fs.toDraftPayload(tabs.value, active.value))
 }
 
-function onBeforeUnload(e: BeforeUnloadEvent) {
-  if (fs.isDirty()) {
-    e.preventDefault()
-    e.returnValue = ''
-  }
-}
-
-// 离开抉择弹窗：主动导航离开且有未保存改动时当场问「暂存还是丢弃」，
-// 把去留决定收在离开那一刻（而不是留着等下次进来弹横幅）。横幅只留给
-// 异常中断（刷新/崩溃/会话失效）后的恢复场景。
-let leaveResolve: ((v: 'stash' | 'discard' | 'stay') => void) | null = null
-const leaveDialog = ref(false)
-function askLeaveChoice(): Promise<'stash' | 'discard' | 'stay'> {
-  leaveDialog.value = true
-  return new Promise((resolve) => { leaveResolve = resolve })
-}
-async function onLeaveChoice(v: 'stash' | 'discard' | 'stay') {
-  leaveDialog.value = false
-  if (leaveResolve) { leaveResolve(v); leaveResolve = null }
-}
-
-onBeforeRouteLeave(async (to) => {
-  // 会话失效被强制送去登录：放行。拦截没有意义（会话已死），且自动
-  // 暂存的 401 会反复触发本导航，形成弹框循环；这类异常中断正是
-  // 重进时横幅恢复的适用场景
-  if (to.path === '/user/login') return true
-  if (!initialized || !fs.isDirty()) return true
-  const choice = await askLeaveChoice()
-  if (choice === 'stay') return false
-  if (choice === 'stash') {
-    try {
-      await draftStore.save(fs.toDraftPayload(tabs.value, active.value, 'deliberate'), fs.baseVersion)
-    } catch (e) {
-      ElMessage.error('暂存失败，已留在本页：' + (e as Error).message)
-      return false
-    }
-  } else {
-    await draftStore.clear()
-  }
-  return true
-})
-
 onBeforeUnmount(() => {
   disposed = true
   document.removeEventListener('keydown', onDocKeydown)
   window.removeEventListener('beforeunload', onBeforeUnload)
-  clearTimeout(autosaveTimer)
+  disposeDraft() // 自动暂存定时器
   clearTimeout(domainTimer)
   clearTimeout(schemaTimer)
-  // 装饰定时器逐个清掉：残留在已 dispose 的 model 上跑 applyDecorations
-  // 会抛「Model is disposed」
-  for (const t of decorTimers.values()) clearTimeout(t)
-  decorTimers.clear()
+  clearDecorTimers() // 装饰定时器：残留在已 dispose 的 model 上跑 applyDecorations 会抛「Model is disposed」
   providers?.dispose()
   providers = null
-  editor?.dispose()
-  for (const m of models.values()) m.dispose()
+  disposeTabs() // editor 与全部 model
 })
 
 // 状态栏
@@ -750,9 +426,9 @@ watch(active, () => { cursorPos.value = { line: 1, col: 1 } })
 
 function jumpTo(path: string, line?: number) {
   openTab(path)
-  if (line && editor) {
-    nextTick(() => editor?.revealLineInCenter(line))
-    nextTick(() => editor?.setPosition({ lineNumber: line, column: 1 }))
+  if (line && getEditor()) {
+    nextTick(() => getEditor()?.revealLineInCenter(line))
+    nextTick(() => getEditor()?.setPosition({ lineNumber: line, column: 1 }))
   }
   panel.value = 'problems'
 }

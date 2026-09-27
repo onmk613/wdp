@@ -255,8 +255,61 @@ func TestBatchAssignScopeCheck(t *testing.T) {
 	if rec := do(t, h, "POST", "/api/hosts/batch", BatchRequest{IDs: []int64{id}, Action: "assign", Pools: []string{"pool-a"}, SetPools: true}, &scoped); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":1`) {
 		t.Fatalf("assign 到授权池应成功: %d %s", rec.Code, rec.Body)
 	}
-	// 不动池/组（SetPools/SetGroups 均未置）只加标签 → 不触发归属写入校验
-	if rec := do(t, h, "POST", "/api/hosts/batch", BatchRequest{IDs: []int64{id}, Action: "assign", Labels: map[string]string{"env": "dev"}}, &scoped); rec.Code != http.StatusOK {
-		t.Fatalf("仅标签 assign 应成功: %d %s", rec.Code, rec.Body)
+	// 不动池/组只加标签：标签键不在授权覆盖内 → 403（labels 驱动 label 型
+	// 授权面，作用域用户不能盖任意键扩大授权面）
+	if rec := do(t, h, "POST", "/api/hosts/batch", BatchRequest{IDs: []int64{id}, Action: "assign", Labels: map[string]string{"env": "dev"}}, &scoped); rec.Code != http.StatusForbidden {
+		t.Fatalf("越权标签 assign 应 403: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestBatchAssignLabelScope label 型 host:edit 的标签写入边界：
+//   - 授权覆盖的键可打（含 replace 重写同键值）；
+//   - 未覆盖的键拒绝；
+//   - replace_labels 拆掉他人键（未覆盖旧键）同样拒绝。
+func TestBatchAssignLabelScope(t *testing.T) {
+	s, st := newTestServer(t)
+	h := s.Handler()
+	admin := loginSession(t, s)
+	id, err := st.CreateHost(&store.Host{
+		Name: "label-h", Address: "127.0.0.1", AgentPort: 1,
+		Labels: `{"env":"prod","team":"core"}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped := newUserSession(t, h, admin, "labelsc", "scoped-Pass1", "viewer")
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/users/%d/scopes", userIDByName(t, st, "labelsc")), map[string]any{
+		"scopes": []map[string]any{{"verb": "host:edit", "kind": "label", "value": "env"}},
+	}, &admin); rec.Code != http.StatusOK {
+		t.Fatalf("追加授权应 200: %d %s", rec.Code, rec.Body)
+	}
+	// 授权键 env 可打（merge）
+	if rec := do(t, h, "POST", "/api/hosts/batch", BatchRequest{IDs: []int64{id}, Action: "assign", Labels: map[string]string{"env": "dev"}}, &scoped); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":1`) {
+		t.Fatalf("授权键标签 assign 应成功: %d %s", rec.Code, rec.Body)
+	}
+	// 未覆盖键 team → 403
+	if rec := do(t, h, "POST", "/api/hosts/batch", BatchRequest{IDs: []int64{id}, Action: "assign", Labels: map[string]string{"team": "x"}}, &scoped); rec.Code != http.StatusForbidden {
+		t.Fatalf("越权键 assign 应 403: %d %s", rec.Code, rec.Body)
+	}
+	// replace 整体替换：新键 env 覆盖，但会拆掉未覆盖的旧键 team → 逐台失败
+	rec := do(t, h, "POST", "/api/hosts/batch", BatchRequest{
+		IDs: []int64{id}, Action: "assign", Labels: map[string]string{"env": "dev"}, ReplaceLabels: true,
+	}, &scoped)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":0`) {
+		t.Fatalf("拆未覆盖旧键应逐台失败: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "replaced labels") {
+		t.Fatalf("失败原因应指明替换越权: %s", rec.Body)
+	}
+	// team 键未被拆掉
+	hh, _ := st.GetHost(id)
+	if !strings.Contains(hh.Labels, `"team"`) {
+		t.Fatalf("未覆盖旧键不应被移除: %s", hh.Labels)
+	}
+	// 管理员全局权限不受限：整体替换可清掉 team
+	if rec := do(t, h, "POST", "/api/hosts/batch", BatchRequest{
+		IDs: []int64{id}, Action: "assign", Labels: map[string]string{"env": "dev"}, ReplaceLabels: true,
+	}, &admin); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"ok":1`) {
+		t.Fatalf("全局权限 replace 应成功: %d %s", rec.Code, rec.Body)
 	}
 }

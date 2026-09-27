@@ -88,6 +88,8 @@ func argBool(args map[string]any, key string) (bool, bool) {
 }
 
 // argInt 解析整数参数（YAML 数值可能是 int/int64/float64，或字符串数字）。
+// 无法解析时返回 ok=false（视为未提供）；ValidateArgs 会在派发前对
+// int 类型参数做严格校验，因此这里不会把 "1024x" 静默当 0。
 func argInt(args map[string]any, key string) (int, bool) {
 	v, ok := args[key]
 	if !ok || v == nil {
@@ -169,6 +171,7 @@ func argMode(args map[string]any, key string) (fs.FileMode, bool) {
 // ValidateArgs 在模块派发前校验任务参数（executor 调用）：
 //   - 未知键直接报错（附相似键建议）——杜绝 moed/ownerr 之类拼写错误静默失效；
 //   - bool 类型参数拒绝无法解析的值（如 "maybe"）；
+//   - int 类型参数拒绝无法解析的值（如 uid: "1024x"，不再静默当未提供）；
 //   - mode 类型参数拒绝非法值；
 //   - "(any)" 参数声明模块接受任意键（set_fact/add_host vars 等键值对型
 //     模块）：未声明的键直接放行，值类型由模块自身解释（键值对的值可以是
@@ -207,6 +210,12 @@ func ValidateArgs(m Module, args map[string]any, free string) error {
 		case "bool":
 			if _, ok := argBool(args, k); !ok {
 				return fmt.Errorf("module %s parameter %s requires a boolean (true/false/yes/no), got %v", m.Name(), k, v)
+			}
+		case "int":
+			// 键在 args 里即"已提供"，argInt 解析失败 = 非法值（如 uid: "1024x"），
+			// 不再静默降级为"未提供"导致漂移检查整个跳过。
+			if _, ok := argInt(args, k); !ok {
+				return fmt.Errorf("module %s parameter %s requires an integer, got %v", m.Name(), k, v)
 			}
 		case "mode":
 			if _, ok := argMode(args, k); !ok {

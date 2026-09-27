@@ -1021,3 +1021,84 @@ func TestCAPassphrase(t *testing.T) {
 		t.Fatalf("未设口令应提示设置 %s: %v", PassEnv, err)
 	}
 }
+
+// TestInitRefusesStrayKey 半初始化状态防护：ca.crt 缺失但 ca.key 留存时
+// Init 必须拒绝——放行会生成新 CA 并原子覆盖旧私钥，等于静默更换信任根。
+func TestInitRefusesStrayKey(t *testing.T) {
+	dir := t.TempDir()
+	if _, keyPath, _, err := Init(InitOptions{Dir: dir, Days: 30}); err != nil {
+		t.Fatal(err)
+	} else {
+		oldKey, _ := os.ReadFile(keyPath)
+		if err := os.Remove(filepath.Join(dir, DefaultCAFile)); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := Init(InitOptions{Dir: dir, Days: 30}); err == nil ||
+			!strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("ca.key 留存时应拒绝重建: %v", err)
+		}
+		// 旧私钥必须原样保留（未被新 CA 覆盖）
+		now, _ := os.ReadFile(keyPath)
+		if string(now) != string(oldKey) {
+			t.Fatal("既有 ca.key 不应被覆盖")
+		}
+	}
+}
+
+// TestRenewRejectsCA 根 CA 不能 renew：叶子模板（固定 KeyUsage、无
+// BasicConstraints）会把信任根降级成普通证书覆盖原文件，应拒绝并指引 ca init。
+func TestRenewRejectsCA(t *testing.T) {
+	dir := t.TempDir()
+	if _, _, _, err := Init(InitOptions{Dir: dir, Days: 365}); err != nil {
+		t.Fatal(err)
+	}
+	caCrt := filepath.Join(dir, DefaultCAFile)
+	before, _ := os.ReadFile(caCrt)
+	_, _, _, err := Renew(RenewOptions{
+		CertPath: caCrt, KeyPath: filepath.Join(dir, DefaultKeyFile),
+		OutPath: caCrt, Days: 30,
+	})
+	if err == nil || !strings.Contains(err.Error(), "ca init") {
+		t.Fatalf("renew 根 CA 应被拒绝并指引 ca init: %v", err)
+	}
+	after, _ := os.ReadFile(caCrt)
+	if string(before) != string(after) {
+		t.Fatal("拒绝路径不应改动原 CA 证书")
+	}
+}
+
+// TestRenewBackupNonCanonicalPath 备份目录判定需 Clean："./x.crt" 与
+// "x.crt/../x.crt" 字符串不等但同目录，误判为"输出到别处"会跳过备份直接覆盖。
+func TestRenewBackupNonCanonicalPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir) // 相对路径与绝对路径的非规范写法只有在真实 cwd 下才指向同一文件
+	Init(InitOptions{Dir: dir, Days: 365})
+	if _, _, _, err := Issue(IssueOptions{Dir: dir, Days: 1, SANs: []string{"nc"}}, "nc"); err != nil {
+		t.Fatal(err)
+	}
+	oldPEM, _ := os.ReadFile(filepath.Join(dir, "nc.crt"))
+	// 非规范写法：Dir("./nc.crt")="."，Dir(dir+"/nc.crt/../nc.crt")=dir+"/nc.crt/.."，
+	// 字符串不等但 Clean 后同为 dir——修复前会被判为"输出到别处"而跳过备份。
+	if _, _, _, err := Renew(RenewOptions{
+		CertPath: "./nc.crt", KeyPath: "./nc.key",
+		OutPath: filepath.Join(dir, "nc.crt", "..", "nc.crt"),
+		Days:    30,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entries, _ := os.ReadDir(dir)
+	backup := 0
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".old.") {
+			backup++
+		}
+	}
+	if backup < 2 {
+		t.Fatalf("同目录非规范路径也应备份旧件: %d 个 .old. 文件", backup)
+	}
+	// 覆盖后的新文件不应再与旧证书字节相同（确认确实走了覆盖+备份路径）
+	newPEM, _ := os.ReadFile(filepath.Join(dir, "nc.crt"))
+	if string(newPEM) == string(oldPEM) {
+		t.Fatal("新证书不应等于旧证书")
+	}
+}

@@ -20,13 +20,11 @@ var fileStates = []string{"file", "directory", "link", "touch", "absent"}
 // FileModule 管理远端文件/目录/链接的状态与属性。
 type FileModule struct{}
 
-// Name 模块名。
 func (m *FileModule) Name() string { return "file" }
 
 // RollbackCapability 变更经快照登记可自动回滚，且 absent 即逆操作。
 func (m *FileModule) RollbackCapability() RollbackCapability { return RollbackFull }
 
-// Desc 模块说明。
 func (m *FileModule) Desc() string {
 	return "manage file/directory/symlink state and attributes"
 }
@@ -46,7 +44,7 @@ type fileReq struct {
 func parseFileArgs(rc *RunContext, args map[string]any) (*fileReq, *Result) {
 	path, ok := argStr(args, "path")
 	if !ok || path == "" {
-		return nil, Fail("%s", "file requires a path parameter")
+		return nil, Fail("file requires a path parameter")
 	}
 	state, _ := argStr(args, "state")
 	if state != "" && !slices.Contains(fileStates, state) {
@@ -57,11 +55,11 @@ func parseFileArgs(rc *RunContext, args map[string]any) (*fileReq, *Result) {
 	fr.owner, _ = argStr(args, "owner")
 	fr.group, _ = argStr(args, "group")
 	fr.src, _ = argStr(args, "src")
-	if (fr.owner != "" || fr.group != "") && !rc.Become {
-		return nil, Fail("setting owner/group requires become: true (%s)", fr.path)
+	if bad := requireBecomeForOwner(rc, fr.owner, fr.group, fr.path); bad != nil {
+		return nil, bad
 	}
 	if fr.state == "link" && fr.src == "" {
-		return nil, Fail("%s", "state=link requires src to specify the link target")
+		return nil, Fail("state=link requires src to specify the link target")
 	}
 	return fr, nil
 }
@@ -79,15 +77,24 @@ func (c *fileChanges) add(log string, diff ...string) {
 	c.diffLines = append(c.diffLines, diff...)
 }
 
-// result 产出模块结果（check 模式标注预估，无变更按 ok 处理）。
-func (c *fileChanges) result(rc *RunContext, path string) *Result {
+// toResult 产出模块结果（check 模式标注预估，无变更按 ok 处理）。
+// Diff 仅在 --diff 下填充（与其他模块一致，见 Result.Diff 契约）。
+func (c *fileChanges) toResult(rc *RunContext, path string) *Result {
 	if rc.CheckMode && c.changed {
-		return &Result{Changed: true, Msg: "[check] " + joinWords(c.logs), Diff: joinLines(c.diffLines)}
+		res := &Result{Changed: true, Msg: "[check] " + strings.Join(c.logs, ", ")}
+		if rc.DiffMode {
+			res.Diff = strings.Join(c.diffLines, "\n")
+		}
+		return res
 	}
 	if !c.changed {
 		return &Result{Msg: fmt.Sprintf("%s %s", path, changeLabel(false))}
 	}
-	return &Result{Changed: true, Msg: fmt.Sprintf("%s %s", path, joinWords(c.logs)), Diff: joinLines(c.diffLines)}
+	res := &Result{Changed: true, Msg: fmt.Sprintf("%s %s", path, strings.Join(c.logs, ", "))}
+	if rc.DiffMode {
+		res.Diff = strings.Join(c.diffLines, "\n")
+	}
+	return res
 }
 
 // Run 管理远端路径状态与属性：状态收敛（directory/touch/link/absent）
@@ -123,7 +130,7 @@ func (m *FileModule) Run(rc *RunContext, args map[string]any, _ string) *Result 
 	if bad := fixFileAttrs(rc, fr, kind, ch); bad != nil {
 		return bad
 	}
-	return ch.result(rc, fr.path)
+	return ch.toResult(rc, fr.path)
 }
 
 // fileAbsent 删除存在的路径（快照登记回滚）。
@@ -132,7 +139,11 @@ func fileAbsent(rc *RunContext, path, kind string) *Result {
 		return &Result{Msg: fmt.Sprintf("%s does not exist", path)}
 	}
 	if rc.CheckMode {
-		return &Result{Changed: true, Msg: fmt.Sprintf("[check] will delete %s (%s)", path, kind)}
+		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] will delete %s (%s)", path, kind)}
+		if rc.DiffMode { // 与 user/group 的 absent 预估同口径：diff 报告将被删除的路径
+			res.Diff = fmt.Sprintf("- %s (will be deleted)", path)
+		}
+		return res
 	}
 	if rc.Rollback != nil {
 		rc.Rollback.Snapshot(rc, path)
@@ -217,24 +228,44 @@ func convergeFileState(rc *RunContext, fr *fileReq, kind string, ch *fileChanges
 
 // fixFileAttrs 校正属性漂移（mode/owner/group）：路径存在（或将新建）时校正，
 // 路径缺失且无状态动作时无对象可校正。
+// 实跑走共用的 fixAttrs（探测属主 → chmod → chown）；check 预估是 file
+// 自有分支——带 before→after diff 行展示，与 putFile/get_url 的预估口径
+// 不同（那边只输出汇总消息），故不并入 fixAttrs。
 func fixFileAttrs(rc *RunContext, fr *fileReq, kind string, ch *fileChanges) *Result {
 	if kind == "missing" && !ch.changed {
 		// 无 state 且路径缺失：仅属性校正语义下无对象，按无变更处理
 		return &Result{Msg: fmt.Sprintf("%s does not exist, no attributes to correct", fr.path)}
 	}
+	if rc.CheckMode {
+		return checkFileAttrs(rc, fr, ch)
+	}
+	var mode *fs.FileMode
+	if fr.hasMode {
+		mode = modePtr(fr.mode.Perm())
+	}
+	fixedMode, fixedOwner, bad := fixAttrs(rc, fr.path, mode, fr.owner, fr.group)
+	if bad != nil {
+		return bad
+	}
+	if fixedMode {
+		ch.add(fmt.Sprintf("permission → %04o", int64(fr.mode.Perm())))
+	}
+	if fixedOwner {
+		ch.add(fmt.Sprintf("owner → %s:%s", fr.owner, fr.group))
+	}
+	return nil
+}
+
+// checkFileAttrs 是 fixFileAttrs 的 check 预估分支：只读探测 mode/属主
+// 漂移并产出 diff 行（- 旧值/+ 新值），不执行任何校正。
+func checkFileAttrs(rc *RunContext, fr *fileReq, ch *fileChanges) *Result {
 	if fr.hasMode {
 		wantMode := int64(fr.mode.Perm())
-		if rc.CheckMode {
-			if cur, ok, mbad := remoteMode(rc, fr.path); mbad != nil {
-				return mbad
-			} else if ok && cur != wantMode {
-				ch.add(fmt.Sprintf("permission → %04o", wantMode),
-					fmt.Sprintf("- mode: %04o", cur), fmt.Sprintf("+ mode: %04o", wantMode))
-			}
-		} else if fixed, bad := chmodIfDiffers(rc, fr.path, wantMode); bad != nil {
-			return bad
-		} else if fixed {
-			ch.add(fmt.Sprintf("permission → %04o", wantMode))
+		if cur, ok, mbad := remoteMode(rc, fr.path); mbad != nil {
+			return mbad
+		} else if ok && cur != wantMode {
+			ch.add(fmt.Sprintf("permission → %04o", wantMode),
+				fmt.Sprintf("- mode: %04o", cur), fmt.Sprintf("+ mode: %04o", wantMode))
 		}
 	}
 	if fr.owner != "" || fr.group != "" {
@@ -243,15 +274,9 @@ func fixFileAttrs(rc *RunContext, fr *fileReq, kind string, ch *fileChanges) *Re
 			return bad
 		}
 		if !ok || (fr.owner != "" && curOwner != fr.owner) || (fr.group != "" && curGroup != fr.group) {
-			if rc.CheckMode {
-				ch.add(fmt.Sprintf("owner → %s:%s", fr.owner, fr.group),
-					fmt.Sprintf("- owner: %s:%s", curOwner, curGroup),
-					fmt.Sprintf("+ owner: %s:%s", fr.owner, fr.group))
-			} else if bad := chownPath(rc, fr.path, fr.owner, fr.group); bad != nil {
-				return bad
-			} else {
-				ch.add(fmt.Sprintf("owner → %s:%s", fr.owner, fr.group))
-			}
+			ch.add(fmt.Sprintf("owner → %s:%s", fr.owner, fr.group),
+				fmt.Sprintf("- owner: %s:%s", curOwner, curGroup),
+				fmt.Sprintf("+ owner: %s:%s", fr.owner, fr.group))
 		}
 	}
 	return nil
@@ -263,10 +288,12 @@ func typeConflict(state, kind, path string) string {
 	if kind == "missing" || state == "" || state == "touch" || state == "absent" || kind == state {
 		return ""
 	}
-	return fmt.Sprintf("type conflict: %s already exists and is %s (state=%s)", path, kindCN(kind), state)
+	return fmt.Sprintf("type conflict: %s already exists and is %s (state=%s)", path, kindLabel(kind), state)
 }
 
-func kindCN(kind string) string {
+// kindLabel 将探测到的路径类型映射为可读标签（kindCN 的更名：返回的
+// 一直是英文标签，命名与实现保持一致）。
+func kindLabel(kind string) string {
 	switch kind {
 	case "file":
 		return "regular file"
@@ -357,7 +384,6 @@ func (m *FileModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *FileModule) Example() string {
 	return `- name: app directory and symlink
   file:

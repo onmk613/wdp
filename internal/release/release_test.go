@@ -1,6 +1,7 @@
 package release
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -37,6 +38,56 @@ func TestSaveLoadContainedInDir(t *testing.T) {
 	}
 	if rec.Chart != "../evil" {
 		t.Errorf("回读内容不符: %+v", rec)
+	}
+}
+
+// TestSaveConflictRetryIDConsistent 冲突重试时文件名、正文 id、返回值
+// 三者一致：正文必须在序号后缀定型之后序列化；重试有上限（连撞 8 次报
+// 明确错误而非无限循环）。
+func TestSaveConflictRetryIDConsistent(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	relDir := filepath.Join(home, ".wdp", "releases")
+	if err := os.MkdirAll(relDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Unix(1700000000, 0)
+	base := "app-1700000000000000000"
+
+	// 预占基名文件：Save 应追加 -1 重试
+	if err := os.WriteFile(filepath.Join(relDir, base+".json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id, err := Save(&Record{Chart: "app", Hosts: []string{"h1"}, Time: ts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != base+"-1" {
+		t.Fatalf("冲突后应追加序号: %q", id)
+	}
+	rec, err := Load(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ID != id {
+		t.Fatalf("正文 id 应与文件名一致: 正文 %q, 文件名 %q", rec.ID, id)
+	}
+
+	// 预占全部 8 个候选名（attempt 0..7）：超限报错而非无限重试
+	if err := os.Remove(filepath.Join(relDir, id+".json")); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 8; i++ {
+		n := base + ".json"
+		if i > 0 {
+			n = fmt.Sprintf("%s-%d.json", base, i)
+		}
+		if err := os.WriteFile(filepath.Join(relDir, n), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if id, err := Save(&Record{Chart: "app", Hosts: []string{"h1"}, Time: ts}); err == nil {
+		t.Fatalf("连撞 %d 次应报错, 却返回 %q", 8, id)
 	}
 }
 

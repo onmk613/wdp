@@ -16,8 +16,12 @@ import (
 // 共用本上限。
 const MaxChartDepth = 32
 
-// FindSub 按名递归查找子 chart（支持嵌套引用）。词法作用域优先：先查
-// 自身 Subs（就近遮蔽，与 Go 变量遮蔽同语义），未命中再向下递归。
+// FindSub 按名查找子 chart（支持嵌套引用）。解析视角恒为根 chart：
+// lint（lint.go）与 executor（expand.go）都以根调用本方法，根的直接子
+// chart 优先命中，未命中再自根整树递归——因此某个子 chart 自己的同名
+// 子 chart 不会被"就近"选中（子 chart 无独立解析入口）。这一口径必须
+// 保持：lint 与 executor 若一侧改成从引用所在 chart 就近解析，另一侧
+// 仍从根解析，lint 通过的引用会在执行期解析到另一个实例。
 // 跨分支出现同名子 chart 时报错并列出候选路径——此前按字典序静默选
 // 一个，会把版本约束校验到错误的实例上。
 func (c *Chart) FindSub(name string) (*Chart, error) {
@@ -61,6 +65,26 @@ func sortedSubNames(subs map[string]*Chart) []string {
 	return names
 }
 
+// CheckVersionConstraint 校验 got 是否满足 want 约束（semver 语法，如
+// ^1.2 / >=1.0,<2.0）。子 chart 解析（ResolveSub）与裸 playbook 的
+// ChartRefs 解析（executor/expand.go）共用本入口，保证版本语义不分叉
+// ——此前两处各写一份逻辑，全靠人肉保持一致。
+// kind 是错误文案里的主语（"subchart"/"chart"），随调用方语境。
+func CheckVersionConstraint(kind, name, got, want string) error {
+	v, err := semver.NewVersion(got)
+	if err != nil {
+		return fmt.Errorf("%s %s version %q is not a semantic version, cannot apply constraint %q", kind, name, got, want)
+	}
+	rng, err := semver.NewConstraint(want)
+	if err != nil {
+		return fmt.Errorf("failed to parse version constraint %q: %w", want, err)
+	}
+	if !rng.Check(v) {
+		return fmt.Errorf("%s %s version %s does not satisfy constraint %q", kind, name, got, want)
+	}
+	return nil
+}
+
 // ResolveSub 解析子 chart 引用：`jdk` 或 `jdk@1.2.0`（版本约束，semver 语法，
 // 如 jdk@^1.2 / jdk@>=1.0,<2.0）。执行、lint、template 预览统一走本入口，
 // 保证版本语义不分叉。
@@ -71,17 +95,8 @@ func (c *Chart) ResolveSub(ref string) (*Chart, error) {
 		return nil, err
 	}
 	if constrained && constraint != "" {
-		v, err := semver.NewVersion(sub.Meta.Version)
-		if err != nil {
-			return nil, fmt.Errorf("subchart %s version %q is not a semantic version, cannot apply constraint %q",
-				name, sub.Meta.Version, constraint)
-		}
-		rng, err := semver.NewConstraint(constraint)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse version constraint %q: %w", constraint, err)
-		}
-		if !rng.Check(v) {
-			return nil, fmt.Errorf("subchart %s version %s does not satisfy constraint %q", name, sub.Meta.Version, constraint)
+		if err := CheckVersionConstraint("subchart", name, sub.Meta.Version, constraint); err != nil {
+			return nil, err
 		}
 	}
 	return sub, nil

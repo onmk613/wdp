@@ -27,6 +27,44 @@ func TestSecurityHeadersOnConsole(t *testing.T) {
 	}
 }
 
+// TestHSTSHonorsTrustedProxyOnly HSTS 设置口径与 requestIsHTTPS 一致：
+// X-Forwarded-Proto 只在直连对端为信任反代（回环/显式配置）时采信。
+// 非信任对端伪造该头不得触发 HSTS——否则任一客户端可给明文部署钉上
+// Strict-Transport-Security，把后续 http 流量错误锁死。
+func TestHSTSHonorsTrustedProxyOnly(t *testing.T) {
+	s, _ := newTestServer(t)
+	h := s.Handler()
+
+	get := func(remote, proto string) string {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.RemoteAddr = remote
+		if proto != "" {
+			req.Header.Set("X-Forwarded-Proto", proto)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Header().Get("Strict-Transport-Security")
+	}
+
+	// 直连客户端伪造 XFP：不设 HSTS（httptest 缺省 RemoteAddr 192.0.2.1
+	// 为非信任对端，这里再显式给一个公网地址）
+	if got := get("203.0.113.9:4444", "https"); got != "" {
+		t.Fatalf("非信任对端伪造 X-Forwarded-Proto 不得设置 HSTS: %q", got)
+	}
+	// 明文直连（无 XFP）：不设
+	if got := get("203.0.113.9:4444", ""); got != "" {
+		t.Fatalf("明文直连不应设置 HSTS: %q", got)
+	}
+	// 回环反代（本机 nginx 拓扑）+ XFP https：设置
+	if got := get("127.0.0.1:5555", "https"); got != "max-age=31536000" {
+		t.Fatalf("信任反代 XFP=https 应设置 HSTS: %q", got)
+	}
+	// 回环反代但 XFP=http（反代明文回源）：不设
+	if got := get("127.0.0.1:5555", "http"); got != "" {
+		t.Fatalf("信任反代 XFP=http 不应设置 HSTS: %q", got)
+	}
+}
+
 func TestCrossOriginWriteRejected(t *testing.T) {
 	s, _ := newTestServer(t)
 	h := s.Handler()

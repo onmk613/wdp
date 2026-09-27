@@ -3,7 +3,6 @@ package playbook
 // 任务解析：已知控制属性解析为 Task 字段，剩余唯一键即模块（或 chart 引用）。
 
 import (
-	"errors"
 	"fmt"
 	"maps"
 	"regexp"
@@ -92,14 +91,16 @@ func parseTaskFlowKeys(m map[string]any, t *model.Task) error {
 	if v, ok := m["when"]; ok {
 		l, ok := strOrList(v)
 		if !ok {
-			return errors.New("when only supports a string or a list")
+			// 与同函数 retries/delay/timeout 同口径：错误带任务名，
+			// 多任务 play 里定位到出错任务
+			return fmt.Errorf("task %q: when only supports a string or a list", t.Label())
 		}
 		t.When = l
 	}
 	if v, ok := m["loop"]; ok {
 		l, err := toAnyList(v, "loop")
 		if err != nil {
-			return err
+			return fmt.Errorf("task %q: %w", t.Label(), err)
 		}
 		t.Loop = l
 	}
@@ -366,8 +367,7 @@ var chartRefKeys = func() map[string]bool {
 //
 //   - chart: {name: jdk, values: {...}, values_from: [...], hosts: ..., phase: ...}
 //
-// 曾并存 `chart: jdk` 简写（引用名直写、配置键平级），已移除：两种写法
-// 并存让文档/补全/校验都要双份口径，统一为 map 形态。
+// `chart: jdk` 简写已移除（错误信息已带迁移提示）。
 //
 // chart 模式下引用名解析为父 chart 的子 chart；裸 playbook 模式解析为
 // playbook 同级 charts/<name>/ 目录（wdp run 启动期预扫描加载）。
@@ -463,6 +463,12 @@ func parseChartRefTask(m map[string]any, modVal any, t *model.Task) (*model.Task
 	// 其余未知键一律拒绝（普通模块键混进 chart 引用任务会静默失效）；
 	// chart 专属键出现在平级位置同样拒绝——配置集中在 map 里
 	for k := range m {
+		if k == "args" {
+			// args 在通用控制键白名单里（普通任务用它显式传模块参数），
+			// 走通用放行会被静默丢弃——chart 引用任务没有可合并的模块
+			// 参数，显式拒绝并把参数去处指给 chart map 的 vars/values
+			return nil, fmt.Errorf("task %q: chart reference does not accept %q (write chart task parameters in the chart map: chart: {name: ..., vars: ...}; vars and values are the same setting)", t.Label(), k)
+		}
 		if taskKeys[k] || k == "chart" || k == "name" || k == "vars" || k == "tasks_from" {
 			continue
 		}

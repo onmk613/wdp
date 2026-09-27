@@ -6,11 +6,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
 	"wdp/internal/shellquote"
 )
+
+// envKeyRe 是允许注入的环境变量键白名单（与 sshc 一致）。
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9]*$`)
 
 // ExecReq 是一次脚本执行请求。
 type ExecReq struct {
@@ -34,31 +38,33 @@ type ExecResp struct {
 
 // RunScript 在当前进程所在主机上执行一次脚本。
 func RunScript(ctx context.Context, req ExecReq) ExecResp {
-	// 提权：sudo -u（-n 免密；-S 密码经 stdin 传递，不进命令行，ps 不可见）
-	script, stdin := BecomeScript(req.Script, req.BecomeUser, req.BecomePassword, req.Stdin)
-
 	if req.TimeoutMs > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(req.TimeoutMs)*time.Millisecond)
 		defer cancel()
 	}
-	// become 时环境变量写进脚本内部（sudo 默认 env_reset 会剥夺外层注入的
-	// 变量；脚本内 export 在 sudo 之后执行不受影响），非 become 走进程环境
-	env := os.Environ()
-	if req.BecomeUser != "" && len(req.Env) > 0 {
-		var sb strings.Builder
-		for k, v := range req.Env {
-			if envKeyRe.MatchString(k) {
-				fmt.Fprintf(&sb, "export %s=%s\n", k, shellquote.Quote(v))
-			}
-		}
-		script = sb.String() + script
-	} else {
-		for k, v := range req.Env {
-			env = append(env, k+"="+v)
-		}
+	script, env := prepareScriptEnv(req)
+	// 脚本体落 0700 临时文件执行，绝不进 argv：本机 ps、/proc/<pid>/cmdline
+	// 对同机任意用户可见，脚本内嵌的 export TOKEN=…/口令会随 argv 广播出去
+	// （agent 常以 root 常驻，这是同机横向提权面）——与 sshc.WrapScript 对
+	// SSH 通道的防线同一威胁模型，本机通道不能只防其一。
+	path, werr := writeScriptFile(script)
+	if werr != nil {
+		return ExecResp{Code: 1, Stderr: fmt.Sprintf("[wdp-agent] %v", werr)}
 	}
-	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
+	defer os.Remove(path)
+
+	stdin := req.Stdin
+	argv := []string{"/bin/sh", path}
+	if req.BecomeUser != "" {
+		// 0700 文件只有属主可读：先收敛归属再交给 sudo 目标用户执行
+		if err := handOverTo(ctx, path, req.BecomeUser, req.BecomePassword); err != nil {
+			return ExecResp{Code: 1, Stderr: fmt.Sprintf("[wdp-agent] %v", err)}
+		}
+		argv, stdin = becomeCmd(path, req.BecomeUser, req.BecomePassword, stdin)
+	}
+
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	setPgrp(cmd) // 独立进程组：超时整组击杀（sudo 提权的 root 子进程不残留）
 	cmd.Cancel = func() error { return killGroup(cmd) }
 	cmd.WaitDelay = 3 * time.Second
@@ -76,7 +82,61 @@ func RunScript(ctx context.Context, req ExecReq) ExecResp {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	return execRespOf(ctx, err, &stdout, &stderr)
+}
 
+// prepareScriptEnv 组装最终脚本体与进程环境：become 时环境变量写进脚本
+// 内部（sudo 默认 env_reset 会剥夺外层注入的变量；脚本内 export 在 sudo
+// 之后执行不受影响），非 become 走进程环境。
+func prepareScriptEnv(req ExecReq) (string, []string) {
+	script := req.Script
+	env := os.Environ()
+	if req.BecomeUser != "" && len(req.Env) > 0 {
+		var sb strings.Builder
+		for k, v := range req.Env {
+			if envKeyRe.MatchString(k) {
+				fmt.Fprintf(&sb, "export %s=%s\n", k, shellquote.Quote(v))
+			}
+		}
+		return sb.String() + script, env
+	}
+	for k, v := range req.Env {
+		env = append(env, k+"="+v)
+	}
+	return script, env
+}
+
+// writeScriptFile 把脚本体落 0700 临时文件（成功后清理归调用方）。
+// 任一步失败即删除半成品文件并返回 "<op> script file" 错误（调用方补
+// [wdp-agent] 前缀）。
+func writeScriptFile(script string) (path string, err error) {
+	var tf *os.File
+	tf, err = os.CreateTemp("", ".wdp-exec-*.sh")
+	if err != nil {
+		return "", fmt.Errorf("create script file: %w", err)
+	}
+	path = tf.Name()
+	defer func() {
+		if err != nil {
+			os.Remove(path)
+		}
+	}()
+	if _, werr := tf.WriteString(script); werr != nil {
+		tf.Close()
+		return "", fmt.Errorf("write script file: %w", werr)
+	}
+	if werr := tf.Close(); werr != nil {
+		return "", fmt.Errorf("close script file: %w", werr)
+	}
+	if werr := os.Chmod(path, 0o700); werr != nil {
+		return "", fmt.Errorf("chmod script file: %w", werr)
+	}
+	return path, nil
+}
+
+// execRespOf 组装执行响应：输出截断标注、退出码归因（超时/调用方取消
+// 区分，退出码取真实 exit status）。
+func execRespOf(ctx context.Context, err error, stdout, stderr *capWriter) ExecResp {
 	resp := ExecResp{Stdout: stdout.String(), Stderr: stderr.String()}
 	if stdout.truncated {
 		resp.Stdout += "\n[wdp-agent] " + "stdout exceeded 1MiB and was truncated"

@@ -38,6 +38,10 @@ func Dir() (string, error) {
 	return filepath.Join(home, ".wdp", "releases"), nil
 }
 
+// maxSaveAttempts 是 Save 冲突重试上限：纳秒粒度下连撞 8 次同名已属
+// 文件系统异常，无界重试会让部署收尾在此无限卡住。
+const maxSaveAttempts = 8
+
 // Save 写入一条记录，返回 ID。
 func Save(rec *Record) (string, error) {
 	dir, err := Dir()
@@ -56,19 +60,21 @@ func Save(rec *Record) (string, error) {
 	}
 	// 纳秒粒度 ID：秒级粒度下同名 chart 同秒并发部署会互相覆盖审计记录；
 	// 配合 O_EXCL 创建，冲突（同纳秒）时追加序号重试
-	rec.ID = fmt.Sprintf("%s-%d", name, rec.Time.UnixNano())
-	data, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return "", err
-	}
+	base := fmt.Sprintf("%s-%d", name, rec.Time.UnixNano())
 	// 记录路径经 securejoin 约束在记录目录内: ID 源自 chart 名,
 	// 含 ../ 的名字被收敛为目录内路径, 不会越出 releases 写文件.
-	for attempt := 0; ; attempt++ {
-		id := rec.ID
+	for attempt := 0; attempt < maxSaveAttempts; attempt++ {
+		rec.ID = base
 		if attempt > 0 {
-			id = fmt.Sprintf("%s-%d", rec.ID, attempt)
+			rec.ID = fmt.Sprintf("%s-%d", base, attempt)
 		}
-		path, err := securejoin.SecureJoin(dir, id+".json")
+		// 序列化在 id 定型之后：重试追加序号时正文里的 id 必须与文件名
+		// 一致，否则落盘记录名实不符（回读/审计对不上文件名）
+		data, err := json.MarshalIndent(rec, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		path, err := securejoin.SecureJoin(dir, rec.ID+".json")
 		if err != nil {
 			return "", err
 		}
@@ -91,12 +97,14 @@ func Save(rec *Record) (string, error) {
 		if werr := f.Close(); werr != nil {
 			return "", werr
 		}
-		rec.ID = id
-		return id, nil
+		return rec.ID, nil
 	}
+	return "", fmt.Errorf("record %s: id conflicts persist after %d attempts", base, maxSaveAttempts)
 }
 
-// List 列出记录（新在前），chartFilter 非空时按 chart 名前缀过滤。
+// List 列出记录（新在前）。chartFilter 非空时按记录 ID 前缀过滤——
+// ID 形如 "<chart>-<epoch>"，是 ID 前缀匹配而非精确 chart 名匹配，
+// 前缀 chart 也会命中 chart2 的记录。
 func List(chartFilter string) ([]*Record, error) {
 	dir, err := Dir()
 	if err != nil {
@@ -182,6 +190,17 @@ func Delete(id string) error {
 func DiffValues(a, b map[string]any) []string {
 	var lines []string
 	diffValues("", a, b, &lines)
+	// 输出按路径排序：map 迭代顺序随机会让同一对记录的 diff 行序每次不同，
+	// 无法用于稳定的回归对比。排序只在顶层做一次——递归每层对累积的整个
+	// 切片重复排序是 O(深度×行数×log行数) 的无用功。
+	slices.SortFunc(lines, func(a, b string) int {
+		pi := strings.Fields(a)
+		pj := strings.Fields(b)
+		if len(pi) > 1 && len(pj) > 1 {
+			return strings.Compare(pi[1], pj[1])
+		}
+		return strings.Compare(a, b)
+	})
 	return lines
 }
 
@@ -219,14 +238,4 @@ func diffValues(prefix string, a, b map[string]any, out *[]string) {
 			}
 		}
 	}
-	// 输出按路径排序：map 迭代顺序随机会让同一对记录的 diff 行序每次不同，
-	// 无法用于稳定的回归对比
-	slices.SortFunc(*out, func(a, b string) int {
-		pi := strings.Fields(a)
-		pj := strings.Fields(b)
-		if len(pi) > 1 && len(pj) > 1 {
-			return strings.Compare(pi[1], pj[1])
-		}
-		return strings.Compare(a, b)
-	})
 }

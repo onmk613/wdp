@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"wdp/internal/shellquote"
 )
 
 func init() {
@@ -25,18 +23,15 @@ func init() {
 // 静默回退到联网下载（那正是离线环境会挂掉的地方）。
 type ArtifactModule struct{}
 
-// Name 模块名。
 func (m *ArtifactModule) Name() string { return "artifact" }
 
 // RollbackCapability 变更经快照登记可自动回滚（与 copy 相同的 putFile 管线）。
 func (m *ArtifactModule) RollbackCapability() RollbackCapability { return RollbackFull }
 
-// Desc 模块说明。
 func (m *ArtifactModule) Desc() string {
 	return "distribute an artifact with a control-side cache (cache hit = offline, miss = download once into the cache)"
 }
 
-// Params 参数文档。
 func (m *ArtifactModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "cache", Type: "string", Desc: "control-side cache path (chart-relative, e.g. packages/<arch>/app.tgz); a non-empty file at this path is used as-is, never downloading (required)"},
@@ -50,7 +45,6 @@ func (m *ArtifactModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *ArtifactModule) Example() string {
 	return `# one task for both online and offline: cache packages/ pre-seeded -> offline;
 # empty cache -> download once on the control node, then distribute
@@ -77,30 +71,30 @@ func (m *ArtifactModule) Example() string {
 func (m *ArtifactModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	cache, ok := argStr(args, "cache")
 	if !ok || cache == "" {
-		return Fail("%s", "artifact requires a cache parameter")
+		return Fail("artifact requires a cache parameter")
 	}
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("%s", "artifact requires a dest parameter")
+		return Fail("artifact requires a dest parameter")
 	}
 	url, _ := argStr(args, "url")
 	members, _ := argStrList(args, "members")
 	wantSum, _ := argStr(args, "sha256")
 	wantSum = strings.ToLower(strings.TrimSpace(wantSum))
 	if wantSum != "" && !isSHA256Hex(wantSum) {
-		return Fail("%s", "sha256 parameter must be a 64-character hex string")
+		return Fail("sha256 parameter must be a 64-character hex string")
 	}
 	timeoutSecs, ok := argSecs(args, "timeout_secs", 30)
 	if !ok || timeoutSecs <= 0 {
-		return Fail("%s", "timeout_secs must be a positive integer")
+		return Fail("timeout_secs must be a positive integer")
 	}
 	headers, bad := headerMapArg(args, "headers")
 	if bad != nil {
 		return bad
 	}
-	forcedMode, hasMode := argMode(args, "mode")
+	mode, hasMode := argMode(args, "mode")
 	if !hasMode {
-		forcedMode = 0o755 // 制品以可执行文件为主，缺省 0755（members 沿用归档权限）
+		mode = 0o755 // 制品以可执行文件为主，缺省 0755（members 沿用归档权限）
 	}
 
 	cachePath, cerr := resolveLocal(rc, cache)
@@ -113,10 +107,10 @@ func (m *ArtifactModule) Run(rc *RunContext, args map[string]any, _ string) *Res
 	}
 
 	if len(members) > 0 {
-		return m.distributeMembers(rc, data, cacheHit, cache, dest, members, int64(forcedMode.Perm()), hasMode)
+		return m.distributeMembers(rc, data, cacheHit, cache, dest, members, int64(mode.Perm()), hasMode)
 	}
 
-	changed, res := putFile(rc, data, dest, int64(forcedMode.Perm()), false, true, "", "")
+	changed, res := putFile(rc, putFileOpts{data: data, dest: dest, mode: &mode})
 	if res != nil {
 		return res
 	}
@@ -170,46 +164,21 @@ func (m *ArtifactModule) distributeMembers(rc *RunContext, data []byte, cacheHit
 	if err != nil {
 		return Fail("artifact %s: %v", cache, err)
 	}
-	cur, bad := probePath(rc, dest)
+	cur, bad := destDirState(rc, dest)
 	if bad != nil {
 		return bad
 	}
-	if cur != "missing" && cur != "directory" {
-		return Fail("%s exists and is not a directory", dest)
-	}
+	// 新建目录登记回滚删除（RollbackFull 声明含目录本身；此前 members
+	// 路径漏登记，auto_rollback 后残留空目录）
+	recordMkdirRollback(rc, dest, cur)
 	// check 模式不得产生任何目标机变更：目录缺失时只做"将会创建"的预估
 	//（逐成员 putFile 在 check 下不落盘，与 unarchive 同一约定）
-	if cur == "missing" && !rc.CheckMode {
-		if out, bad := rc.exec(fmt.Sprintf("mkdir -p -- %s", shellquote.Quote(dest))); bad != nil {
-			return bad
-		} else if out.Code != 0 {
-			return Fail("failed to create directory: %s", firstLine(out.Stderr))
-		}
+	if bad := mkdirDestMissing(rc, dest, cur); bad != nil {
+		return bad
 	}
-	changed := false
-	for _, mem := range sel {
-		mode := mem.mode
-		if mode == 0 {
-			mode = 0o644
-		}
-		if hasMode {
-			mode = forcedMode
-		}
-		target := strings.TrimSuffix(dest, "/") + "/" + filepath.ToSlash(filepath.Base(strings.ReplaceAll(mem.name, `\`, "/")))
-		memChanged, res := putFile(rc, mem.data, target, mode, false, true, "", "")
-		if res != nil {
-			if res.Failed {
-				return res
-			}
-			// check 预估：逐成员累积 changed，继续评估其余成员
-			if res.Changed {
-				changed = true
-			}
-			continue
-		}
-		if memChanged {
-			changed = true
-		}
+	changed, bad := distributeMemberFiles(rc, dest, sel, forcedMode, hasMode)
+	if bad != nil {
+		return bad
 	}
 	return &Result{Changed: changed, Msg: m.msg(cacheHit, cache, changed,
 		fmt.Sprintf("%d members from %s are unchanged in %s", len(sel), cache, dest),

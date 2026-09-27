@@ -5,7 +5,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 
 	"wdp/internal/shellquote"
 )
@@ -22,15 +21,12 @@ var lineinfileStates = []string{"present", "absent"}
 // 下载 → 控制端变换行集 → 整体回传（幂等，check/diff/回滚齐全）。
 type LineinfileModule struct{}
 
-// Name 模块名。
 func (m *LineinfileModule) Name() string { return "lineinfile" }
 
-// Desc 模块说明。
 func (m *LineinfileModule) Desc() string {
 	return "manage single lines in remote files (present/absent/replace)"
 }
 
-// Params 参数文档。
 func (m *LineinfileModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "path", Type: "string", Desc: "remote file path"},
@@ -46,7 +42,6 @@ func (m *LineinfileModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *LineinfileModule) Example() string {
 	return `- name: ensure the grant line exists (create the file if missing)
   lineinfile:
@@ -64,152 +59,193 @@ func (m *LineinfileModule) Example() string {
 `
 }
 
-// Run 执行行级变更。
-func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
+// lineinfileReq 是 lineinfile 解析后的参数（正则已预编译）。
+type lineinfileReq struct {
+	path         string
+	line         string
+	hasLine      bool
+	state        string
+	pattern      string
+	afterPattern string
+	create       bool
+	backup       bool
+	owner        string
+	group        string
+	mode         int64 // 仅 create 新建时生效；已有文件保持原权限
+	re           *regexp.Regexp
+	after        *regexp.Regexp
+}
+
+// parseLineinfileArgs 解析并校验 lineinfile 参数（path 必填、state 合法、
+// present 需 line、absent 需非空 line 或 regexp、owner/group 的 become 要求），
+// 并预编译 regexp/insertafter。
+func parseLineinfileArgs(rc *RunContext, args map[string]any) (*lineinfileReq, *Result) {
 	path, ok := argStr(args, "path")
 	if !ok || path == "" {
-		return Fail("%s", "lineinfile requires a path parameter")
+		return nil, Fail("lineinfile requires a path parameter")
 	}
 	line, hasLine := argStr(args, "line")
 	state, ok := parseState(args, "present", lineinfileStates...)
 	if !ok {
-		return Fail("unsupported state %q (options: %s)", state, strings.Join(lineinfileStates, "/"))
+		return nil, Fail("unsupported state %q (options: %s)", state, strings.Join(lineinfileStates, "/"))
 	}
 	if state != "absent" && !hasLine {
-		return Fail("%s", "lineinfile requires a line parameter (state=present)")
+		return nil, Fail("lineinfile requires a line parameter (state=present)")
 	}
+	pattern, _ := argStr(args, "regexp")
 	if state == "absent" {
-		p, _ := argStr(args, "regexp")
 		// line:"" 显式空串经 argStr 视为"已提供"——但空行匹配会删除文件中
 		// 所有空行，语义上几乎必然是误用，与无 regexp 的 absent 一并拒绝
 		if !hasLine || line == "" {
-			if p == "" {
-				return Fail("%s", "state=absent requires a non-empty line or regexp (an empty line would match every blank line)")
+			if pattern == "" {
+				return nil, Fail("state=absent requires a non-empty line or regexp (an empty line would match every blank line)")
 			}
 		}
 	}
-	pattern, _ := argStr(args, "regexp")
 	afterPattern, _ := argStr(args, "insertafter")
-	create, _ := argBool(args, "create")
-	backup, _ := argBool(args, "backup")
-	owner, _ := argStr(args, "owner")
-	group, _ := argStr(args, "group")
-	mode := int64(0o644) // 仅 create 新建时生效；已有文件保持原权限
+	q := &lineinfileReq{
+		path:         path,
+		line:         line,
+		hasLine:      hasLine,
+		state:        state,
+		pattern:      pattern,
+		afterPattern: afterPattern,
+	}
+	q.create, _ = argBool(args, "create")
+	q.backup, _ = argBool(args, "backup")
+	q.owner, _ = argStr(args, "owner")
+	q.group, _ = argStr(args, "group")
+	q.mode = 0o644 // 仅 create 新建时生效；已有文件保持原权限
 	if mv, ok := argMode(args, "mode"); ok {
-		mode = int64(mv.Perm())
+		q.mode = int64(mv.Perm())
 	}
-	if (owner != "" || group != "") && !rc.Become {
-		return Fail("setting owner/group requires become: true (%s)", path)
+	if bad := requireBecomeForOwner(rc, q.owner, q.group, path); bad != nil {
+		return nil, bad
 	}
-
-	var re, after *regexp.Regexp
 	if pattern != "" {
 		r, err := regexp.Compile(pattern)
 		if err != nil {
-			return Fail("unable to parse regexp: %v", err)
+			return nil, Fail("unable to parse regexp: %v", err)
 		}
-		re = r
+		q.re = r
 	}
 	if afterPattern != "" && afterPattern != "EOF" {
 		r, err := regexp.Compile(afterPattern)
 		if err != nil {
-			return Fail("unable to parse insertafter: %v", err)
+			return nil, Fail("unable to parse insertafter: %v", err)
 		}
-		after = r
+		q.after = r
 	}
+	return q, nil
+}
 
-	// 读取远端内容（下载为只读探测，check 模式同样允许）。
-	// 存在性判定用显式探测：下载失败的语义是错误（权限/断连），
-	// 不能与"文件不存在"混为一谈——absent 时混同会吞错报"无需变更"。
-	var oldContent string
+// readRemoteFile 读取远端文件内容。返回 (内容, 是否存在, 终态结果)；
+// 终态结果非 nil 时直接透传（非普通文件报错、缺文件且 absent 的"无需
+// 变更"、缺文件且未开 create 的报错、下载超限报错等）。
+// 存在性判定用显式探测：下载失败的语义是错误（权限/断连），
+// 不能与"文件不存在"混为一谈——absent 时混同会吞错报"无需变更"。
+func readRemoteFile(rc *RunContext, q *lineinfileReq) (string, bool, *Result) {
 	probe := fmt.Sprintf(`p=%s
 [ -e "$p" ] || exit 3
-[ -f "$p" ] || exit 4`, shellquote.Quote(path))
+[ -f "$p" ] || exit 4`, shellquote.Quote(q.path))
 	pout, pbad := rc.exec(probe)
 	if pbad != nil {
-		return pbad
+		return "", false, pbad
 	}
 	switch pout.Code {
 	case 4:
-		return Fail("remote path %s exists and is not a regular file", path)
+		return "", false, Fail("remote path %s exists and is not a regular file", q.path)
 	case 0:
 		// 下载封顶：lineinfile 需要全文才能做行变换，超限只能 fail-loud
 		// （截断后回写会把远端文件改坏），不能像 diff 那样降级提示
-		buf := &cappedBuffer{cap: uploadLimit(rc)}
-		if err := rc.Conn.DownloadFile(rc.Ctx, path, buf); err != nil {
-			return Fail("failed to read %s: %v", path, err)
+		buf := &cappedBuffer{max: uploadLimit(rc)}
+		if err := rc.Conn.DownloadFile(rc.Ctx, q.path, buf); err != nil {
+			return "", false, Fail("failed to read %s: %v", q.path, err)
 		}
 		if buf.truncated() {
-			return Fail("remote file %s exceeds the %d MiB limit ([transfer].max_upload_mb)", path, uploadLimit(rc)>>20)
+			return "", false, Fail("remote file %s exceeds the %d MiB limit ([transfer].max_upload_mb)", q.path, uploadLimit(rc)>>20)
 		}
-		oldContent = buf.buf.String()
+		return buf.buf.String(), true, nil
 	default:
-		if state == "absent" {
-			return &Result{Msg: fmt.Sprintf("%s does not exist, no change needed for state=absent", path)}
+		if q.state == "absent" {
+			return "", false, &Result{Msg: fmt.Sprintf("%s does not exist, no change needed for state=absent", q.path)}
 		}
-		if !create {
-			return Fail("file does not exist: %s (use create: true to create it)", path)
+		if !q.create {
+			return "", false, Fail("file does not exist: %s (use create: true to create it)", q.path)
 		}
+		return "", false, nil
 	}
-	exists := pout.Code == 0
+}
 
-	newContent := lineTransform(oldContent, line, re, after, state == "absent")
+// Run 执行行级变更：解析 → 探测读取 → 变换 → check 预估或实跑回写
+// （骨架与 user 模块一致）。
+func (m *LineinfileModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
+	q, bad := parseLineinfileArgs(rc, args)
+	if bad != nil {
+		return bad
+	}
+	oldContent, exists, bad := readRemoteFile(rc, q)
+	if bad != nil {
+		return bad
+	}
+
+	newContent := lineTransform(oldContent, q.line, q.re, q.after, q.state == "absent")
 	changed := !exists || newContent != oldContent
 
 	// check 模式：只读对比返回变更预估（--diff 产出内容级差异），不回写
 	if rc.CheckMode {
-		res := &Result{Changed: changed, Msg: fmt.Sprintf("[check] %s will %s", path, changeLabel(changed))}
+		res := &Result{Changed: changed, Msg: fmt.Sprintf("[check] %s will %s", q.path, changeLabel(changed))}
 		if changed && rc.DiffMode {
-			res.Diff = diffText(oldContent, newContent, "remote "+path, "target "+path)
+			res.Diff = diffText(oldContent, newContent, "remote "+q.path, "target "+q.path)
 		}
 		return res
 	}
+	return applyLineChange(rc, q, newContent, exists, changed)
+}
 
+// applyLineChange 实跑回写：可选备份 + 回滚登记 + 整体上传（已有文件保持
+// 原权限，新建文件用 mode），收尾经 fixAttrs 校正属主漂移。
+func applyLineChange(rc *RunContext, q *lineinfileReq, newContent string, exists, changed bool) *Result {
 	if changed {
-		if exists && backup {
-			bak := fmt.Sprintf("%s.bak.%d", path, time.Now().UnixNano()) // 亚秒：同秒二次备份不再覆盖
-			if out, bad := rc.exec(fmt.Sprintf("cp -a -- %s %s", shellquote.Quote(path), shellquote.Quote(bak))); bad != nil {
+		if exists && q.backup {
+			if bad := backupRemote(rc, q.path); bad != nil {
 				return bad
-			} else if out.Code != 0 {
-				return Fail("backup failed: %s", firstLine(out.Stderr))
 			}
 		}
 		// 变更前登记回滚动作（auto_rollback）：已存在 → 快照恢复；新建 → 回滚时删除
 		if rc.Rollback != nil {
 			if exists {
-				rc.Rollback.Snapshot(rc, path)
+				rc.Rollback.Snapshot(rc, q.path)
 			} else {
-				rc.Rollback.RecordRemove(path)
+				rc.Rollback.RecordRemove(q.path)
 			}
 		}
 		// 已有文件保持原权限；新建文件用 mode（缺省 0644）
-		uploadMode := mode
+		uploadMode := q.mode
 		if exists {
-			if cur, ok, bad := remoteMode(rc, path); bad != nil {
+			if cur, ok, bad := remoteMode(rc, q.path); bad != nil {
 				return bad
 			} else if ok {
 				uploadMode = cur
 			}
 		}
-		if err := uploadBytes(rc, path, []byte(newContent), uploadMode, true); err != nil {
+		if err := uploadBytes(rc, q.path, []byte(newContent), uploadMode, true); err != nil {
 			return Fail("upload failed: %v", err)
 		}
 	}
-	// 属主漂移才校正（与 copy 的幂等收尾一致：探测驱动，变更计入 changed）
-	if owner != "" || group != "" {
-		if co, cg, ok, obad := remoteOwnerGroup(rc, path); obad != nil {
-			return obad
-		} else if !ok || (owner != "" && co != owner) || (group != "" && cg != group) {
-			if bad := chownPath(rc, path, owner, group); bad != nil {
-				return bad
-			}
-			changed = true
-		}
+	// 属主漂移才校正（与 copy 的幂等收尾一致：探测驱动，变更计入 changed；
+	// mode 传 nil——已有文件保持原权限，lineinfile 收尾不动权限）
+	_, fixedOwner, fbad := fixAttrs(rc, q.path, nil, q.owner, q.group)
+	if fbad != nil {
+		return fbad
+	}
+	if fixedOwner {
+		changed = true
 	}
 
-	msg := fmt.Sprintf("%s is already in the desired state", path)
+	msg := fmt.Sprintf("%s is already in the desired state", q.path)
 	if changed {
-		msg = fmt.Sprintf("%s updated", path)
+		msg = fmt.Sprintf("%s updated", q.path)
 	}
 	return &Result{Changed: changed, Msg: msg}
 }

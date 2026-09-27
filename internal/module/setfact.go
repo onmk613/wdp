@@ -20,13 +20,11 @@ func init() {
 // 编排：收集 play 写 → 配置 play 读）。
 type SetFactModule struct{}
 
-// Name 模块名。
 func (m *SetFactModule) Name() string { return "set_fact" }
 
 // ReadOnly 只写控制端事实库，不改目标机。
 func (m *SetFactModule) ReadOnly() bool { return true }
 
-// Desc 模块说明。
 func (m *SetFactModule) Desc() string {
 	return "write key/value pairs into the host fact store (cross-host visible via .hostvars, persistable with --fact-cache)"
 }
@@ -34,7 +32,7 @@ func (m *SetFactModule) Desc() string {
 // Run 把渲染后的参数整表作为 facts 返回（executor 并入本机域与 fact store）。
 func (m *SetFactModule) Run(_ *RunContext, args map[string]any, _ string) *Result {
 	if len(args) == 0 {
-		return Fail("%s", "set_fact requires at least one key/value pair")
+		return Fail("set_fact requires at least one key/value pair")
 	}
 	keys := make([]string, 0, len(args))
 	for k := range args {
@@ -51,7 +49,6 @@ func (m *SetFactModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *SetFactModule) Example() string {
 	return `# play 1 (collect): derive a cluster-wide id on each host
 - name: compute node id

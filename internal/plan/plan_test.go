@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"wdp/internal/chart"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 )
@@ -468,5 +469,38 @@ func TestFillIDUnserializableErrors(t *testing.T) {
 	}
 	if err := p.Write(filepath.Join(t.TempDir(), "plan.json")); err == nil {
 		t.Fatal("Write 对不可序列化 plan 应报错")
+	}
+}
+
+// TestCompileChartMatchesCompile CompileChart（复用调用方已加载的 chart）
+// 与 Compile（自行加载）产出完全一致：marker 相位的调用方先加载 chart 读
+// 相位与主机，同一实例传入 CompileChart 免去二次加载（tgz 形态含解包），
+// 两条入口不得有行为分叉。
+func TestCompileChartMatchesCompile(t *testing.T) {
+	dir := writeCompileChart(t)
+	inv, err := inventory.Parse([]byte(compileInv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	viaLoad, err := Compile(dir, inv, nil, nil, CompileOptions{WdpVersion: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ch, err := chart.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ch.Close()
+	viaChart, err := CompileChart(ch, inv, nil, nil, CompileOptions{WdpVersion: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viaLoad.PlanID != viaChart.PlanID {
+		t.Fatalf("两条编译入口 PlanID 应一致: %s != %s", viaLoad.PlanID, viaChart.PlanID)
+	}
+	da, _ := json.Marshal(viaLoad)
+	db, _ := json.Marshal(viaChart)
+	if string(da) != string(db) {
+		t.Fatal("CompileChart 产物应与 Compile 逐字节相同")
 	}
 }

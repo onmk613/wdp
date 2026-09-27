@@ -37,7 +37,6 @@ func (c *Console) TaskStart(task, module string) {
 		c.p.Sprint(fmtutil.BoldCyan, "TASK"),
 		c.p.Sprint(fmtutil.Bold, "["+task+" ("+module+")]"),
 		c.p.Sprint(fmtutil.Cyan, strings.Repeat("*", 20)))
-	c.curTask = task
 	c.curStats = &model.Stats{}
 	c.curHosts = 0
 	c.curRows = nil
@@ -70,12 +69,12 @@ func (c *Console) HostResult(host string, r *model.TaskResult) {
 		e.host = host + " -> " + r.DelegateTo
 	}
 	if r.Failed || r.Unreachable {
-		e.msg = firstLine(r.Msg)
+		e.msg = fmtutil.FirstLine(r.Msg)
 		if e.msg == "" {
-			e.msg = firstLine(r.Stderr)
+			e.msg = fmtutil.FirstLine(r.Stderr)
 		}
 		if e.msg == "" {
-			e.msg = firstLine(r.Stdout)
+			e.msg = fmtutil.FirstLine(r.Stdout)
 		}
 	}
 	c.curEach = append(c.curEach, e)
@@ -112,7 +111,7 @@ func (c *Console) TaskDone() {
 		return
 	}
 	rows, s, hosts, each := c.curRows, c.curStats, c.curHosts, c.curEach
-	c.curTask, c.curStats, c.curRows, c.curHosts, c.curEach = "", nil, nil, 0, nil
+	c.curStats, c.curRows, c.curHosts, c.curEach = nil, nil, 0, nil
 
 	if c.Level < 0 {
 		// quiet：行式输出（脚本/管道友好），保持旧格式

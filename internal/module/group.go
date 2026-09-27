@@ -20,15 +20,12 @@ var groupStates = []string{"present", "absent"}
 // 系统级变更不可回滚（与 package/user 模块同样视为不可逆操作，不登记回滚日志）。
 type GroupModule struct{}
 
-// Name 模块名。
 func (m *GroupModule) Name() string { return "group" }
 
-// Desc 模块说明。
 func (m *GroupModule) Desc() string {
 	return "manage system groups (create/delete/GID correction)"
 }
 
-// Params 参数文档。
 func (m *GroupModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "name", Type: "string", Desc: "group name"},
@@ -38,7 +35,6 @@ func (m *GroupModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *GroupModule) Example() string {
 	return `# create a deploy group
 - name: create the deploy group
@@ -62,110 +58,140 @@ func (m *GroupModule) Example() string {
     state: absent`
 }
 
-// Run 执行组管理。
-func (m *GroupModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
+// groupReq 是 group 解析后的参数。
+type groupReq struct {
+	name   string
+	state  string
+	gid    int
+	hasGID bool
+	system bool
+}
+
+// parseGroupArgs 解析并校验 group 参数（name 必填、state 合法）。
+func parseGroupArgs(rc *RunContext, args map[string]any) (*groupReq, *Result) {
 	name, ok := argStr(args, "name")
 	if !ok || name == "" {
-		return Fail("%s", "group requires a name parameter")
+		return nil, Fail("group requires a name parameter")
 	}
 	state, ok := parseState(args, "present", groupStates...)
 	if !ok {
-		return Fail("unsupported state %q (options: %s)", state, strings.Join(groupStates, "/"))
+		return nil, Fail("unsupported state %q (options: %s)", state, strings.Join(groupStates, "/"))
 	}
-	gid, hasGID := argInt(args, "gid")
-	system, _ := argBool(args, "system")
+	g := &groupReq{name: name, state: state}
+	g.gid, g.hasGID = argInt(args, "gid")
+	g.system, _ = argBool(args, "system")
+	return g, nil
+}
 
-	exists, bad := groupExists(rc, name)
+// Run 执行组管理：解析 → 探测存在性 → absent 删除 / present 创建缺失 /
+// 已存在则仅校正 GID 漂移（骨架与 user 模块一致）。
+func (m *GroupModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
+	g, bad := parseGroupArgs(rc, args)
 	if bad != nil {
 		return bad
 	}
 
-	// absent：存在则删除
-	if state == "absent" {
-		if !exists {
-			return &Result{Msg: fmt.Sprintf("group %s does not exist", name)}
-		}
-		if !rc.Become {
-			return Fail("%s", "deleting a group requires become: true")
-		}
-		if rc.CheckMode {
-			res := &Result{Changed: true, Msg: fmt.Sprintf("[check] group %s would be removed", name)}
-			if rc.DiffMode {
-				res.Diff = fmt.Sprintf("- %s (group will be deleted)", name)
-			}
-			return res
-		}
-		if out, bad := rc.exec(fmt.Sprintf("groupdel %s", shellquote.Quote(name))); bad != nil {
-			return bad
-		} else if out.Code != 0 {
-			return Fail("groupdel failed: %s", firstLine(out.Stderr))
-		}
-		return &Result{Changed: true, Msg: fmt.Sprintf("group %s deleted", name)}
+	exists, bad := groupExists(rc, g.name)
+	if bad != nil {
+		return bad
 	}
-
-	// present：缺失则创建
+	if g.state == "absent" {
+		return groupAbsent(rc, g.name, exists)
+	}
 	if !exists {
-		if !rc.Become {
-			return Fail("%s", "creating a group requires become: true")
-		}
-		var flags []string
-		if system {
-			flags = append(flags, "-r")
-		}
-		if hasGID {
-			flags = append(flags, "-g", strconv.Itoa(gid))
-		}
-		script := fmt.Sprintf("groupadd %s %s", strings.Join(flags, " "), shellquote.Quote(name))
-		if rc.CheckMode {
-			res := &Result{Changed: true, Msg: fmt.Sprintf("[check] group %s would be created", name)}
-			if rc.DiffMode {
-				var d []string
-				d = append(d, fmt.Sprintf("+ %s (new group%s)", name, boolTo(system, ", system group", "")))
-				if hasGID {
-					d = append(d, "+ gid "+strconv.Itoa(gid))
-				}
-				res.Diff = joinLines(d)
-			}
-			return res
-		}
-		if out, bad := rc.exec(script); bad != nil {
-			return bad
-		} else if out.Code != 0 {
-			return Fail("groupadd failed: %s", firstLine(out.Stderr))
-		}
-		return &Result{Changed: true, Msg: fmt.Sprintf("group %s created", name)}
+		return groupCreate(rc, g)
 	}
+	return groupConverge(rc, g)
+}
 
-	// present 且已存在：仅校正 GID 漂移
-	if hasGID {
-		cur, bad := groupGID(rc, name)
+// groupAbsent 删除存在的组。
+func groupAbsent(rc *RunContext, name string, exists bool) *Result {
+	if !exists {
+		return &Result{Msg: fmt.Sprintf("group %s does not exist", name)}
+	}
+	if !rc.Become {
+		return Fail("deleting a group requires become: true")
+	}
+	if rc.CheckMode {
+		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] group %s would be removed", name)}
+		if rc.DiffMode {
+			res.Diff = fmt.Sprintf("- %s (group will be deleted)", name)
+		}
+		return res
+	}
+	if out, bad := rc.exec(fmt.Sprintf("groupdel %s", shellquote.Quote(name))); bad != nil {
+		return bad
+	} else if out.Code != 0 {
+		return Fail("groupdel failed: %s", firstLine(out.Stderr))
+	}
+	return &Result{Changed: true, Msg: fmt.Sprintf("group %s deleted", name)}
+}
+
+// groupCreate 创建缺失的组（groupadd flags 组装；check 模式输出创建内容 diff）。
+func groupCreate(rc *RunContext, g *groupReq) *Result {
+	if !rc.Become {
+		return Fail("creating a group requires become: true")
+	}
+	var flags []string
+	if g.system {
+		flags = append(flags, "-r")
+	}
+	if g.hasGID {
+		flags = append(flags, "-g", strconv.Itoa(g.gid))
+	}
+	script := fmt.Sprintf("groupadd %s %s", strings.Join(flags, " "), shellquote.Quote(g.name))
+	if rc.CheckMode {
+		res := &Result{Changed: true, Msg: fmt.Sprintf("[check] group %s would be created", g.name)}
+		if rc.DiffMode {
+			var d []string
+			d = append(d, fmt.Sprintf("+ %s (new group%s)", g.name, boolTo(g.system, ", system group", "")))
+			if g.hasGID {
+				d = append(d, "+ gid "+strconv.Itoa(g.gid))
+			}
+			res.Diff = strings.Join(d, "\n")
+		}
+		return res
+	}
+	if out, bad := rc.exec(script); bad != nil {
+		return bad
+	} else if out.Code != 0 {
+		return Fail("groupadd failed: %s", firstLine(out.Stderr))
+	}
+	return &Result{Changed: true, Msg: fmt.Sprintf("group %s created", g.name)}
+}
+
+// groupConverge 校正已存在组的 GID 漂移（groupmod 仅在漂移时执行）；
+// 未给 gid 或无漂移时为已收敛。
+func groupConverge(rc *RunContext, g *groupReq) *Result {
+	if g.hasGID {
+		cur, bad := groupGID(rc, g.name)
 		if bad != nil {
 			return bad
 		}
-		if want := strconv.Itoa(gid); cur != want {
+		if want := strconv.Itoa(g.gid); cur != want {
 			if !rc.Become {
-				return Fail("group %s GID drift (%s → %s), correcting requires become: true", name, cur, want)
+				return Fail("group %s GID drift (%s → %s), correcting requires become: true", g.name, cur, want)
 			}
 			if rc.CheckMode {
 				res := &Result{
 					Changed: true,
-					Msg:     fmt.Sprintf("[check] group %s: would adjust gid (%s -> %s)", name, cur, want),
+					Msg:     fmt.Sprintf("[check] group %s: would adjust gid (%s -> %s)", g.name, cur, want),
 				}
 				if rc.DiffMode { // 与其他模块一致：Diff 仅在 --diff 下填充
-					res.Diff = joinLines([]string{"- gid " + cur, "+ gid " + want})
+					res.Diff = strings.Join([]string{"- gid " + cur, "+ gid " + want}, "\n")
 				}
 				return res
 			}
-			script := fmt.Sprintf("groupmod -g %d %s", gid, shellquote.Quote(name))
+			script := fmt.Sprintf("groupmod -g %d %s", g.gid, shellquote.Quote(g.name))
 			if out, bad := rc.exec(script); bad != nil {
 				return bad
 			} else if out.Code != 0 {
 				return Fail("groupmod failed: %s", firstLine(out.Stderr))
 			}
-			return &Result{Changed: true, Msg: fmt.Sprintf("group %s: GID adjusted to %d", name, gid)}
+			return &Result{Changed: true, Msg: fmt.Sprintf("group %s: GID adjusted to %d", g.name, g.gid)}
 		}
 	}
-	return &Result{Msg: fmt.Sprintf("group %s is already in the target state", name)}
+	return &Result{Msg: fmt.Sprintf("group %s is already in the target state", g.name)}
 }
 
 // groupExists 探测组是否存在（getent group 退出码）。

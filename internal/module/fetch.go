@@ -14,10 +14,8 @@ func init() {
 // FetchModule 将远端文件拉取回控制机。
 type FetchModule struct{}
 
-// Name 模块名。
 func (m *FetchModule) Name() string { return "fetch" }
 
-// Desc 模块说明。
 func (m *FetchModule) Desc() string {
 	return "fetch remote files to the local side"
 }
@@ -26,11 +24,20 @@ func (m *FetchModule) Desc() string {
 func (m *FetchModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	src, ok := argStr(args, "src")
 	if !ok || src == "" {
-		return Fail("%s", "fetch requires a src parameter")
+		return Fail("fetch requires a src parameter")
 	}
 	dest, ok := argStr(args, "dest")
 	if !ok || dest == "" {
-		return Fail("%s", "fetch requires a dest parameter")
+		return Fail("fetch requires a dest parameter")
+	}
+	// dest 与 copy 的 src 同口径约束在 BaseDir（chart/playbook 目录）内：
+	// fetch 是把远端内容写回控制端的唯一模块，dest 若可为任意绝对路径，
+	// 一句 `fetch: {src: /tmp/payload, dest: /usr/local/bin}` 就能覆盖
+	// 控制端任意可写文件（~/.wdp/ 配置、console 二进制等）——与
+	// copy/artifact 的 resolveLocal 是同一威胁模型，不能只防其一
+	dest, err := resolveLocal(rc, dest)
+	if err != nil {
+		return Fail("%v", err)
 	}
 	flat, _ := argBool(args, "flat")
 	if _, err := os.Stat(dest); err == nil && !isDirLocal(dest) {
@@ -120,16 +127,14 @@ func isDirLocal(p string) bool {
 	return err == nil && fi.IsDir()
 }
 
-// Params 参数文档。
 func (m *FetchModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "src", Type: "string", Desc: "remote source file path (required)"},
-		{Name: "dest", Type: "string", Desc: "local destination directory (required)"},
+		{Name: "dest", Type: "string", Desc: "local destination directory (required; resolved within the chart/playbook dir — absolute paths and .. escapes are refused)"},
 		{Name: "flat", Type: "bool", Default: "false", Desc: "false stores under dest/<host>/<path>; true flattens to dest/<filename>"},
 	}
 }
 
-// Example 示例任务。
 func (m *FetchModule) Example() string {
 	return `- name: collect logs from each host
   fetch:

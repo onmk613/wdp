@@ -27,6 +27,8 @@ type httpMetrics struct {
 	bucketed [len(durationBucketsMS)]atomic.Int64
 }
 
+// durationBucketsMS 耗时毫秒桶；末位 1<<40 是 +Inf 哨兵（兜住全部超大
+// 值）。渲染处以固定阈值识别哨兵桶输出 +Inf——改末位须同步改渲染判定。
 var durationBucketsMS = [10]int64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 1 << 40}
 
 // observe 记一次请求（method/路径不分桶：路由基数小，总量+耗时+错误已

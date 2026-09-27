@@ -7,6 +7,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Refresh, WarningFilled } from '@element-plus/icons-vue'
 import { api, type Host, type HostAlert, type HostFactsResponse, type HostTaskItem, type MetricSample, type SeriesPoint } from '../api'
 import Sparkline from '../components/Sparkline.vue'
+import { statusType, taskStatus } from '../lib/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -189,8 +190,9 @@ function hoursChanged() {
   void loadSeries()
 }
 
-function customChanged(v: [Date, Date] | null) {
-  if (v) void loadSeries()
+function customChanged(_v: [Date, Date] | null) {
+  // 选定与清除都刷新：清除后 customRange 回 null，自然走 hours 快捷档
+  void loadSeries()
 }
 
 // ---- facts ----
@@ -217,13 +219,6 @@ onMounted(() => {
   }, 30_000)
 })
 onUnmounted(() => window.clearInterval(timer))
-
-function statusType(s: string | undefined): 'success' | 'danger' | 'info' {
-  return s === 'online' ? 'success' : s === 'offline' ? 'danger' : 'info'
-}
-function taskStatus(s: string): 'success' | 'info' | 'danger' {
-  return s === 'ok' ? 'success' : s === 'skipped' ? 'info' : 'danger'
-}
 </script>
 
 <template>
@@ -233,7 +228,7 @@ function taskStatus(s: string): 'success' | 'info' | 'danger' {
       <h2 class="title">
         {{ host?.Name || `主机 #${hostId}` }}
         <el-tag v-if="host" :type="statusType(host.Status)" round style="margin-left: 8px">{{ host.Status }}</el-tag>
-        <el-popover v-for="a in alerts" :key="a.Kind" placement="bottom" :width="360" trigger="hover">
+        <el-popover v-for="a in alerts" :key="a.Kind + '-' + a.UpdatedAt" placement="bottom" :width="360" trigger="hover">
           <template #reference>
             <el-icon
               :size="18" class="alert-dot"
@@ -256,7 +251,7 @@ function taskStatus(s: string): 'success' | 'info' | 'danger' {
 
     <!-- 告警条 -->
     <el-alert
-      v-for="a in alerts" :key="a.Kind"
+      v-for="a in alerts" :key="a.Kind + '-' + a.UpdatedAt"
       :type="a.Level === 'crit' ? 'error' : 'warning'" :closable="false" show-icon style="margin-bottom: 10px"
       :title="`【${a.Level === 'crit' ? '严重' : '警告'}】${a.Detail}（更新于 ${a.UpdatedAt}）`"
     />

@@ -199,18 +199,33 @@ ALTER TABLE hosts ADD COLUMN allow_plaintext INTEGER NOT NULL DEFAULT 0;
 -- 作废该路径（纳管 token 会经 URL 进反代日志/shell 历史，仅靠 TTL 与
 -- 来源 IP 绑定仍嫌宽）
 ALTER TABLE enroll_tokens ADD COLUMN key_delivered_at TEXT NOT NULL DEFAULT '';
+`, `
+-- 热路径补索引（走新迁移版本，不改历史迁移）：
+--   host_pools(pool) / host_group_map(group_name)：按池/组圈选主机
+--   （ListHosts 的 scope 过滤）、池/组列表的成员计数与删除池/组时清理
+--   成员关系，此前全部全表扫。host_id 一侧无需另建——建表时的
+--   UNIQUE(host_id, pool/group_name) 前缀已覆盖按主机删/查。
+--   runs(app_id, status) / runs(status)：执行互斥预检（同应用 queued/
+--   running 判定）与启动期失败收尾按状态扫表；runs 随执行历史线性增长，
+--   无索引时越用越慢。
+CREATE INDEX idx_host_pools_pool ON host_pools (pool);
+CREATE INDEX idx_host_group_map_group ON host_group_map (group_name);
+CREATE INDEX idx_runs_app_status ON runs (app_id, status);
+CREATE INDEX idx_runs_status ON runs (status);
 `}
 
 // Open 打开（必要时创建）数据库并执行增量迁移。
 func Open(path string) (*Store, error) {
 	// synchronous(NORMAL)：WAL 下的推荐档——写不 fsync 每次提交，掉电
-	// 最多丢最后几笔事务但不损坏库；监控指标/审计类高频小写收益明显
+	// 最多丢最后几笔事务但不损坏库；监控指标/审计类高频小写收益明显。
+	// foreign_keys(1)：schema 暂无 FOREIGN KEY 声明，pragma 目前空转，
+	// 为将来声明外键的迁移预留；孤儿行防护现阶段靠同事务删除（见
+	// DeletePool/DeleteGroup/DeleteUser 等的成对清理）。
 	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
-	// 单连接全串行：SQLite 单写者模型下语句/事务天然互斥，免去 BUSY 处理；
-	// 调用方勿在事务内或迭代 rows 时嵌套查询——单连接被占住，会死锁
+	// 单连接全串行：SQLite 单写者模型下语句/事务天然互斥，免去 BUSY 处理
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
@@ -260,12 +275,13 @@ func (s *Store) migrate() error {
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }
 
 // execer 是写操作的最小接口：*sql.DB 与 *sql.Tx 都满足，辅助函数在
-// 事务内外共用同一份实现。Query 供事务内「先查后写」类互斥使用
-// （如 CreateRunsExclusive）——必须走 q 自身（事务连接），事务内再走
-// s.db 查询单连接会被占住而死锁。
+// 事务内外共用同一份实现。Query/QueryRow 供事务内「先查后写」类互斥
+// 使用（如 CreateRunsExclusive、DeleteVersion 的 latest 重算）——必须走
+// q 自身（事务连接），事务内再走 s.db 查询单连接会被占住而死锁。
 type execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 // tx 把多语句变更收进单事务：任一步失败整体回滚，杜绝半状态（如
@@ -298,10 +314,24 @@ func dedup(in []string) []string {
 	return out
 }
 
+// bizErr 标记用户可见的业务校验错误（参数缺漏/格式/存在性冲突等固定
+// 文案）。web 层据此分流：标记错误原样回 400，未标记错误（数据库引擎/
+// IO）按内部错误脱敏 500——裸 SQL 错误串会暴露内部表结构与路径。
+type bizErr struct{ error }
+
+// Bizf 构造业务校验错误。
+func Bizf(format string, a ...any) error { return bizErr{fmt.Errorf(format, a...)} }
+
+// IsBizErr 报告错误链中是否含业务校验错误（web 层 400/500 分流依据）。
+func IsBizErr(err error) bool {
+	var b bizErr
+	return errors.As(err, &b)
+}
+
 func validLabels(s string) error {
 	var m map[string]string
 	if err := json.Unmarshal([]byte(s), &m); err != nil {
-		return fmt.Errorf("labels must be a JSON object of strings: %w", err)
+		return Bizf("labels must be a JSON object of strings: %v", err)
 	}
 	return nil
 }
@@ -310,10 +340,10 @@ func validLabels(s string) error {
 // 拼接列（读取端按逗号拆分），含逗号/空白会把一个名字拆成多个，写入即拒。
 func validScopeName(what, name string) error {
 	if strings.TrimSpace(name) == "" {
-		return fmt.Errorf("%s is required", what)
+		return Bizf("%s is required", what)
 	}
 	if strings.ContainsAny(name, ", \t\r\n") {
-		return fmt.Errorf("%s must not contain commas or whitespace", what)
+		return Bizf("%s must not contain commas or whitespace", what)
 	}
 	return nil
 }
@@ -334,14 +364,14 @@ func isUniqueErr(err error) bool {
 }
 
 // IsUniqueErr 是 isUniqueErr 的导出形态：web 层用它区分"用户可见的
-// 重名冲突"（400 + 可读文案）与基础设施错误（500 脱敏）——裸 SQL 错误
-// 串（如 "UNIQUE constraint failed: hosts.name"）会暴露内部表结构。
+// 重名冲突"（400）与基础设施错误（500 脱敏，理由见 bizErr 注释）。
 func IsUniqueErr(err error) bool { return isUniqueErr(err) }
 
-// dupErr 把 SQLite 唯一约束错误翻译为可读的"已存在"语义。
+// dupErr 把 SQLite 唯一约束错误翻译为可读的"已存在"语义（业务校验类，
+// 经 Bizf 标记——web 层原样回 400 而非脱敏 500）。
 func dupErr(err error, what, name string) error {
 	if isUniqueErr(err) {
-		return fmt.Errorf("%s %q already exists", what, name)
+		return Bizf("%s %q already exists", what, name)
 	}
 	return err
 }

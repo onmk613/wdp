@@ -36,8 +36,8 @@ func (s *Store) ListAuditLogs(limit int, q string) ([]*AuditLog, error) {
 	sqlStr := `SELECT id, user, action, object, name, detail, ip, created_at FROM audit_logs`
 	args := []any{}
 	if q = strings.TrimSpace(q); q != "" {
-		sqlStr += ` WHERE user LIKE ? OR action LIKE ? OR object LIKE ? OR name LIKE ? OR detail LIKE ?`
-		like := "%" + q + "%"
+		sqlStr += ` WHERE user LIKE ? ESCAPE '\' OR action LIKE ? ESCAPE '\' OR object LIKE ? ESCAPE '\' OR name LIKE ? ESCAPE '\' OR detail LIKE ? ESCAPE '\'`
+		like := "%" + escapeLike(q) + "%"
 		args = append(args, like, like, like, like, like)
 	}
 	sqlStr += ` ORDER BY id DESC LIMIT ?`

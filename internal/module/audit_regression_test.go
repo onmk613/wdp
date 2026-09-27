@@ -42,7 +42,7 @@ func TestPutFileOwnerDrift(t *testing.T) {
 	rc, _ := ownerFake(t, "root root")
 	rc.Become = true
 	rc.CheckMode = true
-	changed, res := putFile(rc, []byte("k=v\n"), "/etc/app.conf", 0o644, false, true, "app", "app")
+	changed, res := putFile(rc, putFileOpts{data: []byte("k=v\n"), dest: "/etc/app.conf", mode: modePtr(0o644), owner: "app", group: "app"})
 	if res != nil && res.Failed {
 		t.Fatal(res.Msg)
 	}
@@ -53,7 +53,7 @@ func TestPutFileOwnerDrift(t *testing.T) {
 	// 实跑：校正属主并报 changed
 	rc2, _ := ownerFake(t, "root root")
 	rc2.Become = true
-	changed2, res2 := putFile(rc2, []byte("k=v\n"), "/etc/app.conf", 0o644, false, true, "app", "app")
+	changed2, res2 := putFile(rc2, putFileOpts{data: []byte("k=v\n"), dest: "/etc/app.conf", mode: modePtr(0o644), owner: "app", group: "app"})
 	if res2 != nil && res2.Failed {
 		t.Fatal(res2.Msg)
 	}
@@ -72,7 +72,7 @@ func TestPutFileOwnerDrift(t *testing.T) {
 		}
 		return orig(req)
 	}
-	changed3, res3 := putFile(rc3, []byte("k=v\n"), "/etc/app.conf", 0o644, false, true, "app", "app")
+	changed3, res3 := putFile(rc3, putFileOpts{data: []byte("k=v\n"), dest: "/etc/app.conf", mode: modePtr(0o644), owner: "app", group: "app"})
 	if res3 != nil && res3.Failed {
 		t.Fatal(res3.Msg)
 	}

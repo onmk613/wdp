@@ -98,7 +98,9 @@ onBeforeUnmount(() => document.removeEventListener('click', closeCtx))
 
 // ---- 右键菜单 ----
 const ctxMenu = reactive({ visible: false, x: 0, y: 0, node: null as TreeNode | null })
-function onCtx(e: MouseEvent, _node: unknown, data: TreeNode) {
+// element-plus node-context-menu 回调参数为 (event, data, node, instance)：
+// 第 2 参才是树节点的 data（TreeNode），第 3 参是内部 Node 包装，不可用
+function onCtx(e: MouseEvent, data: TreeNode) {
   e.preventDefault()
   ctxMenu.visible = true
   ctxMenu.x = e.clientX

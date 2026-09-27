@@ -3,8 +3,8 @@ package executor
 import (
 	"fmt"
 	"strings"
-	"unicode/utf8"
 
+	"wdp/internal/fmtutil"
 	"wdp/internal/model"
 	"wdp/internal/module"
 )
@@ -46,28 +46,13 @@ func cloneRes(r *model.TaskResult) *model.TaskResult {
 const maxOutLen = 1 << 20
 
 // truncateOut 截断超长输出并标注。按字节截断后退到 UTF-8 边界：
-// 截断点落在多字节字符中间会产生 mojibake。
+// 截断点落在多字节字符中间会产生 mojibake（fmtutil.TruncateUTF8 为
+// 全仓唯一实现，web 的任务明细截断同源）。
 func truncateOut(s string) string {
 	if len(s) <= maxOutLen {
 		return s
 	}
-	return truncateAtBoundary(s, maxOutLen) + fmt.Sprintf("\n…[wdp] output truncated (%d bytes)", len(s))
-}
-
-// truncateAtBoundary 按字节截断并回退到完整 UTF-8 序列边界（最多回退
-// utf8.UTFMax-1 字节；非法序列原样保留——截断宽容优于报错）。
-func truncateAtBoundary(s string, max int) string {
-	if max >= len(s) {
-		return s
-	}
-	cut := max
-	for i := 0; i < utf8.UTFMax-1 && cut > 0; i++ {
-		if b := s[cut-1]; b&0xC0 != 0x80 { // 非续字节：cut 已在序列边界
-			break
-		}
-		cut--
-	}
-	return s[:cut]
+	return fmtutil.TruncateUTF8(s, maxOutLen) + fmt.Sprintf("\n…[wdp] output truncated (%d bytes)", len(s))
 }
 
 // aggregateTruncMark 是 loop/子 chart 聚合输出触顶后的截断标记。定长

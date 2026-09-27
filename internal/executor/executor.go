@@ -99,10 +99,29 @@ type Executor struct {
 }
 
 // hostRun 是单主机在单个 play 中的运行态。
+//
+// 单写者约定（hr.vars 的无锁写点 why）：vars 的多数写点
+// （task.go 的 registerResult/registerData、expand.go 的 chart 作用域切换
+// 与 chart register、batch.go fanOutRunOnce 的 register 复制）都不持
+// hr.mu；唯一例外是 exec.go applyModuleResult 的 facts 沉淀（持 hr.mu，
+// 因 reporter 可能在并发回调中读 vars）。无锁写点的正确性依赖三个不变量
+// **同时成立**：
+//  1. 每 host 单 goroutine：fanOut/fanOutRunOnce 保证同一 hostRun 同刻
+//     只有一个执行 goroutine（固定 worker 池按主机派发，主机间不共享
+//     hostRun）；
+//  2. 波次串行：批次/hook/handler 之间经 wg.Wait 严格串行，跨波次的
+//     写点（playState.seed/harvest 换手）有 happens-before；
+//  3. run_once 同步执行：fanOutRunOnce 先在执行主机写完 register，再
+//     同步复制到其余主机，无并发写。
+//
+// 违反任一不变量即为数据竞争（-race 可测）。新增并发特性（如主机内
+// 任务并行、跨主机变量共享）前必须先打破本约定并评审：要么给 vars
+// 全部读写点加 hr.mu（注意与 exec.go 回滚登记处的既有 hr.mu 用法避免
+// 嵌套死锁），要么改为按写点交接不可变快照。
 type hostRun struct {
 	mu         sync.Mutex
 	host       *model.Host
-	vars       map[string]any // 当前变量域
+	vars       map[string]any // 当前变量域（无锁读写的边界见上"单写者约定"）
 	chartScope map[string]any // 当前 chart 的 values 作用域
 	baseDir    string         // 当前 chart 根目录（src 相对路径基准）
 	alive      bool

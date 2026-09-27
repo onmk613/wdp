@@ -10,9 +10,11 @@ export async function fetchSchema(): Promise<SchemaMeta> {
   return api<SchemaMeta>('GET', '/api/schema')
 }
 
-// 控制键清单（模块键判定：任务 map 里的非控制键即模块名）
-export function controlKeys(meta: SchemaMeta): Set<string> {
+// 控制键清单（模块键判定：任务 map 里的非控制键即模块名）。meta 未加载
+// 时返回空集合（视图侧 null 守卫统一收在这里）
+export function controlKeys(meta: SchemaMeta | null): Set<string> {
   const s = new Set<string>()
+  if (!meta) return s
   for (const sec of meta.task) {
     for (const f of sec.Fields) s.add(f.Name)
   }
@@ -135,7 +137,7 @@ export function applyYamlSchemas(paths: string[], meta: SchemaMeta, valuesSchema
     } catch { /* 损坏的 schema 文件：lint 会报，这里静默跳过 */ }
   }
   configureYaml({
-    enableSchemaRequests: false,
+    enableSchemaRequest: false,
     validate: true,
     completion: false, // 键补全由 complete.ts 独占（避免双 provider 同名重复）
     hover: true,

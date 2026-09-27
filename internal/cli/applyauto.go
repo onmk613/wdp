@@ -31,7 +31,6 @@ import (
 	"wdp/internal/conn/agentc"
 	"wdp/internal/executor"
 	"wdp/internal/inventory"
-	"wdp/internal/model"
 	"wdp/internal/plan"
 )
 
@@ -134,6 +133,16 @@ func runApplyAutonomous(ctx context.Context, p *plan.Plan, opts applyOptions, al
 			return false, fmt.Errorf("--limit matched no plan hosts")
 		}
 	}
+	// 前置校验：全部分组的根都必须是 agent 通道，且必须先于任何
+	// SubmitPlan 完成——校验若留在提交循环里，前面的组已提交、后面的
+	// 组才报错，agent 侧继续收敛而控制端不轮询不提示 run-id，留下无法
+	// 跟进的部分提交
+	for _, g := range groups {
+		if g.rootCnn.Conn != "agent" {
+			return false, fmt.Errorf("--autonomous requires the agent channel, but relay root %s uses conn %q "+
+				"(autonomous execution needs a resident agent to carry background convergence; use local via plain `wdp apply`)", g.root, g.rootCnn.Conn)
+		}
+	}
 	becomePW := ""
 	if opts.becomePasswordEnv != "" {
 		becomePW = os.Getenv(opts.becomePasswordEnv)
@@ -144,10 +153,6 @@ func runApplyAutonomous(ctx context.Context, p *plan.Plan, opts applyOptions, al
 	anyFailed := false
 
 	for _, g := range groups {
-		if g.rootCnn.Conn != "agent" {
-			return false, fmt.Errorf("--autonomous requires the agent channel, but relay root %s uses conn %q "+
-				"(autonomous execution needs a resident agent to carry background convergence; use local via plain `wdp apply`)", g.root, g.rootCnn.Conn)
-		}
 		shard := p.Shard(g.targets)
 		host := g.rootCnn.Host(g.root)
 		client := agentc.New(host, connDefaults())
@@ -194,7 +199,11 @@ func runApplyAutonomous(ctx context.Context, p *plan.Plan, opts applyOptions, al
 		for _, g := range fallback {
 			hosts = append(hosts, g.targets...)
 		}
-		if ok := runDirect(ctx, p.Shard(hosts), opts); ok {
+		dfailed, derr := runDirect(ctx, p.Shard(hosts), opts)
+		if derr != nil {
+			return anyFailed, derr
+		}
+		if dfailed {
 			anyFailed = true
 		}
 	}
@@ -208,9 +217,18 @@ type autonomousSubmission struct {
 	client *agentc.Conn
 }
 
+// maxPollFails 是单个 run 连续轮询失败的放弃阈值（var 仅为测试可注入）。
+// 轮询失败不代表主机侧失败（G1 断连容忍），正常抖动重试即可；但 agent
+// 永久失联（掉电/回收）且 [run].timeout=0 时，"失败仅 continue + 固定 2s
+// 重试"会把命令卡成只能 Ctrl-C 的死循环。连续失败达阈值即告警退出（退出
+// 码计失败），事后可用 `wdp apply status` 回查——30 次 ×（15s 请求超时 +
+// 2s 间隔）给临时断网留足恢复窗口，同时保证最坏 ~8 分钟内必然脱出。
+var maxPollFails = 30
+
 // pollSubmissions 轮询全部提交直到终态，流式打印 journal 增量。
 func pollSubmissions(ctx context.Context, subs []autonomousSubmission) bool {
 	cursors := map[string]int64{}
+	fails := map[string]int{} // runID → 连续失败次数（成功即清零）
 	anyFailed := false
 	pending := map[string]bool{}
 	for _, s := range subs {
@@ -229,10 +247,21 @@ func pollSubmissions(ctx context.Context, subs []autonomousSubmission) bool {
 			st, err := s.client.PlanStatus(pctx, s.runID, cursors[s.runID])
 			cancel()
 			if err != nil {
-				// 轮询失败不影响主机侧收敛（G1）；退避后重试
+				// 轮询失败不影响主机侧收敛（G1）；退避后重试，连续失败达
+				// 上限才放弃（见 maxPollFails 注释）
+				fails[s.runID]++
+				if fails[s.runID] >= maxPollFails {
+					fmt.Fprintf(os.Stderr, "[autonomous] %s: giving up after %d consecutive failed polls of run %s; "+
+						"agent-side convergence may still be in progress, re-check later with `wdp apply status`\n",
+						s.group.root, maxPollFails, shortID(s.runID))
+					delete(pending, s.runID)
+					anyFailed = true
+					continue
+				}
 				fmt.Fprintf(os.Stderr, "[autonomous] %s: status poll failed (%v), retrying\n", s.group.root, err)
 				continue
 			}
+			delete(fails, s.runID)
 			for _, e := range st.Journal {
 				cursors[s.runID] = e.Seq
 				printJournalLine(s.group.root, e)
@@ -254,18 +283,10 @@ func pollSubmissions(ctx context.Context, subs []autonomousSubmission) bool {
 	return anyFailed
 }
 
-// runDirect 本控制端直接执行一个分片（回退路径）。
-func runDirect(ctx context.Context, shard *plan.Plan, opts applyOptions) bool {
-	var hosts []*model.Host
-	seen := map[string]bool{}
-	for _, name := range shard.Host() {
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
-		hosts = append(hosts, shard.HostPlansOf(name)[0].Conn.Host(name))
-	}
-	inv := inventory.FromHosts(hosts)
+// runDirect 本控制端直接执行一个分片（回退路径）。第二返回值是报告写
+// 错误（JSON 模式破管道等——与主路径同口径，不能当成功）。
+func runDirect(ctx context.Context, shard *plan.Plan, opts applyOptions) (bool, error) {
+	inv := inventory.FromHosts(planHosts(shard))
 	rep, finish := buildReporter()
 	conns := conn.NewManagerWithDefaults(connDefaults())
 	conns.SetConnectConcurrency(2 * config.Current().Forks())
@@ -281,8 +302,8 @@ func runDirect(ctx context.Context, shard *plan.Plan, opts applyOptions) bool {
 	})
 	failed := ex.RunPlan(ctx, shard)
 	conns.CloseAll()
-	finish()
-	return failed
+	werr := finish()
+	return failed, werr
 }
 
 // runApplyStatus 回查自治执行进度（确定性 run_id 由计划与根重算）。
@@ -298,11 +319,7 @@ func runApplyStatus(ctx context.Context, planPath, runID string, opts applyOptio
 		return err
 	}
 	if opts.limit != "" {
-		hosts := make([]*model.Host, 0, len(p.Host()))
-		for _, name := range p.Host() {
-			hosts = append(hosts, p.HostPlansOf(name)[0].Conn.Host(name))
-		}
-		limited, lerr := inventory.FromHosts(hosts).Select(opts.limit)
+		limited, lerr := inventory.FromHosts(planHosts(p)).Select(opts.limit)
 		if lerr != nil {
 			return lerr
 		}

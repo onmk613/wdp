@@ -135,7 +135,8 @@ func TestLocalUploadFile(t *testing.T) {
 		if err := l.UploadFile(ctx, dst, strings.NewReader("data"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		matches, err := filepath.Glob(filepath.Join(sub, ".wdp-upload-*"))
+		// 临时文件前缀随共享实现迁移到 fsatomic（.wdp-fsatomic-*）
+		matches, err := filepath.Glob(filepath.Join(sub, ".wdp-fsatomic-*"))
 		if err != nil {
 			t.Fatal(err)
 		}

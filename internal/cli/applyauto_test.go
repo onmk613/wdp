@@ -69,10 +69,7 @@ func TestApplyAutonomousFullLoop(t *testing.T) {
 
 	ctx := context.Background()
 	planPath := filepath.Join(t.TempDir(), "plan.json")
-	withPlanOpts(t, "deploy", nil)
-	planOut = planPath
-	defer func() { planOut = "" }()
-	if err := runPlanCompile(ctx, chartDir); err != nil {
+	if err := runPlanCompile(ctx, chartDir, planPath, planCompileOptions{phase: "deploy"}); err != nil {
 		t.Fatalf("plan 编译失败: %v", err)
 	}
 
@@ -94,10 +91,7 @@ func TestApplyAutonomousRequiresAgentChannel(t *testing.T) {
 	defer restore()
 	ctx := context.Background()
 	planPath := filepath.Join(t.TempDir(), "plan.json")
-	withPlanOpts(t, "deploy", nil)
-	planOut = planPath
-	defer func() { planOut = "" }()
-	if err := runPlanCompile(ctx, chartDir); err != nil {
+	if err := runPlanCompile(ctx, chartDir, planPath, planCompileOptions{phase: "deploy"}); err != nil {
 		t.Fatalf("plan 编译失败: %v", err)
 	}
 	err := runApply(ctx, planPath, applyOptions{autonomous: true, yes: true})
@@ -152,10 +146,7 @@ func TestApplyAutonomousRerunForce(t *testing.T) {
 
 	ctx := context.Background()
 	planPath := filepath.Join(t.TempDir(), "plan.json")
-	withPlanOpts(t, "deploy", nil)
-	planOut = planPath
-	defer func() { planOut = "" }()
-	if err := runPlanCompile(ctx, chartDir); err != nil {
+	if err := runPlanCompile(ctx, chartDir, planPath, planCompileOptions{phase: "deploy"}); err != nil {
 		t.Fatalf("plan 编译失败: %v", err)
 	}
 

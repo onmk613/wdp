@@ -19,29 +19,21 @@ func C(text string) Cell { return Cell{Text: text} }
 // CC 构造带色单元格。
 func CC(text string, c Color) Cell { return Cell{Text: text, Color: c} }
 
-// CCf 构造带色格式化单元格。
-func CCf(c Color, format string, a ...any) Cell {
-	return Cell{Text: fmt.Sprintf(format, a...), Color: c}
-}
-
-// Cf 构造格式化单元格。
-func Cf(format string, a ...any) Cell { return Cell{Text: fmt.Sprintf(format, a...)} }
-
 // Table 轻量文本表格渲染器：
 //   - 表头 + 分隔线 + 数据行，按内容自动计算列宽
 //   - 支持 CJK 全角/宽字符宽度计算，中文表头对齐不偏移
 //   - 单元格可单独着色，颜色开关遵循所绑定的 Printer（--no-color / 非终端自动禁用）
 //   - 不做边框、不换行、不合并单元格
 type Table struct {
-	header    []string
-	align     []bool // true = 右对齐（适合数字列）
-	rows      [][]Cell
-	added     int                 // 已添加的行数 (plain 模式下同样累计)
-	bufBytes  int                 // 缓冲文本字节数 (降级闸门用)
-	limit     int                 // >0: 行数上限, 超过后转为流式 TSV 输出
-	plain     bool                // 已切换为流式输出, 不再缓存行
-	sink      func(Color, string) // nil: 全局 std; 否则输出到自定义目标
-	plainSink bool                // sink 为纯文本目标 (To), 渲染时不着色
+	header      []string
+	align       []bool // true = 右对齐（适合数字列）
+	rows        [][]Cell
+	added       int                 // 已添加的行数（streaming 模式下同样累计）
+	bufBytes    int                 // 缓冲文本字节数（降级闸门用）
+	limit       int                 // >0: 行数上限, 超过后转为流式 TSV 输出
+	streaming   bool                // 已切换为 TSV 流式输出, 不再缓存行
+	sink        func(Color, string) // nil: 全局 std; 否则输出到自定义目标
+	noColorSink bool                // sink 为纯文本目标 (To), 渲染时不着色
 }
 
 // NewTable 新建绑定全局标准输出的表格（颜色遵循全局 std 开关）；
@@ -57,11 +49,11 @@ func (p *Printer) NewTable(headers ...string) *Table {
 	return t
 }
 
-// To 指定纯文本输出目标: 所有输出 (含 plain 流式行) 以无 ANSI 形态写入 w。
-// 须在第一次 AddRow 之前调用, 否则 plain 模式下已流出的行不会进入 w.
+// To 指定纯文本输出目标: 所有输出 (含 streaming 流式行) 以无 ANSI 形态写入 w。
+// 须在第一次 AddRow 之前调用, 否则 streaming 模式下已流出的行不会进入 w.
 func (t *Table) To(w io.Writer) *Table {
 	t.sink = func(_ Color, s string) { fmt.Fprint(w, s) }
-	t.plainSink = true
+	t.noColorSink = true
 	return t
 }
 
@@ -96,22 +88,22 @@ func (t *Table) Len() int { return t.added }
 // 行, 随后每行到达即直接写出, 不再占用内存.
 func (t *Table) AddRow(cells ...Cell) *Table {
 	t.added++
-	if t.plain || t.overLimit(cells) {
-		if !t.plain {
-			t.plain = true
+	if t.streaming || t.overLimit(cells) {
+		if !t.streaming {
+			t.streaming = true
 			if len(t.header) > 0 {
 				hc := make([]Cell, len(t.header))
 				for i, h := range t.header {
 					hc[i] = Cell{Text: h}
 				}
-				t.emitPlainRow(hc)
+				t.emitTSVRow(hc)
 			}
 			for _, r := range t.rows {
-				t.emitPlainRow(r)
+				t.emitTSVRow(r)
 			}
 			t.rows = nil
 		}
-		t.emitPlainRow(cells)
+		t.emitTSVRow(cells)
 		return t
 	}
 	t.rows = append(t.rows, cells)
@@ -139,16 +131,16 @@ func (t *Table) overLimit(cells []Cell) bool {
 // Render 渲染输出（颜色遵循所绑定 Printer 的开关；To(w) 时为纯文本）。
 // 已切换为流式输出时无动作 (行已逐条写出).
 func (t *Table) Render() {
-	if t.plain {
+	if t.streaming {
 		return
 	}
-	t.render(t.emit, !t.plainSink)
+	t.render(t.emit, !t.noColorSink)
 }
 
 // RenderTo 以纯文本（无 ANSI 颜色）渲染到 w，便于测试断言与文件输出。
 func (t *Table) RenderTo(w io.Writer) {
 	t.To(w)
-	if t.plain {
+	if t.streaming {
 		return
 	}
 	t.render(t.emit, false)
@@ -163,9 +155,9 @@ func (t *Table) emit(c Color, s string) {
 	std.output(c, s)
 }
 
-// emitPlainRow 以 TSV 风格输出一行: 单元格文本以制表符分隔 (字段内
+// emitTSVRow 以 TSV 风格输出一行: 单元格文本以制表符分隔 (字段内
 // \t\n\r 转义), 逐格着色; 无对齐无边框, 用于降级后的流式输出.
-func (t *Table) emitPlainRow(cells []Cell) {
+func (t *Table) emitTSVRow(cells []Cell) {
 	for i, c := range cells {
 		if i > 0 {
 			t.emit(None, "\t")
@@ -223,38 +215,38 @@ func (t *Table) render(emit func(Color, string), color bool) {
 	}
 
 	var sb strings.Builder
-	emitLine := func(cells []Cell, header bool) {
-		// 整行无着色需求（颜色关闭 / 所有单元格无色）时拼接成一行一次写出,
-		// 减少输出调用次数; 表头行在开色时始终加粗蓝色, 走逐格着色路径
-		plain := !color
-		if color {
-			plain = true
-			for _, c := range cells {
-				if c.Color != None {
-					plain = false
-					break
-				}
-			}
-			if header {
-				plain = false
+	// rowNoColor 判断该行能否整行免着色输出：颜色关闭（含 To(w) 纯文本
+	// 目标）恒可；开色时需所有单元格无色且非表头行（表头开色时恒为
+	// 加粗蓝色）。整行免着色时拼接成一行一次写出，减少输出调用次数。
+	rowNoColor := func(cells []Cell, header bool) bool {
+		if !color {
+			return true
+		}
+		for _, c := range cells {
+			if c.Color != None {
+				return false
 			}
 		}
-		if plain {
-			sb.Reset()
-			for i := range ncol {
-				text := ""
-				if i < len(cells) {
-					text = cells[i].Text
-				}
-				sb.WriteString(padCell(text, width[i], align[i], i == ncol-1))
-				if i < ncol-1 {
-					sb.WriteString("  ")
-				}
+		return !header
+	}
+	// emitLinePlain 整行免着色：拼接为单次输出。
+	emitLinePlain := func(cells []Cell) {
+		sb.Reset()
+		for i := range ncol {
+			text := ""
+			if i < len(cells) {
+				text = cells[i].Text
 			}
-			sb.WriteString("\n")
-			emit(None, sb.String())
-			return
+			sb.WriteString(padCell(text, width[i], align[i], i == ncol-1))
+			if i < ncol-1 {
+				sb.WriteString("  ")
+			}
 		}
+		sb.WriteString("\n")
+		emit(None, sb.String())
+	}
+	// emitLineColored 逐格着色输出（表头行强制加粗蓝色）。
+	emitLineColored := func(cells []Cell, header bool) {
 		for i := range ncol {
 			text, clr := "", None
 			if i < len(cells) {
@@ -269,6 +261,13 @@ func (t *Table) render(emit func(Color, string), color bool) {
 			}
 		}
 		emit(None, "\n")
+	}
+	emitLine := func(cells []Cell, header bool) {
+		if rowNoColor(cells, header) {
+			emitLinePlain(cells)
+			return
+		}
+		emitLineColored(cells, header)
 	}
 
 	if len(t.header) > 0 {

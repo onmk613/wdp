@@ -115,7 +115,9 @@ const planDiffHelp = `
 
 差异维度：chart 名/版本、相位、全局 values（字段级）、主机集合增删、
 逐主机任务清单增删（pre/tasks/post/handler 全计入）
-任务按 idx+label+module 对齐，顺序变化不算差异——评审关心"会执行什么"，不是展示顺序
+任务按 label+module（+组前缀）对齐，顺序变化不算差异——评审关心"会执行什么"，不是展示顺序；
+idx 只用于展示不参与对齐：清单中单点插入会平移后续任务的 idx，按 idx 对齐会把
+未变更任务整体判为差异（级联噪声淹没有效差异）
 完全等价时输出 plans are equivalent
 
 示例：
@@ -165,34 +167,44 @@ func newPlanDiffCmd() *cobra.Command {
 				fmt.Fprintf(out, "host %s: only in %s\n", h, args[1])
 				diffs++
 			}
-			// 逐主机任务差异（按 idx+label+module 对比；顺序变化不算差异，
+			// 逐主机任务差异（按 label+module 对齐；顺序变化不算差异，
 			// 增删才算——评审关心的是"会执行什么"，不是展示顺序）
 			common := intersection(hostsA, hostsB)
 			sort.Strings(common)
 			for _, h := range common {
 				ta, tb := taskLines(a, h), taskLines(b, h)
-				if strings.Join(ta, "\n") == strings.Join(tb, "\n") {
+				equal := len(ta) == len(tb)
+				for i := 0; equal && i < len(ta); i++ {
+					equal = ta[i].key == tb[i].key
+				}
+				if equal {
 					continue
 				}
 				fmt.Fprintf(out, "host %s tasks:\n", h)
-				setA, setB := map[string]bool{}, map[string]bool{}
+				// 多重集比对（按 key 计数配对）：同名同模块任务可重复
+				// 出现，纯集合会丢"删了一份重复任务"这类差异
+				cntA, cntB := map[string]int{}, map[string]int{}
 				for _, l := range ta {
-					setA[l] = true
+					cntA[l.key]++
 				}
 				for _, l := range tb {
-					setB[l] = true
+					cntB[l.key]++
 				}
 				for _, l := range ta {
-					if !setB[l] {
-						fmt.Fprintf(out, "  - %s\n", l)
+					if cntB[l.key] == 0 {
+						fmt.Fprintf(out, "  - %s\n", l.display)
 						diffs++
+						continue
 					}
+					cntB[l.key]--
 				}
 				for _, l := range tb {
-					if !setA[l] {
-						fmt.Fprintf(out, "  + %s\n", l)
+					if cntA[l.key] == 0 {
+						fmt.Fprintf(out, "  + %s\n", l.display)
 						diffs++
+						continue
 					}
+					cntA[l.key]--
 				}
 			}
 			if diffs == 0 {
@@ -235,21 +247,33 @@ func intersection(a, b map[string]bool) []string {
 	return out
 }
 
+// taskLine 是 diff 的一个任务行：key 是对齐身份（组前缀 + label +
+// module + 影响执行范围的 chart hosts/values_from），display 是展示文本
+// （额外含 idx）。idx 不进身份：单点插入平移后续任务的 idx 时，按 idx
+// 对齐会把未变更任务整体判成差异。
+type taskLine struct {
+	key     string
+	display string
+}
+
 // taskLines 展开一台主机的全部任务行（pre/tasks/post/handler 与
 // block/rescue/always 递归，携带组前缀），供 diff 按行比对。
-func taskLines(p *plan.Plan, host string) []string {
-	var out []string
+func taskLines(p *plan.Plan, host string) []taskLine {
+	var out []taskLine
 	var walk func(ts []*plan.ResolvedTask, tag string)
 	walk = func(ts []*plan.ResolvedTask, tag string) {
 		for _, t := range ts {
-			line := fmt.Sprintf("%s#%d %s (%s)", tag, t.Idx, t.Label, t.Module)
+			suffix := ""
 			if t.ChartHosts != "" {
-				line += fmt.Sprintf(" hosts:%s", t.ChartHosts)
+				suffix += fmt.Sprintf(" hosts:%s", t.ChartHosts)
 			}
 			if len(t.ChartValuesFrom) > 0 {
-				line += fmt.Sprintf(" values_from:%s", strings.Join(t.ChartValuesFrom, ","))
+				suffix += fmt.Sprintf(" values_from:%s", strings.Join(t.ChartValuesFrom, ","))
 			}
-			out = append(out, line)
+			out = append(out, taskLine{
+				key:     fmt.Sprintf("%s%s (%s)%s", tag, t.Label, t.Module, suffix),
+				display: fmt.Sprintf("%s#%d %s (%s)%s", tag, t.Idx, t.Label, t.Module, suffix),
+			})
 			walk(t.Block, tag+"block.")
 			walk(t.Rescue, tag+"rescue.")
 			walk(t.Always, tag+"always.")

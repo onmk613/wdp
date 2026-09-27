@@ -133,9 +133,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u, err := s.st.UserByName(req.User)
-	// 用户不存在与密码错误统一口径，不泄露账号存在性。未知账号也跑一次
-	// bcrypt（对固定占位散列）：否则 `||` 短路会让未知账号秒回，与已知
-	// 账号的数十毫秒形成可测量差异，足以枚举账号。
+	// 用户不存在与密码错误统一口径，不泄露账号存在性；时序一致防账号枚举，见 dummyPasswordHash
 	hash := dummyPasswordHash
 	if err == nil && u.PasswordHash != "" {
 		hash = []byte(u.PasswordHash)
@@ -159,6 +157,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.loginReset(lockKey)
 	s.loginReset(userKey)
+	// ipKey 刻意不重置：IP 维度按跨用户累计失败计数，成功即清零会让
+	// 攻击者用一次成功登录刷新 IP 配额，绕过 IP 级限速。
 	token, err := s.sessions.issue(req.User)
 	if err != nil {
 		s.writeInternal(w, err)
@@ -268,7 +268,7 @@ func sameOriginRequest(r *http.Request) bool {
 // securityHeaders 是控制台的响应头基线。控制台可执行远程命令、删除主机、
 // 发布应用：不允许被任意站点 iframe 嵌套（点击劫持），也不允许被当作
 // 其它类型嗅探执行。
-func securityHeaders(next http.Handler) http.Handler {
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Frame-Options", "DENY")
@@ -277,8 +277,11 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Referrer-Policy", "same-origin")
 		// HSTS：浏览器此后强制 https 访问（防协议降级窃取会话 cookie）。
 		// 仅对 https 到达的请求设置——明文部署（本机开发）下设置无意义，
-		// 还会在同端口复用场景把 http 流量错误钉死
-		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+		// 还会在同端口复用场景把 http 流量错误钉死。口径与 requestIsHTTPS
+		// （enroll.go）一致：X-Forwarded-Proto 只在直连对端为信任反代时
+		// 采信——非信任对端的头可任意伪造，无条件采信等于任由客户端给
+		// 明文响应钉 HSTS（与会话 cookie 的 Secure 属性同源风险）。
+		if s.requestIsHTTPS(r) {
 			h.Set("Strict-Transport-Security", "max-age=31536000")
 		}
 		next.ServeHTTP(w, r)
@@ -303,7 +306,7 @@ func (s *Server) basicAuthUser(r *http.Request) (string, bool) {
 		return "", false
 	}
 	u, err := s.st.UserByName(user)
-	// 未知账号同样跑一次 bcrypt（占位散列）：时序一致，不泄露账号存在性
+	// 时序一致防账号枚举，见 dummyPasswordHash
 	hash := dummyPasswordHash
 	if err == nil && u.PasswordHash != "" {
 		hash = []byte(u.PasswordHash)
@@ -318,5 +321,7 @@ func (s *Server) basicAuthUser(r *http.Request) (string, bool) {
 	}
 	s.loginReset(lockKey)
 	s.loginReset(userKey)
+	// ipKey 刻意不重置：IP 维度按跨用户累计失败计数，成功即清零会让
+	// 攻击者用一次成功登录刷新 IP 配额，绕过 IP 级限速。
 	return user, true
 }

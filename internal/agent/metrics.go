@@ -47,33 +47,48 @@ func collectMetrics() []sample {
 		out = append(out, ss...)
 		mu.Unlock()
 	}
-	done := make(chan struct{}, 8)
-	go func() { addAll(collectCPU()); done <- struct{}{} }()
-	go func() { addAll(collectMem()); done <- struct{}{} }()
-	go func() { addAll(collectLoad()); done <- struct{}{} }()
-	go func() { addAll(collectFilesystem()); done <- struct{}{} }()
-	go func() { addAll(collectDiskIO()); done <- struct{}{} }()
-	go func() { addAll(collectNet()); done <- struct{}{} }()
-	go func() { addAll(collectUptime()); done <- struct{}{} }()
-	for i := 0; i < 7; i++ {
-		<-done
+	// 采集器并发跑缩短 scrape 延迟；WaitGroup 让计数与 goroutine 同源，
+	// 新增 collector 不存在"漏改收割数导致 /metrics 挂死"的耦合。
+	collectors := []func() []sample{
+		collectCPU, collectMem, collectLoad, collectFilesystem,
+		collectDiskIO, collectNet, collectUptime,
 	}
+	var wg sync.WaitGroup
+	for _, c := range collectors {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			addAll(c())
+		}()
+	}
+	wg.Wait()
 	out = append(out, sample{name: "node_time_seconds", value: float64(time.Now().Unix())})
 	return out
 }
 
 func renderMetrics(ss []sample) string {
-	var b strings.Builder
-	last := ""
+	// 按 metric name 分组（保持首现顺序）再输出：同一 family 的 TYPE 行
+	// 恰输出一次、同名样本连续——Prometheus 文本格式要求，重复 TYPE 行
+	// 会被抓取端按 "second TYPE line" 拒收整个 scrape。collector 的并发
+	// 完成序与多挂载点/多设备的交错指标名（size/avail/files/…）都不能
+	// 假定同族相邻，必须先分组。
+	order := make([]string, 0, len(ss))
+	groups := make(map[string][]sample, len(ss))
 	for _, s := range ss {
-		if s.name != last {
-			b.WriteString("# TYPE " + s.name + " untyped\n")
-			last = s.name
+		if _, ok := groups[s.name]; !ok {
+			order = append(order, s.name)
 		}
-		if s.labels == "" {
-			fmt.Fprintf(&b, "%s %v\n", s.name, s.value)
-		} else {
-			fmt.Fprintf(&b, "%s%s %v\n", s.name, s.labels, s.value)
+		groups[s.name] = append(groups[s.name], s)
+	}
+	var b strings.Builder
+	for _, name := range order {
+		b.WriteString("# TYPE " + name + " untyped\n")
+		for _, s := range groups[name] {
+			if s.labels == "" {
+				fmt.Fprintf(&b, "%s %v\n", s.name, s.value)
+			} else {
+				fmt.Fprintf(&b, "%s%s %v\n", s.name, s.labels, s.value)
+			}
 		}
 	}
 	return b.String()

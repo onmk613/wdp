@@ -64,9 +64,30 @@ export function setAuth(user: string, perms?: Perms) {
   mePromise = Promise.resolve({ user, role: perms?.role || '', perms: perms || authPerms.value })
 }
 
-// resetAuth 登出 / 401 时清态；下次守卫会重新探 /api/me
+// resetAuth 登出 / 401 时清态；下次守卫会重新探 /api/me。
+// 本机草稿一并清除：chart/playbook 全文可能含口令、内网地址等敏感内容，
+// 草稿键虽按用户隔离恢复路径，但共享浏览器上数据本身长期残留可读——
+// 会话结束（登出/401）即失效，残留无意义且属泄露面
 export function resetAuth() {
+  clearLocalDrafts(authUser.value)
   authUser.value = ''
   mePromise = null
   authPerms.value = { role: '', verbs: null, global: null, scoped: null }
+}
+
+// clearLocalDrafts 清掉该用户的本机草稿（ide/draft.ts 的 `wdp-draft-<user>-*`
+// 与 PlaybookPage 的 `wdp-playbook-draft-<user>`，键形态见各自实现）。
+function clearLocalDrafts(user: string) {
+  try {
+    const chartPrefix = `wdp-draft-${user || 'anon'}-`
+    const playbookKey = `wdp-playbook-draft-${user || 'anon'}`
+    const hits: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k === playbookKey || (k && k.startsWith(chartPrefix))) hits.push(k)
+    }
+    for (const k of hits) localStorage.removeItem(k)
+  } catch {
+    /* localStorage 不可用（隐私模式等）：无可清理 */
+  }
 }

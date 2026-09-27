@@ -13,10 +13,6 @@ import (
 	"strings"
 )
 
-// defaultMemberLimit 是成员解压后的默认总上限（调用方未注入
-// max_upload_mb 时的兜底，与 readLocalCap 同口径）。
-const defaultMemberLimit int64 = 2 << 30
-
 // archiveMember 是从归档中选取的一个成员（name 为归档内完整路径）。
 type archiveMember struct {
 	name string
@@ -40,7 +36,7 @@ func selectArchiveMembers(kind string, data []byte, members []string, limit int6
 		}
 	}
 	if limit <= 0 {
-		limit = defaultMemberLimit
+		limit = defaultTransferLimit
 	}
 
 	var out []archiveMember
@@ -59,6 +55,9 @@ func selectArchiveMembers(kind string, data []byte, members []string, limit int6
 				return fmt.Errorf("archive member %s declares %d bytes, over the %d MiB member limit (suspected extraction bomb)",
 					name, size, limit>>20)
 			}
+			// LimitReader 多读 1 字节作超限探针：读满 limit-total+1
+			// 即说明实际内容超限（下方 len 判定），声明大小未知的条目
+			// 靠它兜底防解压炸弹。
 			b, err := io.ReadAll(io.LimitReader(r, limit-total+1))
 			if err != nil {
 				return fmt.Errorf("failed to read archive entry %s: %w", name, err)

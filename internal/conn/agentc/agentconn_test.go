@@ -60,6 +60,8 @@ func TestBaseURLAssembly(t *testing.T) {
 		{"IPv4含端口原样", &model.Host{Address: "10.0.0.5:9000"}, "http://10.0.0.5:9000"},
 		{"IPv6含端口原样", &model.Host{Address: "[fd00::5]:9000"}, "http://[fd00::5]:9000"},
 		{"TLS方案", &model.Host{Address: "10.0.0.5", TLS: true}, "https://10.0.0.5:7602"},
+		// 仅内联私钥（KeyData）同样构成 TLS 启用条件：漏判会让该主机静默走明文
+		{"仅内联私钥", &model.Host{Address: "10.0.0.5", KeyData: []byte("-----BEGIN PRIVATE KEY-----")}, "https://10.0.0.5:7602"},
 	}
 	for _, tc := range cases {
 		if got := New(tc.host, nil).base; got != tc.want {
@@ -84,6 +86,7 @@ func TestHTTPURLWithTLSMaterialFails(t *testing.T) {
 		{"tls开关", &model.Host{AgentURL: ts.URL, TLS: true}},
 		{"ca文件（不存在，加载也会失败）", &model.Host{AgentURL: ts.URL, CAFile: "/nonexistent/ca.pem"}},
 		{"客户端证书", &model.Host{AgentURL: ts.URL, CertFile: "/nonexistent/c.pem", KeyFile: "/nonexistent/k.pem"}},
+		{"仅内联私钥", &model.Host{AgentURL: ts.URL, KeyData: []byte("-----BEGIN PRIVATE KEY-----")}},
 	} {
 		c := New(tc.host, nil)
 		err := c.Connect(context.Background())

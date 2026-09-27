@@ -3,6 +3,7 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -110,3 +111,35 @@ func TestJSONReporterNoLogDoesNotMutateOriginal(t *testing.T) {
 		t.Fatalf("原结果被改写: %+v", orig)
 	}
 }
+
+// TestJSONReporterErrSurfacesWriteFailure 写失败必须能被调用方取到：
+// 破管道（| head 等）时 CI 会拿到 0 字节文档，若 Err() 不上报，命令以
+// 退出码 0 结束等于把"报告丢了"当成功。签名保持无返回值（Reporter 接口
+// 被 web/agent 侧共用），错误经 Err() 传递。
+func TestJSONReporterErrSurfacesWriteFailure(t *testing.T) {
+	// 写入即失败的 writer（模拟 EPIPE 后的 stdout）
+	r := NewJSONReporter(failWriter{})
+	r.PlayStart("p", []string{"h1"})
+	r.Finish()
+	if r.Err() == nil {
+		t.Fatal("写失败应经 Err() 上报")
+	}
+	// 成功路径 Err() 为 nil
+	var buf bytes.Buffer
+	ok := NewJSONReporter(&buf)
+	ok.Finish()
+	if ok.Err() != nil {
+		t.Fatalf("成功输出 Err() 应为 nil: %v", ok.Err())
+	}
+	if !strings.Contains(buf.String(), `"plays"`) {
+		t.Fatal("正常输出应包含 plays 字段")
+	}
+}
+
+// failWriter 恒定写失败。
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errWriteFailed }
+
+// errWriteFailed 是 failWriter 的固定错误。
+var errWriteFailed = errors.New("write failed (simulated broken pipe)")

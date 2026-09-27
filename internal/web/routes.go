@@ -80,5 +80,3 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /", s.handleIndex)
 	s.routesObservability()
 }
-
-// Handler 返回根路由（供测试与自定义 Listener 复用）。观测中间件只在

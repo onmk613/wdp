@@ -4,6 +4,7 @@ package web
 // 追加授权（scope）编辑、在线会话查看/踢下线。所有变更埋审计。
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -12,15 +13,15 @@ import (
 	"wdp/internal/store"
 )
 
-// userJSON 对外形态（不含散列）。
+// userJSON 对外形态（不含散列；snake_case 与全目录 API 口径一致）。
 type userJSON struct {
-	ID        int64              `json:"ID"`
-	Name      string             `json:"Name"`
-	Role      string             `json:"Role"`
-	Disabled  bool               `json:"Disabled"`
-	CreatedAt string             `json:"CreatedAt"`
-	Scopes    []*store.UserScope `json:"Scopes"`
-	Online    bool               `json:"Online"`
+	ID        int64              `json:"id"`
+	Name      string             `json:"name"`
+	Role      string             `json:"role"`
+	Disabled  bool               `json:"disabled"`
+	CreatedAt string             `json:"created_at"`
+	Scopes    []*store.UserScope `json:"scopes"`
+	Online    bool               `json:"online"`
 }
 
 func (s *Server) handleListUsers(w http.ResponseWriter, _ *http.Request) {
@@ -51,6 +52,11 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.st.UserByName(req.Name); err == nil {
 		writeError(w, http.StatusBadRequest, "user already exists")
 		return
+	} else if !errors.Is(err, store.ErrNotFound) {
+		// DB 瞬时错误≠"不存在"：按不存在继续会要么撞唯一约束、要么把查询
+		// 故障误报成"建成功了"
+		s.writeInternal(w, err)
+		return
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
 	if err != nil {
@@ -58,7 +64,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.st.CreateUser(req.Name, string(hash), req.Role); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	s.audit(r, "create", "user", req.Name, "角色 "+req.Role)
@@ -72,7 +78,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	target, err := s.st.UserByID(id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		s.writeStoreErr(w, err)
 		return
 	}
 	var req struct {
@@ -97,7 +103,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.st.UpdateUser(id, req.Role, req.Disabled); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	s.invalidatePerms(target.Name)
@@ -130,7 +136,7 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	target, err := s.st.UserByID(id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		s.writeStoreErr(w, err)
 		return
 	}
 	var req struct {
@@ -149,7 +155,7 @@ func (s *Server) handleResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.st.SetUserPassword(target.Name, string(hash)); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	// 重置密码后旧会话全部失效（凭据已换，旧会话不再可信）
@@ -165,7 +171,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	target, err := s.st.UserByID(id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		s.writeStoreErr(w, err)
 		return
 	}
 	me, _ := r.Context().Value(ctxUser{}).(string)
@@ -180,7 +186,7 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.st.DeleteUser(id); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	s.sessions.revokeUser(target.Name)
@@ -197,7 +203,7 @@ func (s *Server) handleSetUserScopes(w http.ResponseWriter, r *http.Request) {
 	}
 	target, err := s.st.UserByID(id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		s.writeStoreErr(w, err)
 		return
 	}
 	var req struct {
@@ -225,13 +231,30 @@ func (s *Server) handleSetUserScopes(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.st.ReplaceUserScopes(id, req.Scopes); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	s.invalidatePerms(target.Name)
-	s.audit(r, "update", "user", target.Name, "追加授权变更")
+	s.audit(r, "update", "user", target.Name, "追加授权变更："+scopesAuditSummary(req.Scopes))
 	scopes, _ := s.st.UserScopes(id)
 	writeJSON(w, http.StatusOK, scopes)
+}
+
+// scopesAuditSummary 授权审计摘要：verb@kind:value 逗号连接（kind 空 =
+// 全部作用域），空列表 = 清空全部——审计要能还原"谁给谁加了什么"。
+func scopesAuditSummary(scopes []*store.UserScope) string {
+	if len(scopes) == 0 {
+		return "清空全部"
+	}
+	parts := make([]string, 0, len(scopes))
+	for _, sc := range scopes {
+		if sc.Kind == "" {
+			parts = append(parts, sc.Verb+"@all")
+			continue
+		}
+		parts = append(parts, sc.Verb+"@"+sc.Kind+":"+sc.Value)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // ---- 会话管理 ----
@@ -256,7 +279,8 @@ func (s *Server) handleKillSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	s.audit(r, "delete", "session", token[:8]+"…", "强制下线")
+	// shortToken 带长度保护（token 可能短于 8 字符，直接切片会越界 panic）
+	s.audit(r, "delete", "session", shortToken(token)+"…", "强制下线")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

@@ -9,8 +9,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/Masterminds/semver/v3"
-
 	"wdp/internal/chart"
 	"wdp/internal/model"
 )
@@ -18,46 +16,17 @@ import (
 // 任务展开：子 chart 引用（runChartTask）与 block/rescue/always 任务组（runBlock）。
 
 // runChartTask 展开执行子 chart 任务序列（作用域隔离：子树 + global + 引用 vars）。
-// chart 模式从父 chart 子表解析引用；裸 playbook 模式从启动期预加载的
-// ChartRefs（playbook 同级 charts/）解析。
+// 本层负责引用解析、主机过滤与深度防护；作用域组装、schema 校验与
+// loop 执行见 runChartScope。
 func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.Task, hr *hostRun, res *model.TaskResult, base func() map[string]any) *model.TaskResult {
-	sub, serr := e.resolveChartRef(task.ChartRef)
-	if sub == nil {
-		res.Failed = true
-		res.Msg = serr.Error()
+	sub, ok := e.chartRefTarget(task, hr, res)
+	if !ok {
 		return res
-	}
-	// 主机过滤（hosts: 选择器）：当前 play 批次 ∩ 选择器，不在集合的主机
-	// 跳过该引用。不跨 play 重选主机——批次/串行/回滚语义保持在 play 级。
-	// Select 裸读 inv.Groups/inv.Hosts：与 add_host/group_by 的并发写
-	//（exec.go 持 invMu）可在同一 fanOut 波内并发，读侧同样必须持锁。
-	if task.ChartHosts != "" {
-		e.invMu.Lock()
-		sel, herr := e.Inv.Select(task.ChartHosts)
-		e.invMu.Unlock()
-		if herr != nil {
-			res.Failed = true
-			res.Msg = fmt.Sprintf("chart %s: invalid hosts selector %q: %v", task.ChartRef, task.ChartHosts, herr)
-			return res
-		}
-		inSet := false
-		for _, h := range sel {
-			if h.Name == hr.host.Name {
-				inSet = true
-				break
-			}
-		}
-		if !inSet {
-			res.Skipped = true
-			res.Msg = fmt.Sprintf("chart %s: host outside selector %q, skipped", task.ChartRef, task.ChartHosts)
-			res.Task = task.Label()
-			res.Module = "chart"
-			res.Host = hr.host.Name
-			return res
-		}
 	}
 	// 环引用防护：chart 自引用/互引用会在此递归展开中无限下钻，
 	// 超过深度上限即报错终止（Go 的栈溢出无法 recover，必须前置拦截）。
+	// 深度增减必须留在本层：defer 的生效范围要覆盖整个子树执行（含
+	// runChartScope 内逐 item 任务），下钻进子函数会在其返回时提前递减。
 	if hr.chartDepth >= maxChartDepth {
 		res.Failed = true
 		res.Msg = fmt.Sprintf("chart reference expansion exceeded the depth limit %d (possible reference cycle: %s)", maxChartDepth, task.ChartRef)
@@ -72,7 +41,56 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 		res.Msg = perr.Error()
 		return res
 	}
+	return e.runChartScope(ctx, p, task, hr, res, base, sub, subPlay)
+}
 
+// chartRefTarget 解析 chart 引用并做主机过滤（hosts: 选择器）。
+// 返回 false 表示 res 已置终态（失败或跳过），调用方直接返回 res。
+// chart 模式从父 chart 子表解析引用；裸 playbook 模式从启动期预加载的
+// ChartRefs（playbook 同级 charts/）解析。
+func (e *Executor) chartRefTarget(task *model.Task, hr *hostRun, res *model.TaskResult) (*chart.Chart, bool) {
+	sub, serr := e.resolveChartRef(task.ChartRef)
+	if sub == nil {
+		res.Failed = true
+		res.Msg = serr.Error()
+		return nil, false
+	}
+	// 主机过滤（hosts: 选择器）：当前 play 批次 ∩ 选择器，不在集合的主机
+	// 跳过该引用。不跨 play 重选主机——批次/串行/回滚语义保持在 play 级。
+	// Select 裸读 inv.Groups/inv.Hosts：与 add_host/group_by 的并发写
+	//（exec.go 持 invMu）可在同一 fanOut 波内并发，读侧同样必须持锁。
+	if task.ChartHosts != "" {
+		e.invMu.Lock()
+		sel, herr := e.Inv.Select(task.ChartHosts)
+		e.invMu.Unlock()
+		if herr != nil {
+			res.Failed = true
+			res.Msg = fmt.Sprintf("chart %s: invalid hosts selector %q: %v", task.ChartRef, task.ChartHosts, herr)
+			return nil, false
+		}
+		inSet := false
+		for _, h := range sel {
+			if h.Name == hr.host.Name {
+				inSet = true
+				break
+			}
+		}
+		if !inSet {
+			res.Skipped = true
+			res.Msg = fmt.Sprintf("chart %s: host outside selector %q, skipped", task.ChartRef, task.ChartHosts)
+			res.Task = task.Label()
+			res.Module = "chart"
+			res.Host = hr.host.Name
+			return nil, false
+		}
+	}
+	return sub, true
+}
+
+// runChartScope 组装子 chart 作用域（子树 + global + values_from 覆盖 +
+// 引用 vars）、过展开期 schema 校验，再逐 loop item 执行子任务序列并
+// 聚合结果。调用方（runChartTask）已保证深度防护与入口 play 解析。
+func (e *Executor) runChartScope(ctx context.Context, p *model.Play, task *model.Task, hr *hostRun, res *model.TaskResult, base func() map[string]any, sub *chart.Chart, subPlay *model.Play) *model.TaskResult {
 	// 子 chart 作用域 values（低 → 高）：子 chart 默认 values → 父作用域 <子chart名> 子树
 	// → global（跨层共享）→ values_from 覆盖文件 → 引用 vars/values
 	scope := chart.SubScope(sub, hr.chartScope)
@@ -140,7 +158,13 @@ func (e *Executor) runChartTask(ctx context.Context, p *model.Play, task *model.
 	res.Host = hr.host.Name
 
 	if task.Register != "" {
-		savedVars[task.Register] = resultData(res)
+		// 走 registerData（resultData + loop 补 results 空列表）而非裸
+		// resultData：chart+loop 是受支持组合（上方逐 item 执行），跳过裸
+		// resultData 会让该路径的 register 缺 results 键，下游
+		// `len .r.results` 直接模板报错——与 task.go registerData/registerResult
+		// 的"loop 任务恒带 results"口径对齐（chart 逐 item 结果聚合进 res，
+		// 不逐项展开，故与 skip 路径同构只补空列表）。
+		savedVars[task.Register] = registerData(task, res)
 	}
 	if res.Changed && !res.Failed && len(task.Notify) > 0 {
 		for _, n := range task.Notify {
@@ -165,16 +189,10 @@ func (e *Executor) resolveChartRef(ref string) (*chart.Chart, error) {
 			ref, sortedRefNames(e.Opts.ChartRefs))
 	}
 	if constrained && constraint != "" {
-		v, err := semver.NewVersion(sub.Meta.Version)
-		if err != nil {
-			return nil, fmt.Errorf("chart %s version %q is not a semantic version, cannot apply constraint %q", name, sub.Meta.Version, constraint)
-		}
-		rng, err := semver.NewConstraint(constraint)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse version constraint %q: %w", constraint, err)
-		}
-		if !rng.Check(v) {
-			return nil, fmt.Errorf("chart %s version %s does not satisfy constraint %q", name, sub.Meta.Version, constraint)
+		// 与 chart.ResolveSub 同一约束检查入口（chart.CheckVersionConstraint），
+		// 两路版本语义不再各写一份
+		if err := chart.CheckVersionConstraint("chart", name, sub.Meta.Version, constraint); err != nil {
+			return nil, err
 		}
 	}
 	return sub, nil
@@ -325,6 +343,7 @@ func (e *Executor) runChartItemTasks(ctx context.Context, effPlay *model.Play, s
 }
 
 // runBlock 执行 block/rescue/always 任务组（单主机内顺序，支持嵌套）。
+// 本层负责 block/rescue/always 的控制流编排；单段序列的执行见 runBlockSeq。
 func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task, hr *hostRun, res *model.TaskResult) *model.TaskResult {
 	// block 状态变量只在 block/rescue/always 执行期间可见，任务结束即清理，
 	// 防止后续任务的 when 读到陈旧的 block_failed=true
@@ -334,25 +353,8 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 	}()
 	// 容器 tags 对子任务生效（继承语义，与顶层单任务一致）
 	effTags := effectiveTags(task, nil)
-	runSeq := func(tasks []*model.Task) (failed bool, unreachable bool, msgs []string) {
-		for _, t := range tasks {
-			if !blockSelected(t, e.Opts, effTags) {
-				continue // block 子任务同样遵循 --tags/--skip-tags 过滤
-			}
-			r := e.runTaskOnHost(ctx, p, t, hr)
-			e.recordResult(hr, r, nil, t.IgnoreErrors)
-			if r.Changed {
-				res.Changed = true
-			}
-			if r.Unreachable {
-				return false, true, append(msgs, r.Msg)
-			}
-			if r.Failed && !t.IgnoreErrors {
-				// block 内失败即转 rescue；ignore_errors 的失败是例外，不视为 block 失败
-				return true, false, append(msgs, fmt.Sprintf("%s: %s", t.Label(), r.Msg))
-			}
-		}
-		return false, false, msgs
+	runSeq := func(tasks []*model.Task) (bool, bool, []string) {
+		return e.runBlockSeq(ctx, p, hr, res, effTags, tasks)
 	}
 
 	blockFailed, unreachable, msgs := runSeq(task.Block)
@@ -418,4 +420,28 @@ func (e *Executor) runBlock(ctx context.Context, p *model.Play, task *model.Task
 	res.Module = "block"
 	res.Host = hr.host.Name
 	return res
+}
+
+// runBlockSeq 执行 block/rescue/always 中的一段任务序列：按容器 tags
+// 过滤，changed 聚合进 res。返回（是否失败，主机是否不可达，消息集）；
+// block 内失败即转 rescue，ignore_errors 的失败是例外，不视为 block 失败。
+func (e *Executor) runBlockSeq(ctx context.Context, p *model.Play, hr *hostRun, res *model.TaskResult, effTags []string, tasks []*model.Task) (bool, bool, []string) {
+	var msgs []string
+	for _, t := range tasks {
+		if !blockSelected(t, e.Opts, effTags) {
+			continue // block 子任务同样遵循 --tags/--skip-tags 过滤
+		}
+		r := e.runTaskOnHost(ctx, p, t, hr)
+		e.recordResult(hr, r, nil, t.IgnoreErrors)
+		if r.Changed {
+			res.Changed = true
+		}
+		if r.Unreachable {
+			return false, true, append(msgs, r.Msg)
+		}
+		if r.Failed && !t.IgnoreErrors {
+			return true, false, append(msgs, fmt.Sprintf("%s: %s", t.Label(), r.Msg))
+		}
+	}
+	return false, false, msgs
 }

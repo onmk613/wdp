@@ -128,6 +128,9 @@ func parsePlayNode(n *yaml.Node) (*model.Play, error) {
 		return nil, fmt.Errorf("play must be a map, got %s", n.Tag)
 	}
 	var becomeN, serialN, strategyN, tasksN, handlersN *yaml.Node
+	// kept 复用 n.Content 的底层数组就地摘除已消费键：写指针（kept 的
+	// 追加位置）恒落后读指针（i+2 之后的循环推进）——每次至多搬 2 个
+	// 节点到已读位置，覆盖的只会是循环已经处理过的槽位，故安全。
 	kept := n.Content[:0]
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		val := n.Content[i+1]

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -8,12 +8,13 @@ import {
 import {
   api, type BatchResponse, type GroupEntry, type Host, type HostAlert, type LabelDef, type Pool, type ProbeResult,
 } from '../api'
-import {
-  downloadText, hostCSVTemplate, parseHostCSV, parseSSHCSV, readCSVFile,
-  sshCSVTemplate, type SSHCSVRow,
-} from '../csv'
-import LabelRows from '../components/LabelRows.vue'
+import SSHInstallDialog from '../components/hosts/SSHInstallDialog.vue'
+import PoolGroupLabelDialog from '../components/hosts/PoolGroupLabelDialog.vue'
+import EditHostDialog from '../components/hosts/EditHostDialog.vue'
+import BatchAssignDialog from '../components/hosts/BatchAssignDialog.vue'
+import ManualAddDialog from '../components/hosts/ManualAddDialog.vue'
 import { can } from '../auth'
+import { parseLabels, statusType } from '../lib/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -126,18 +127,6 @@ function onSearch() {
   searchTimer = window.setTimeout(() => loadHosts(), 300)
 }
 
-function statusType(status: string): 'success' | 'danger' | 'info' {
-  return status === 'online' ? 'success' : status === 'offline' ? 'danger' : 'info'
-}
-
-function parseLabels(labels: string): Record<string, string> {
-  try {
-    return JSON.parse(labels || '{}')
-  } catch {
-    return {}
-  }
-}
-
 // ---- 注册表（池/组/标签）----
 const pools = ref<Pool[]>([])
 const groups = ref<GroupEntry[]>([])
@@ -211,50 +200,45 @@ async function batchDelete() {
   }
 }
 
-// ---- 批量设置（池/组/标签）----
+// ---- 对话框（自本页拆出的组件，见 components/hosts/：批量设置/编辑主机/
+// 手动添加/新建池·组·标签。表单状态与重置逻辑随组件走，这里只持有开关）----
 const batchVisible = ref(false)
-const batchLoading = ref(false)
-const batchForm = reactive({ pools: [] as string[], groups: [] as string[], replace: false })
-const batchLabels = ref<Record<string, string>>({})
-const batchSetPools = ref(false)
-const batchSetGroups = ref(false)
+const editVisible = ref(false)
+const editRow = ref<Host | null>(null)
+const addVisible = ref(false)
+const poolVisible = ref(false)
+const groupVisible = ref(false)
+const labelVisible = ref(false)
 
 function openBatchAssign() {
-  Object.assign(batchForm, { pools: [], groups: [], replace: false })
-  batchLabels.value = {}
-  batchSetPools.value = false
-  batchSetGroups.value = false
   batchVisible.value = true
 }
 
-async function submitBatchAssign() {
-  const body: Record<string, unknown> = {
-    ids: selection.value.map((h) => h.ID),
-    action: 'assign',
-    labels: batchLabels.value,
-    replace_labels: batchForm.replace,
-  }
-  // 勾选的项整体替换（多值，空=清除）；未勾选保持不变
-  if (batchSetPools.value) {
-    body.pools = batchForm.pools
-    body.set_pools = true
-  }
-  if (batchSetGroups.value) {
-    body.groups = batchForm.groups
-    body.set_groups = true
-  }
-  batchLoading.value = true
-  try {
-    const r = await api<BatchResponse>('POST', '/api/hosts/batch', body)
-    ElMessage.success(`已更新 ${r.ok} 台`)
-    batchVisible.value = false
-    clearSelection()
-    loadHosts()
-  } catch (e) {
-    ElMessage.error((e as Error).message)
-  } finally {
-    batchLoading.value = false
-  }
+function openEdit(row: Host) {
+  editRow.value = row
+  editVisible.value = true
+}
+
+function openAdd() {
+  addVisible.value = true
+}
+
+function openPool() {
+  poolVisible.value = true
+}
+
+function openGroup() {
+  groupVisible.value = true
+}
+
+function openLabel() {
+  labelVisible.value = true
+}
+
+// 对话框落库后的回刷：新建池/组/标签与导入主机都会同时动台账和注册表
+function reloadAll() {
+  loadHosts()
+  loadRegistries()
 }
 
 // ---- 单机操作 ----
@@ -294,228 +278,14 @@ async function removeHost(row: Host) {
   }
 }
 
-// ---- 编辑主机（改地址/池/组/标签）----
-const editVisible = ref(false)
-const editLoading = ref(false)
-const editID = ref(0)
-const editForm = reactive({ Name: '', Address: '', AgentPort: 7602, Pools: [] as string[], Groups: [] as string[], AllowPlaintext: false })
-const editLabels = ref<Record<string, string>>({})
-
-function openEdit(row: Host) {
-  editID.value = row.ID
-  Object.assign(editForm, {
-    Name: row.Name,
-    Address: row.Address,
-    AgentPort: row.AgentPort,
-    Pools: row.Pools || [],
-    Groups: row.Groups || [],
-    AllowPlaintext: !!row.AllowPlaintext,
-  })
-  editLabels.value = parseLabels(row.Labels)
-  editVisible.value = true
-}
-
-async function submitEdit() {
-  editLoading.value = true
-  try {
-    await api('PUT', `/api/hosts/${editID.value}`, {
-      Address: editForm.Address,
-      AgentPort: editForm.AgentPort,
-      Pools: editForm.Pools,
-      Groups: editForm.Groups,
-      Labels: JSON.stringify(editLabels.value || {}),
-      AllowPlaintext: editForm.AllowPlaintext,
-    })
-    ElMessage.success(`已更新 ${editForm.Name}`)
-    editVisible.value = false
-    loadHosts()
-  } catch (e) {
-    ElMessage.error((e as Error).message)
-  } finally {
-    editLoading.value = false
-  }
-}
-
-// ---- 手动添加（多行 / CSV 批量）----
-const addVisible = ref(false)
-const addLoading = ref(false)
-const addText = ref('')
-const addFileInput = ref()
-
-const addRows = computed(() => parseHostCSV(addText.value))
-const addValidN = computed(() => addRows.value.filter((r) => r.value).length)
-
-function labelsText(labels: Record<string, string>): string {
-  return Object.entries(labels).map(([k, v]) => (v ? `${k}=${v}` : k)).join('; ')
-}
-
-function openAdd() {
-  addText.value = ''
-  addVisible.value = true
-}
-
-function onAddFilePicked(e: Event) {
-  const input = e.target as HTMLInputElement
-  const f = input.files?.[0]
-  if (f) readCSVFile(f).then((t) => (addText.value = t.trim()))
-  input.value = ''
-}
-
-async function submitAdd() {
-  const rows = addRows.value.filter((r) => r.value)
-  if (!rows.length) {
-    ElMessage.warning('没有可导入的主机行（先按模版格式填写）')
-    return
-  }
-  addLoading.value = true
-  try {
-    const r = await api<BatchResponse>('POST', '/api/hosts/import', {
-      hosts: rows.map(({ value }) => ({
-        name: value!.name,
-        address: value!.address,
-        agent_port: value!.agentPort,
-        pools: value!.pools,
-        groups: value!.groups,
-        labels: value!.labels,
-      })),
-    })
-    addVisible.value = false
-    loadHosts()
-    loadRegistries()
-    if (r.failed > 0) {
-      const bad = r.results
-        .filter((x) => !x.OK)
-        .map((x) => `第 ${rows[(x.Row ?? 1) - 1]?.line ?? '?'} 行 ${x.Name}：${x.Detail}`)
-        .join('\n')
-      await ElMessageBox.alert(bad, `导入完成：成功 ${r.ok} 台，失败 ${r.failed} 台`, { type: 'warning' })
-    } else {
-      ElMessage.success(`已导入 ${r.ok} 台主机`)
-    }
-  } catch (e) {
-    ElMessage.error((e as Error).message)
-  } finally {
-    addLoading.value = false
-  }
-}
-
-// ---- 新建池 / 组 / 标签（可划入已有主机）----
-const poolVisible = ref(false)
-const poolLoading = ref(false)
-const poolForm = reactive({ Name: '', Note: '', HostIDs: [] as number[] })
-
-function openPool() {
-  Object.assign(poolForm, { Name: '', Note: '', HostIDs: [] })
-  poolVisible.value = true
-}
-
-async function submitPool() {
-  const name = poolForm.Name.trim()
-  if (!name) {
-    ElMessage.warning('池名必填')
-    return
-  }
-  if (pools.value.some((p) => p.Name === name)) {
-    ElMessage.warning(`池 "${name}" 已存在（主机池下拉里可见）；如需调整成员请编辑主机或批量设置`)
-    return
-  }
-  poolLoading.value = true
-  try {
-    await api('POST', '/api/pools', {
-      name: poolForm.Name.trim(),
-      note: poolForm.Note,
-      host_ids: poolForm.HostIDs,
-    })
-    ElMessage.success(`已建池 ${poolForm.Name}（${poolForm.HostIDs.length} 台主机划入）`)
-    poolVisible.value = false
-    loadHosts()
-    loadRegistries()
-  } catch (e) {
-    ElMessage.error((e as Error).message)
-  } finally {
-    poolLoading.value = false
-  }
-}
-
-const groupVisible = ref(false)
-const groupLoading = ref(false)
-const groupForm = reactive({ Name: '', Note: '', HostIDs: [] as number[] })
-
-function openGroup() {
-  Object.assign(groupForm, { Name: '', Note: '', HostIDs: [] })
-  groupVisible.value = true
-}
-
-async function submitGroup() {
-  const name = groupForm.Name.trim()
-  if (!name) {
-    ElMessage.warning('组名必填')
-    return
-  }
-  if (groups.value.some((g) => g.Name === name)) {
-    ElMessage.warning(`组 "${name}" 已存在（组下拉里可见）`)
-    return
-  }
-  groupLoading.value = true
-  try {
-    await api('POST', '/api/groups', {
-      name: groupForm.Name.trim(),
-      note: groupForm.Note,
-      host_ids: groupForm.HostIDs,
-    })
-    ElMessage.success(`已建组 ${groupForm.Name}（${groupForm.HostIDs.length} 台主机划入）`)
-    groupVisible.value = false
-    loadHosts()
-    loadRegistries()
-  } catch (e) {
-    ElMessage.error((e as Error).message)
-  } finally {
-    groupLoading.value = false
-  }
-}
-
-const labelVisible = ref(false)
-const labelLoading = ref(false)
-const labelForm = reactive({ Key: '', Value: '', Note: '', HostIDs: [] as number[] })
-
-function openLabel() {
-  Object.assign(labelForm, { Key: '', Value: '', Note: '', HostIDs: [] })
-  labelVisible.value = true
-}
-
-async function submitLabel() {
-  const key = labelForm.Key.trim()
-  if (!key) {
-    ElMessage.warning('标签键必填')
-    return
-  }
-  if (labelDefs.value.some((l) => l.Key === key)) {
-    ElMessage.warning(`标签 "${key}" 已存在（可在主机编辑里直接使用）`)
-    return
-  }
-  labelLoading.value = true
-  try {
-    await api('POST', '/api/labels', {
-      key: labelForm.Key.trim(),
-      value: labelForm.Value,
-      note: labelForm.Note,
-      host_ids: labelForm.HostIDs,
-    })
-    ElMessage.success(`已建标签 ${labelForm.Key}（${labelForm.HostIDs.length} 台主机附加）`)
-    labelVisible.value = false
-    loadHosts()
-    loadRegistries()
-  } catch (e) {
-    ElMessage.error((e as Error).message)
-  } finally {
-    labelLoading.value = false
-  }
-}
-
 // ---- 主机纳管（token 拉取）----
 const enrollHost = ref('')
 const enrollLoading = ref(false)
 const enrollResult = ref<{ token: string; expires_in: number; command: string } | null>(null)
 const copied = ref(false)
+// copied 复位定时器：与 pollTimer/searchTimer 同口径，卸载时清理（否则
+// 离开页面后仍会触发一次 copied 置回）
+let copiedTimer: number | undefined
 
 async function generateEnroll() {
   enrollLoading.value = true
@@ -537,7 +307,8 @@ async function copyCommand() {
     await navigator.clipboard.writeText(enrollResult.value.command)
     copied.value = true
     ElMessage.success('已复制到剪贴板')
-    setTimeout(() => (copied.value = false), 1500)
+    window.clearTimeout(copiedTimer)
+    copiedTimer = window.setTimeout(() => (copied.value = false), 1500)
   } catch {
     // 非 HTTPS / 剪贴板权限被拒时 clipboard API 会 reject：提示手动复制，
     // 命令在上方只读输入框里可选中
@@ -546,113 +317,12 @@ async function copyCommand() {
 }
 
 // ---- SSH 安装（批量：共享凭据 + 多行主机清单）----
+// 对话框拆到 components/hosts/SSHInstallDialog.vue（本页此前 8 个对话框
+// 挤一个文件）。组件经 v-if 挂载：关闭即卸载，凭据随组件销毁不残留。
 const sshVisible = ref(false)
-const sshText = ref('')
-const sshFileInput = ref()
-// 共享连接设置：应用到清单里 user/password 留空的行（行内值优先）。
-// 指纹校验默认开（与后端安全默认一致）；关闭是知情选择（MITM 可截获
-// SSH 凭据并替换 agent 二进制）
-const sshShared = reactive({
-  user: '', password: '', key_path: '', key_passphrase: '',
-  verify_host_key: true, agent_port: 7602,
-})
-
-interface SSHJob {
-  line: number
-  host: SSHCSVRow
-  status: 'queued' | 'installing' | 'ok' | 'failed'
-  detail?: string
-}
-const sshJobs = ref<SSHJob[]>([])
-const sshRows = computed(() => parseSSHCSV(sshText.value))
-const sshValidN = computed(() => sshRows.value.filter((r) => r.value).length)
-const sshRunning = computed(() => sshJobs.value.some((j) => j.status === 'queued' || j.status === 'installing'))
 
 function openSSHInstall() {
-  Object.assign(sshShared, {
-    user: '', password: '', key_path: '', key_passphrase: '',
-    verify_host_key: true, agent_port: 7602,
-  })
-  sshText.value = ''
-  sshJobs.value = []
   sshVisible.value = true
-}
-
-function onSSHFilePicked(e: Event) {
-  const input = e.target as HTMLInputElement
-  const f = input.files?.[0]
-  if (f) readCSVFile(f).then((t) => (sshText.value = t.trim()))
-  input.value = ''
-}
-
-// 安装进行中不允许关对话框（关页面=放弃进度，服务端安装仍在跑）
-function beforeSSHClose(done: () => void) {
-  if (sshRunning.value) {
-    ElMessage.warning('安装进行中，请等待完成')
-    return
-  }
-  done()
-}
-
-const sshFailedN = computed(() => sshJobs.value.filter((j) => j.status === 'failed').length)
-
-// 并发 3 执行排队中的任务（每台含二进制上传耗时较长，3 并发平衡速度与
-// 目标机/网络压力）；逐台回写状态，单台失败不影响其余。
-async function runSSHJobs() {
-  const jobs = sshJobs.value
-  let cursor = 0
-  async function worker() {
-    for (;;) {
-      while (cursor < jobs.length && jobs[cursor].status !== 'queued') cursor++
-      if (cursor >= jobs.length) return
-      const job = jobs[cursor++]
-      job.status = 'installing'
-      try {
-        await api('POST', '/api/agents/install', {
-          name: job.host.name,
-          address: job.host.address,
-          ssh_port: job.host.sshPort || 22,
-          user: job.host.user || sshShared.user,
-          password: job.host.password || sshShared.password,
-          key_path: sshShared.key_path,
-          key_passphrase: sshShared.key_passphrase,
-          verify_host_key: sshShared.verify_host_key,
-          agent_port: sshShared.agent_port,
-        })
-        job.status = 'ok'
-      } catch (e) {
-        job.status = 'failed'
-        job.detail = (e as Error).message
-      }
-    }
-  }
-  const queued = jobs.filter((j) => j.status === 'queued').length
-  await Promise.all(Array.from({ length: Math.min(3, queued) }, worker))
-  const ok = jobs.filter((j) => j.status === 'ok').length
-  if (ok === jobs.length) ElMessage.success(`SSH 安装完成：${ok} 台全部上线`)
-  else ElMessage.warning(`SSH 安装完成：成功 ${ok} / ${jobs.length}（失败行见表，可重试）`)
-  loadHosts()
-}
-
-async function submitSSHInstall() {
-  const rows = sshRows.value.filter((r) => r.value)
-  if (!rows.length) {
-    ElMessage.warning('没有可安装的主机行（先按模版格式填写）')
-    return
-  }
-  sshJobs.value = rows.map((r) => ({ line: r.line, host: r.value!, status: 'queued' as const }))
-  await runSSHJobs()
-}
-
-// 仅重试失败行（SSH 安装幂等：证书复用、systemd restart 拉起新二进制）
-async function retrySSHFailed() {
-  for (const j of sshJobs.value) {
-    if (j.status === 'failed') {
-      j.status = 'queued'
-      j.detail = undefined
-    }
-  }
-  await runSSHJobs()
 }
 
 const poolNames = computed(() => pools.value.map((p) => p.Name))
@@ -680,6 +350,7 @@ watch(
 onUnmounted(() => {
   window.clearInterval(pollTimer)
   window.clearTimeout(searchTimer)
+  window.clearTimeout(copiedTimer)
 })
 </script>
 
@@ -740,7 +411,7 @@ onUnmounted(() => {
                       :color="hostAlertLevel(row.ID) === 'crit' ? '#f56c6c' : '#e6a23c'"
                     ><WarningFilled /></el-icon>
                   </template>
-                  <div v-for="a in alertsByHost[row.ID] || []" :key="a.Kind" class="alert-item">
+                  <div v-for="a in alertsByHost[row.ID] || []" :key="a.Kind + '-' + a.UpdatedAt" class="alert-item">
                     <el-tag size="small" :type="a.Level === 'crit' ? 'danger' : 'warning'" round>
                       {{ a.Level === 'crit' ? '严重' : '警告' }}
                     </el-tag>
@@ -834,288 +505,36 @@ onUnmounted(() => {
           </div>
         </el-card>
 
-    <!-- 手动添加（多行 / CSV 批量） -->
-    <el-dialog v-model="addVisible" title="手动添加主机（多行 / CSV 批量）" width="760px">
-      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px"
-        title="每行一台：name,address,agent_port,pools,groups,labels；整行只写一个 IP 也可以；池/组/标签多值用分号分隔；name 与端口留空 = address / 7602" />
-      <div class="csv-actions">
-        <el-button size="small" @click="downloadText('wdp-hosts.csv', hostCSVTemplate)">下载 CSV 模版</el-button>
-        <el-button size="small" @click="addFileInput?.click()">上传 CSV 文件</el-button>
-        <span class="muted">粘贴或上传后可继续编辑，下方实时预览并校验</span>
-        <input ref="addFileInput" type="file" accept=".csv,text/csv" hidden @change="onAddFilePicked" />
-      </div>
-      <el-input
-        v-model="addText" type="textarea" :rows="7" spellcheck="false"
-        placeholder="web1,192.168.1.11,7602,web;prod,api,env=prod;rack=a1&#10;web2,192.168.1.12&#10;db1,192.168.1.21,,,db,"
-      />
-      <el-table v-if="addRows.length" :data="addRows" size="small" border max-height="220" style="margin-top: 10px">
-        <el-table-column prop="line" label="行" width="52" />
-        <el-table-column label="主机名" min-width="110">
-          <template #default="{ row }">{{ row.value?.name ?? '—' }}</template>
-        </el-table-column>
-        <el-table-column label="地址" min-width="120">
-          <template #default="{ row }">{{ row.value?.address ?? '—' }}</template>
-        </el-table-column>
-        <el-table-column label="端口" width="64">
-          <template #default="{ row }">{{ row.value?.agentPort ?? '—' }}</template>
-        </el-table-column>
-        <el-table-column label="池" min-width="110">
-          <template #default="{ row }">{{ row.value?.pools.join('; ') || '—' }}</template>
-        </el-table-column>
-        <el-table-column label="组" min-width="90">
-          <template #default="{ row }">{{ row.value?.groups.join('; ') || '—' }}</template>
-        </el-table-column>
-        <el-table-column label="标签" min-width="130">
-          <template #default="{ row }">{{ row.value ? labelsText(row.value.labels) || '—' : '—' }}</template>
-        </el-table-column>
-        <el-table-column label="错误" min-width="200">
-          <template #default="{ row }">
-            <span v-if="row.error" class="csv-err">第 {{ row.line }} 行：{{ row.error }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
-      <template #footer>
-        <el-button @click="addVisible = false">取消</el-button>
-        <el-button type="primary" :loading="addLoading" :disabled="!addValidN" @click="submitAdd">
-          导入 {{ addValidN }} 台主机
-        </el-button>
-      </template>
-    </el-dialog>
+    <!-- 手动添加（多行 / CSV 批量）：见 components/hosts/ManualAddDialog.vue -->
+    <ManualAddDialog v-model="addVisible" @imported="reloadAll" />
 
-    <!-- 编辑主机 -->
-    <el-dialog v-model="editVisible" :title="`编辑主机 ${editForm.Name}`" width="520px">
-      <el-form label-width="90px">
-        <el-form-item label="地址">
-          <el-input v-model="editForm.Address" />
-        </el-form-item>
-        <el-form-item label="agent 端口">
-          <el-input-number v-model="editForm.AgentPort" :min="1" :max="65535" />
-        </el-form-item>
-        <el-form-item label="池（多选）">
-          <el-select v-model="editForm.Pools" multiple style="width: 100%">
-            <el-option v-for="p in poolNames" :key="p" :label="p" :value="p" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="组（多选）">
-          <el-select v-model="editForm.Groups" multiple style="width: 100%">
-            <el-option v-for="g in groupNames" :key="g" :label="g" :value="g" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="标签">
-          <LabelRows v-model="editLabels" :keys="labelKeys" />
-        </el-form-item>
-        <el-form-item label="明文通道">
-          <el-switch v-model="editForm.AllowPlaintext" />
-          <div class="muted" style="margin-left: 12px; line-height: 1.6">
-            仅当该主机的 agent 未启用 mTLS 时打开（可信内网）。<br />
-            默认关闭：控制台一律按 mTLS 建连并校验证书身份；<br />
-            明文通道下脚本、口令与制品在网络上不加密。
-          </div>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="editVisible = false">取消</el-button>
-        <el-button type="primary" :loading="editLoading" @click="submitEdit">保存</el-button>
-      </template>
-    </el-dialog>
+    <!-- 编辑主机：见 components/hosts/EditHostDialog.vue -->
+    <EditHostDialog
+      v-model="editVisible"
+      :host="editRow"
+      :pool-names="poolNames"
+      :group-names="groupNames"
+      :label-keys="labelKeys"
+      @saved="loadHosts()"
+    />
 
-    <!-- 批量设置 -->
-    <el-dialog v-model="batchVisible" title="批量设置池 / 组 / 标签" width="520px">
-      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 16px"
-        :title="`将应用于选中的 ${selection.length} 台主机；未改动的项保持不变`" />
-      <el-form label-width="90px">
-        <el-form-item label="设置池">
-          <el-checkbox v-model="batchSetPools">修改池归属（整体替换，空 = 清除）</el-checkbox>
-          <el-select v-model="batchForm.pools" multiple :disabled="!batchSetPools" placeholder="替换为这些池" style="width: 100%">
-            <el-option v-for="p in poolNames" :key="p" :label="p" :value="p" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="设置组">
-          <el-checkbox v-model="batchSetGroups">修改组归属（整体替换，空 = 清除）</el-checkbox>
-          <el-select v-model="batchForm.groups" multiple :disabled="!batchSetGroups" placeholder="替换为这些组" style="width: 100%">
-            <el-option v-for="g in groupNames" :key="g" :label="g" :value="g" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="标签">
-          <LabelRows v-model="batchLabels" :keys="labelKeys" />
-          <el-checkbox v-model="batchForm.replace" style="margin-top: 6px">替换全部标签（而非追加）</el-checkbox>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="batchVisible = false">取消</el-button>
-        <el-button type="primary" :loading="batchLoading" @click="submitBatchAssign">应用</el-button>
-      </template>
-    </el-dialog>
+    <!-- 批量设置：见 components/hosts/BatchAssignDialog.vue -->
+    <BatchAssignDialog
+      v-model="batchVisible"
+      :ids="selection.map((h) => h.ID)"
+      :pool-names="poolNames"
+      :group-names="groupNames"
+      :label-keys="labelKeys"
+      @applied="clearSelection(); loadHosts()"
+    />
 
-    <!-- 新建池 -->
-    <el-dialog v-model="poolVisible" title="新建主机池" width="520px">
-      <el-form label-width="110px">
-        <el-form-item label="池名" required>
-          <el-input v-model="poolForm.Name" placeholder="如 prod / test" />
-        </el-form-item>
-        <el-form-item label="备注">
-          <el-input v-model="poolForm.Note" />
-        </el-form-item>
-        <el-form-item label="划入主机">
-          <el-select v-model="poolForm.HostIDs" multiple placeholder="可选：选择已有主机划入该池" style="width: 100%">
-            <el-option v-for="hst in hosts" :key="hst.ID" :label="`${hst.Name} (${hst.Address})`" :value="hst.ID" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="poolVisible = false">取消</el-button>
-        <el-button type="primary" :loading="poolLoading" @click="submitPool">创建</el-button>
-      </template>
-    </el-dialog>
+    <!-- 新建池 / 组 / 标签（同构表单参数化）：见 components/hosts/PoolGroupLabelDialog.vue -->
+    <PoolGroupLabelDialog v-model="poolVisible" kind="pool" :hosts="hosts" :existing-names="poolNames" @created="reloadAll" />
+    <PoolGroupLabelDialog v-model="groupVisible" kind="group" :hosts="hosts" :existing-names="groupNames" @created="reloadAll" />
+    <PoolGroupLabelDialog v-model="labelVisible" kind="label" :hosts="hosts" :existing-names="labelKeys" @created="reloadAll" />
 
-    <!-- 新建组 -->
-    <el-dialog v-model="groupVisible" title="新建组" width="520px">
-      <el-form label-width="110px">
-        <el-form-item label="组名" required>
-          <el-input v-model="groupForm.Name" placeholder="如 web / db" />
-        </el-form-item>
-        <el-form-item label="备注">
-          <el-input v-model="groupForm.Note" />
-        </el-form-item>
-        <el-form-item label="划入主机">
-          <el-select v-model="groupForm.HostIDs" multiple placeholder="可选：选择已有主机加入该组" style="width: 100%">
-            <el-option v-for="hst in hosts" :key="hst.ID" :label="`${hst.Name} (${hst.Address})`" :value="hst.ID" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="groupVisible = false">取消</el-button>
-        <el-button type="primary" :loading="groupLoading" @click="submitGroup">创建</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 新建标签 -->
-    <el-dialog v-model="labelVisible" title="新建标签" width="520px">
-      <el-form label-width="110px">
-        <el-form-item label="标签键" required>
-          <el-input v-model="labelForm.Key" placeholder="如 env / tier" />
-        </el-form-item>
-        <el-form-item label="默认值">
-          <el-input v-model="labelForm.Value" placeholder="可选（附加主机时写入的值）" />
-        </el-form-item>
-        <el-form-item label="备注">
-          <el-input v-model="labelForm.Note" />
-        </el-form-item>
-        <el-form-item label="附加主机">
-          <el-select v-model="labelForm.HostIDs" multiple placeholder="可选：为已有主机加上该标签" style="width: 100%">
-            <el-option v-for="hst in hosts" :key="hst.ID" :label="`${hst.Name} (${hst.Address})`" :value="hst.ID" />
-          </el-select>
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="labelVisible = false">取消</el-button>
-        <el-button type="primary" :loading="labelLoading" @click="submitLabel">创建</el-button>
-      </template>
-    </el-dialog>
-
-    <!-- SSH 安装 agent -->
-    <!-- SSH 安装 agent（批量：共享凭据 + 多行主机清单） -->
-    <el-dialog v-model="sshVisible" title="SSH 安装 agent（批量）" width="800px" :before-close="beforeSSHClose" :close-on-click-modal="!sshRunning">
-      <el-alert type="info" :closable="false" show-icon style="margin-bottom: 10px"
-        title="适用于 server 可达目标机、目标机无法回连 server 的网络：server 经 SSH 推装 agent 并注册 systemd。凭据仅本次使用，不落库。" />
-      <el-form label-width="110px" :disabled="sshRunning">
-        <el-form-item label="SSH 用户">
-          <el-input v-model="sshShared.user" placeholder="root（清单行内 user 优先）" style="width: 220px" />
-        </el-form-item>
-        <el-form-item label="SSH 密码">
-          <el-input v-model="sshShared.password" type="password" show-password placeholder="与私钥二选一（行内 password 优先）" style="width: 320px" />
-        </el-form-item>
-        <el-form-item label="私钥路径">
-          <el-input v-model="sshShared.key_path" placeholder="server 本机私钥路径（如 ~/.ssh/id_ed25519）" style="width: 320px" />
-        </el-form-item>
-        <el-form-item label="私钥口令">
-          <el-input v-model="sshShared.key_passphrase" type="password" show-password placeholder="可选" style="width: 320px" />
-        </el-form-item>
-        <el-form-item label="指纹校验">
-          <el-switch v-model="sshShared.verify_host_key" />
-          <span class="muted" style="margin-left: 8px">默认开：校验 known_hosts 指纹，防中间人截获凭据/替换二进制；关闭前需预先采集指纹</span>
-        </el-form-item>
-        <el-form-item label="agent 端口">
-          <el-input-number v-model="sshShared.agent_port" :min="1" :max="65535" />
-        </el-form-item>
-      </el-form>
-
-      <div class="csv-actions">
-        <el-button size="small" :disabled="sshRunning" @click="downloadText('wdp-ssh-hosts.csv', sshCSVTemplate)">下载 CSV 模版</el-button>
-        <el-button size="small" :disabled="sshRunning" @click="sshFileInput?.click()">上传 CSV 文件</el-button>
-        <span class="muted">每行一台：name,address,ssh_port,user,password（整行只写一个 IP 也可以；后三项留空 = 用上方共享设置）</span>
-        <input ref="sshFileInput" type="file" accept=".csv,text/csv" hidden @change="onSSHFilePicked" />
-      </div>
-      <el-input
-        v-model="sshText" type="textarea" :rows="6" spellcheck="false" :disabled="sshRunning"
-        placeholder="web1,192.168.1.11,22,root,&#10;web2,192.168.1.12&#10;db1,192.168.1.21,,root,another-pass"
-      />
-
-      <!-- 开始前：解析预览；开始后：逐台安装进度 -->
-      <el-table
-        v-if="sshJobs.length" :data="sshJobs" size="small" border max-height="240" style="margin-top: 10px"
-      >
-        <el-table-column prop="line" label="行" width="52" />
-        <el-table-column label="主机名" min-width="110">
-          <template #default="{ row }">{{ row.host.name }}</template>
-        </el-table-column>
-        <el-table-column label="地址" min-width="130">
-          <template #default="{ row }">{{ row.host.address }}</template>
-        </el-table-column>
-        <el-table-column label="SSH 端口" width="80">
-          <template #default="{ row }">{{ row.host.sshPort || 22 }}</template>
-        </el-table-column>
-        <el-table-column label="用户" width="90">
-          <template #default="{ row }">{{ row.host.user || sshShared.user || 'root' }}</template>
-        </el-table-column>
-        <el-table-column label="状态" width="96">
-          <template #default="{ row }">
-            <el-tag v-if="row.status === 'queued'" type="info">排队</el-tag>
-            <el-tag v-else-if="row.status === 'installing'" type="warning">安装中…</el-tag>
-            <el-tag v-else-if="row.status === 'ok'" type="success">已上线</el-tag>
-            <el-tag v-else type="danger">失败</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="详情" min-width="240">
-          <template #default="{ row }">
-            <span v-if="row.status === 'failed'" class="csv-err">{{ row.detail }}</span>
-            <span v-else-if="row.status === 'installing'" class="muted">连接 / 上传二进制 / systemd 装配（约 1 分钟）</span>
-          </template>
-        </el-table-column>
-      </el-table>
-      <el-table v-else-if="sshRows.length" :data="sshRows" size="small" border max-height="240" style="margin-top: 10px">
-        <el-table-column prop="line" label="行" width="52" />
-        <el-table-column label="主机名" min-width="110">
-          <template #default="{ row }">{{ row.value?.name ?? '—' }}</template>
-        </el-table-column>
-        <el-table-column label="地址" min-width="130">
-          <template #default="{ row }">{{ row.value?.address ?? '—' }}</template>
-        </el-table-column>
-        <el-table-column label="SSH 端口" width="80">
-          <template #default="{ row }">{{ row.value?.sshPort || 22 }}</template>
-        </el-table-column>
-        <el-table-column label="用户" width="90">
-          <template #default="{ row }">{{ row.value?.user || sshShared.user || 'root' }}</template>
-        </el-table-column>
-        <el-table-column label="密码" width="80">
-          <template #default="{ row }">{{ row.value?.password ? '••••' : '共享' }}</template>
-        </el-table-column>
-        <el-table-column label="错误" min-width="240">
-          <template #default="{ row }">
-            <span v-if="row.error" class="csv-err">第 {{ row.line }} 行：{{ row.error }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
-      <template #footer>
-        <el-button :disabled="sshRunning" @click="sshVisible = false">关闭</el-button>
-        <el-button v-if="sshFailedN && !sshRunning" type="warning" @click="retrySSHFailed">
-          重试失败 {{ sshFailedN }} 台
-        </el-button>
-        <el-button v-if="!sshJobs.length" type="primary" :disabled="!sshValidN" @click="submitSSHInstall">
-          安装 {{ sshValidN }} 台（含上传二进制，每台约一分钟）
-        </el-button>
-      </template>
-    </el-dialog>
+    <!-- SSH 安装 agent（批量）：见 components/hosts/SSHInstallDialog.vue -->
+    <SSHInstallDialog v-if="sshVisible" v-model="sshVisible" @installed="loadHosts" />
 
   </div>
 </template>
@@ -1125,16 +544,6 @@ onUnmounted(() => {
   margin: 6px 0;
   line-height: 1.6;
   font-size: 13px;
-}
-.csv-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-.csv-err {
-  color: #f56c6c;
-  font-size: 12px;
 }
 .muted {
   color: #909399;

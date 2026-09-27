@@ -56,7 +56,7 @@ type ProbeResult struct {
 // probeClientFor：ServerName 取台账地址，比自己"只验链不验名"强）。
 func ProbeHost(ctx context.Context, h *store.Host, mtls *http.Client) ProbeResult {
 	if mtls != nil {
-		res, _ := probeOnce(ctx, h, "https", mtls)
+		res := probeOnce(ctx, h, "https", mtls)
 		if res.Status != "online" {
 			// 控制台按住 mTLS 探测（台账未声明明文），失败时给出可操作的
 			// 出路：真未启用 mTLS 的 agent 需要在主机台账里显式勾选明文，
@@ -65,29 +65,29 @@ func ProbeHost(ctx context.Context, h *store.Host, mtls *http.Client) ProbeResul
 		}
 		return res
 	}
-	res, _ := probeOnce(ctx, h, "http", probeClient)
-	return res
+	return probeOnce(ctx, h, "http", probeClient)
 }
 
-// probeOnce 以指定 scheme 探测一次；ok=false 表示该通道不可用。
-func probeOnce(ctx context.Context, h *store.Host, scheme string, client *http.Client) (ProbeResult, bool) {
+// probeOnce 以指定 scheme 探测一次：失败时返回 Status=offline 的结果，
+// 原因在 res.Error。
+func probeOnce(ctx context.Context, h *store.Host, scheme string, client *http.Client) ProbeResult {
 	res := ProbeResult{Status: "offline", Scheme: scheme, CheckedAt: time.Now().UTC().Format(time.RFC3339)}
 	url := fmt.Sprintf("%s://%s/health", scheme, net.JoinHostPort(h.Address, fmt.Sprint(h.AgentPort)))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		res.Error = err.Error()
-		return res, false
+		return res
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		res.Error = err.Error()
-		return res, false
+		return res
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		res.Error = fmt.Sprintf("health check %s: HTTP %d %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
-		return res, false
+		return res
 	}
 	var info struct {
 		Ok           bool   `json:"ok"`
@@ -101,12 +101,12 @@ func probeOnce(ctx context.Context, h *store.Host, scheme string, client *http.C
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 64<<10)).Decode(&info); err != nil {
 		res.Error = "decode health: " + err.Error()
-		return res, false
+		return res
 	}
 	res.Status = "online"
 	res.Hostname, res.Version, res.Build, res.BinPath, res.Goos, res.Arch, res.CertNotAfter =
 		info.Hostname, info.Version, info.Build, info.BinPath, info.Goos, info.Arch, info.CertNotAfter
-	return res, true
+	return res
 }
 
 // Prober 周期探活全量主机并写回状态。Probe 回调由传输层注入（带 mTLS
@@ -119,8 +119,8 @@ type Prober struct {
 }
 
 // Run 阻塞执行探活循环（ctx 取消退出；启动即先探一轮）。
-// 有界并发（与 Monitor 采样同款）：串行时单台最坏 ~10s（mTLS+明文两趟
-// 超时），离线主机一多一轮远超周期。
+// 有界并发（与 Monitor 采样同款）：离线主机需等满单趟探测超时，
+// 一多就拖慢整轮，不能串行。
 func (p *Prober) Run(ctx context.Context) {
 	probe := func() {
 		ids, err := p.Store.HostIDs()
@@ -136,6 +136,7 @@ func (p *Prober) Run(ctx context.Context) {
 			}
 			h, err := p.Store.GetHost(id)
 			if err != nil {
+				p.Logger.Warn("probe: get host", "id", id, "err", err)
 				continue
 			}
 			wg.Add(1)
@@ -144,6 +145,12 @@ func (p *Prober) Run(ctx context.Context) {
 				sem <- struct{}{}
 				defer func() { <-sem }()
 				res := p.Probe(ctx, h)
+				// ctx 已取消（server 关停）：已派发 goroutine 的探测以超时/
+				// 连接中断收场，把该结论写库会把全网标成离线——关停不应
+				// 污染主机状态，下一轮探活自会给出真实结论
+				if ctx.Err() != nil {
+					return
+				}
 				if err := p.Store.SetHostStatus(id, res.Status); err != nil {
 					p.Logger.Error("probe: set status", "host", h.Name, "err", err)
 				}

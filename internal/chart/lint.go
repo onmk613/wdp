@@ -42,13 +42,23 @@ func Lint(c *Chart, values map[string]any) []LintIssue {
 	// helpers 可解析（含子 chart 合并）
 	eng, err := render.NewEngine(c.CollectHelpers())
 	if err != nil {
-		issues = append(issues, LintIssue{ERROR, "_helpers.tpl", err.Error(), 0})
-		return issues // 引擎不可用时后续模板校验无意义
+		return append(issues, LintIssue{ERROR, "_helpers.tpl", err.Error(), 0}) // 引擎不可用时后续模板校验无意义
 	}
 
-	// 全相位任务树校验（deploy + uninstall/status/自定义相位文件；含子
-	// chart 引用、模块名与 block 组递归）——此前只查 deploy.yaml，相位
-	// 文件里的未知模块与坏模板要到运行时才暴露
+	issues = append(issues, lintTaskTree(c, eng)...)
+	issues = append(issues, lintPhaseDecls(c)...)
+	issues = append(issues, lintTemplates(c, eng, values)...)
+	issues = append(issues, lintEnvs(c)...)
+	issues = append(issues, lintSchemas(c, values)...)
+	issues = append(issues, lintInventoryOverride(c, values)...)
+	return issues
+}
+
+// lintTaskTree 走查全部相位（deploy + uninstall/status/自定义相位文件，含子
+// chart 递归）的任务树：hook 名、chart 引用、模块名与模板字段。
+// 此前只查 deploy.yaml，相位文件里的未知模块与坏模板要到运行时才暴露。
+func lintTaskTree(c *Chart, eng *render.Engine) []LintIssue {
+	var issues []LintIssue
 	validHooks := map[string]bool{}
 	for _, p := range c.PhaseNames() {
 		validHooks["pre_"+HookNameFor(p)] = true
@@ -107,9 +117,14 @@ func Lint(c *Chart, values map[string]any) []LintIssue {
 		}
 	}
 	walk("", c)
+	return issues
+}
 
-	// chart.yaml phases 声明与相位文件匹配：声明了没有对应文件的相位大概率
-	// 是拼写错误（该声明永远不会生效）——与 inventory_override 同样的静默失效防御
+// lintPhaseDecls 校验 chart.yaml phases 声明与相位文件匹配：声明了没有
+// 对应文件的相位大概率是拼写错误（该声明永远不会生效）——与
+// inventory_override 同样的静默失效防御。
+func lintPhaseDecls(c *Chart) []LintIssue {
+	var issues []LintIssue
 	for _, p := range slices.Sorted(maps.Keys(c.Meta.Phases)) {
 		if _, ok := c.Phases[p]; !ok {
 			if _, builtin := builtinPhaseSpecs[p]; !builtin {
@@ -118,12 +133,23 @@ func Lint(c *Chart, values map[string]any) []LintIssue {
 			}
 		}
 	}
+	return issues
+}
 
-	// 模板文件可渲染（样例域：合并 values + 占位主机名）
+// lintTemplates 校验模板文件可渲染（样例域：合并 values + 占位主机名）。
+// 模板列举失败（templates/ 存在但目录不可读等）直接 ERROR：吞掉会误报
+// 全绿，渲染时才发现模板缺失。
+func lintTemplates(c *Chart, eng *render.Engine, values map[string]any) []LintIssue {
+	var issues []LintIssue
+	tplFiles, terr := c.walkTemplates()
+	if terr != nil {
+		issues = append(issues, LintIssue{ERROR, "templates",
+			fmt.Sprintf("failed to list templates: %v", terr), 0})
+	}
 	sample := map[string]any{}
 	maps.Copy(sample, values)
 	sample["inventory_hostname"] = "lint-host"
-	for _, rel := range c.TemplateFiles() {
+	for _, rel := range tplFiles {
 		data, err := os.ReadFile(filepath.Join(c.Dir, rel))
 		if err != nil {
 			issues = append(issues, LintIssue{ERROR, rel, err.Error(), 0})
@@ -133,16 +159,21 @@ func Lint(c *Chart, values map[string]any) []LintIssue {
 			issues = append(issues, LintIssue{ERROR, rel, err.Error(), 0})
 		}
 	}
+	return issues
+}
 
-	// envs 文件可解析；且叠加默认 values 后要过根 chart schema
-	// （defaults+env 即该环境实际生效的静态域，不实际运行即可暴露配置错误）
+// lintEnvs 校验 envs 文件可解析；且叠加默认 values 后要过根 chart schema
+// （defaults+env 即该环境实际生效的静态域，不实际运行即可暴露配置错误）。
+func lintEnvs(c *Chart) []LintIssue {
+	var issues []LintIssue
 	for _, env := range c.EnvFiles() {
 		data, err := os.ReadFile(filepath.Join(c.Dir, "envs", env))
 		if err == nil {
 			var ov map[string]any
 			ov, err = LoadValuesYAML(data)
 			if err == nil {
-				if serr := c.ValidateValuesSchema(Merge(deepCopyValues(c.Values), ov)); serr != nil {
+				// Merge 首行即深拷贝 base，此处无需再拷贝 c.Values
+				if serr := c.ValidateValuesSchema(Merge(c.Values, ov)); serr != nil {
 					issues = append(issues, LintIssue{ERROR, "envs/" + env, serr.Error(), 0})
 				}
 			}
@@ -151,20 +182,30 @@ func Lint(c *Chart, values map[string]any) []LintIssue {
 			issues = append(issues, LintIssue{ERROR, "envs/" + env, err.Error(), 0})
 		}
 	}
+	return issues
+}
 
-	// values.schema.json：合并 values（defaults + -f + --set）过根 chart schema；
-	// 子 chart 逐层静态走查（SubScope 算域——父 values 里 <子名> 子树的类型
-	// 错误在此暴露，运行期由 executor 用含引用 vars 的精确作用域再校验）
+// lintSchemas 校验 values.schema.json：合并 values（defaults + -f + --set）
+// 过根 chart schema；子 chart 逐层静态走查（SubScope 算域——父 values 里
+// <子名> 子树的类型错误在此暴露，运行期由 executor 用含引用 vars 的精确
+// 作用域再校验）。
+func lintSchemas(c *Chart, values map[string]any) []LintIssue {
+	var issues []LintIssue
 	if err := c.ValidateValuesSchema(values); err != nil {
 		issues = append(issues, LintIssue{ERROR, SchemaFile, err.Error(), 0})
 	}
 	if err := c.ValidateSubchartsSchema(values); err != nil {
 		issues = append(issues, LintIssue{ERROR, SchemaFile, err.Error(), 0})
 	}
+	return issues
+}
 
-	// inventory_override 白名单键必须是 values 顶层键（合并 -f/--set 后判定）：
-	// 列了不存在的键大概率是拼写错误——该键会被静默忽略，主机的同名变量
-	// 依旧被 values 遮蔽（如果 values 里根本没有这个键则白名单无意义）。
+// lintInventoryOverride 校验 inventory_override 白名单键是 values 顶层键
+// （合并 -f/--set 后判定）：列了不存在的键大概率是拼写错误——该键会被
+// 静默忽略，主机的同名变量依旧被 values 遮蔽（如果 values 里根本没有
+// 这个键则白名单无意义）。
+func lintInventoryOverride(c *Chart, values map[string]any) []LintIssue {
+	var issues []LintIssue
 	for _, k := range c.Meta.InventoryOverride {
 		if _, ok := values[k]; !ok {
 			issues = append(issues, LintIssue{WARN, "chart.yaml",

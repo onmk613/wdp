@@ -38,11 +38,12 @@ type Conn struct {
 
 // New 创建 agent 连接。TLS 启用条件（任一）：
 // 显式 tls: true / agent_url 为 https / 配置了 CA 或客户端证书（文件或内联
-// PEM）/ 降级或改名开关。CA 未配置时信任系统证书池（公网 CA 场景）；
+// PEM，CA/Cert/Key 三者任一形态都算——漏 KeyData 会让"仅内联私钥"的主机
+// 静默走明文）/ 降级或改名开关。CA 未配置时信任系统证书池（公网 CA 场景）；
 // 证书文件/数据加载失败显式报错。
 func New(h *model.Host, dc *conn.Defaults) *Conn {
 	useTLS := h.TLS || h.CAFile != "" || h.KeyFile != "" || h.CertFile != "" ||
-		len(h.CAData) > 0 || len(h.CertData) > 0 ||
+		len(h.CAData) > 0 || len(h.CertData) > 0 || len(h.KeyData) > 0 ||
 		h.InsecureSkipVerify || h.TLSSkipHostVerify || h.TLSServerName != ""
 	base := h.AgentURL
 	if base == "" {

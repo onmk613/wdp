@@ -4,7 +4,7 @@ package cli
 //
 // 检测与分类内核在 internal/drift（marker 读取 play、逐主机比对），主机
 // 选取用 inventory.SelectLimited（与 run/executor 同口径）；本文件只做
-// 命令装配与结论呈现。退出码：存在 DRIFTED / UNREACHABLE 时非零（可直接
+// 命令装配与结论呈现。退出码：存在 DRIFTED / UNREACHABLE / FAILED 时非零（可直接
 // 进 CI）。
 
 import (
@@ -31,8 +31,9 @@ const driftHelp = `
 
 读取各主机 release marker，与当前 chart + values 的摘要逐主机比对分类：
 OK 一致 / DRIFTED values 已变（改配置未部署或有人手改现场；marker v2 附字段级差异）/
-OUTDATED 部署的是旧 chart 版本 / NOT-DEPLOYED 无 marker / UNREACHABLE 连接失败
-判失败口径：DRIFTED / UNREACHABLE 非零退出（可直接进 CI）；
+OUTDATED 部署的是旧 chart 版本 / NOT-DEPLOYED 无 marker / UNREACHABLE 连接失败 /
+FAILED 任务执行失败（become 被拒等，与连接问题区分）
+判失败口径：DRIFTED / UNREACHABLE / FAILED 非零退出（可直接进 CI）；
 NOT-DEPLOYED / OUTDATED 只列出不判失败（扩容中与待升级是常态，不是漂移）
 收敛口径：重跑 wdp run <chart> 幂等重部署
 可选位置参数限定主机模式（默认 all）；--limit 进一步收窄；-f/--set 提供巡检口径的 values
@@ -128,7 +129,11 @@ func runDrift(ctx context.Context, target, pattern, limit string, valuesFiles, s
 			js.SetExtra("drift", rows)
 		}
 	}
-	finish()
+	// 写失败（破管道等）优先于漂移结论上报：CI 拿到 0 字节 JSON 时，错误
+	// 码必须说明"报告没写出来"，而不是把漂移结论静默吞掉
+	if werr := finish(); werr != nil {
+		return werr
+	}
 
 	fmt.Fprintf(out, "chart %s %s  expected values sha %s\n", ch.Meta.Name, ch.Meta.Version, wantSHA)
 	for _, r := range rows {

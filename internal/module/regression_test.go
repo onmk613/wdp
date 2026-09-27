@@ -3,6 +3,8 @@ package module
 // 审计修复回归测试：参数校验、bool/mode 解析、fetch 路径包含、mode 漂移变更报告。
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,6 +29,28 @@ func TestValidateArgsRejectsBadBool(t *testing.T) {
 	err := ValidateArgs(m, map[string]any{"dest": "/a", "content": "x", "backup": "maybe"}, "")
 	if err == nil {
 		t.Fatal("backup=maybe 应被拒绝")
+	}
+}
+
+// TestValidateArgsRejectsBadInt int 参数无法解析时报错（不再静默当未提供，
+// 否则 uid/gid/agent_port 拼错值会跳过漂移检查）；数字字面量与数字串均合法。
+func TestValidateArgsRejectsBadInt(t *testing.T) {
+	m, _ := Get("user")
+	err := ValidateArgs(m, map[string]any{"name": "app", "uid": "1024x"}, "")
+	if err == nil {
+		t.Fatal("uid=1024x 应被拒绝")
+	}
+	if !strings.Contains(err.Error(), "uid") {
+		t.Fatalf("应报出参数名 uid: %v", err)
+	}
+	for _, v := range []any{1024, int64(1024), "1024"} {
+		if err := ValidateArgs(m, map[string]any{"name": "app", "uid": v}, ""); err != nil {
+			t.Fatalf("uid=%v(%T) 应合法: %v", v, v, err)
+		}
+	}
+	// 未提供 uid 不报错（与"提供了但非法"区分）
+	if err := ValidateArgs(m, map[string]any{"name": "app"}, ""); err != nil {
+		t.Fatalf("未提供 uid 应合法: %v", err)
 	}
 }
 
@@ -89,6 +113,63 @@ func TestFetchRejectsTraversal(t *testing.T) {
 	}, "")
 	if res == nil || !res.Failed || !strings.Contains(res.Msg, "escapes") {
 		t.Fatalf("src 含 .. 应被拒绝, got %+v", res)
+	}
+}
+
+// TestFetchDestSandboxed fetch 的 dest 与 copy 的 src 同口径约束在 BaseDir
+// 内：绝对路径与 .. 逃逸拒绝——fetch 是唯一把远端内容写回控制端的模块，
+// dest 不设防即 `dest: /usr/local/bin` 可覆盖控制端任意可写文件。
+func TestFetchDestSandboxed(t *testing.T) {
+	rc, fake := newTestRC(t)
+	rc.BaseDir = t.TempDir()
+	fake.Files["/etc/passwd"] = []byte("root:x:0:0\n")
+	m := &FetchModule{}
+	for _, dest := range []string{"/tmp/out", "../../out"} {
+		res := m.Run(rc, map[string]any{"src": "/etc/passwd", "dest": dest}, "")
+		if res == nil || !res.Failed || !strings.Contains(res.Msg, "outside the chart/playbook directory") {
+			t.Fatalf("dest %q 应被沙箱拒绝, got %+v", dest, res)
+		}
+	}
+	// BaseDir 内的相对路径照常放行
+	res := m.Run(rc, map[string]any{"src": "/etc/passwd", "dest": "./out"}, "")
+	if res == nil || res.Failed {
+		t.Fatalf("BaseDir 内相对 dest 应放行: %+v", res)
+	}
+}
+
+// TestLocalReadsCapped script/template/systemd_unit 的本地读取走上限
+// （回归：三处此前是裸 os.ReadFile，绕过 max_upload_mb——chart 内误放的
+// 大文件在 forks 并发下是控制端 OOM 的最短路径，web 控制台进程内执行时
+// 会连控制台一起带走）。
+func TestLocalReadsCapped(t *testing.T) {
+	rc, _ := newTestRC(t)
+	rc.BaseDir = t.TempDir()
+	rc.MaxUploadBytes = 64
+	big := strings.Repeat("x", 200)
+	for _, f := range []string{"big.sh", "big.tpl", "big.unit"} {
+		if err := os.WriteFile(filepath.Join(rc.BaseDir, f), []byte(big), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name string
+		run  func() *Result
+	}{
+		{"script", func() *Result {
+			return (&ScriptModule{}).Run(rc, map[string]any{"src": "big.sh"}, "")
+		}},
+		{"template", func() *Result {
+			return (&TemplateModule{}).Run(rc, map[string]any{"src": "big.tpl", "dest": "/tmp/x"}, "")
+		}},
+		{"systemd_unit", func() *Result {
+			return (&SystemdUnitModule{}).Run(rc, map[string]any{"src": "big.unit", "name": "x.service"}, "")
+		}},
+	}
+	for _, c := range cases {
+		res := c.run()
+		if res == nil || !res.Failed || !strings.Contains(res.Msg, "exceeds the") {
+			t.Fatalf("%s 的本地读取应超限失败: %+v", c.name, res)
+		}
 	}
 }
 

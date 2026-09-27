@@ -1,11 +1,13 @@
 <script setup lang="ts">
 // 应用执行：左侧配置目标与执行清单，提交后**在下方内联展开执行输出**
-// （2s 轮询，任务随执行逐条出现）。完整历史见「执行记录」菜单。
+// （SSE 事件驱动刷新，未收到事件前 2s 轮询兜底，任务随执行逐条出现）。
+// 完整历史见「执行记录」菜单。
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, CaretRight, Delete, InfoFilled, Refresh } from '@element-plus/icons-vue'
 import { api, subscribeRuns, type App, type AppVersion, type Host, type Run, type RunTask } from '../api'
 import { can } from '../auth'
+import { runStatus, taskStatus } from '../lib/format'
 
 const apps = ref<App[]>([])
 // 执行目标按 run:execute 权限裁剪（资源显示与执行权限同口径）；
@@ -85,7 +87,8 @@ async function loadVersions(appID: number) {
     versionCache[appID] = r.versions.map((v) => v.Version)
     for (const v of r.versions) phasesCache[`${appID}:${v.Version}`] = v.Phases && v.Phases.length ? v.Phases : LEGACY_PHASES
   } catch {
-    versionCache[appID] = []
+    // 瞬时失败不落缓存：空数组也是 truthy，会让本会话对同一应用永不再重试
+    delete versionCache[appID]
   }
 }
 
@@ -218,14 +221,6 @@ function anyRunning(): boolean {
   // 有跟踪但从未成功拿到状态的 run（每轮都失败）：视为进行中继续轮询，
   // 否则其余 run 全部终态后轮询停摆，该 run 的输出与终态永远缺失
   return trackedRunIDs.some((id) => !activeRuns.value.some((r) => r.ID === id))
-}
-
-function runStatus(s: string): 'success' | 'danger' | 'info' | 'warning' {
-  return s === 'succeeded' ? 'success' : s === 'failed' ? 'danger' : s === 'queued' ? 'warning' : 'info'
-}
-
-function taskStatus(s: string): 'success' | 'info' | 'danger' {
-  return s === 'ok' ? 'success' : s === 'skipped' ? 'info' : 'danger'
 }
 
 // 事件驱动为主：run 事件（状态变化/任务落库）触发立即拉取详情；
@@ -361,13 +356,13 @@ onUnmounted(() => {
       </el-card>
     </div>
 
-    <!-- 本次执行输出（内联展开，2s 实时刷新） -->
+    <!-- 本次执行输出（内联展开，实时刷新（SSE）+ 轮询兜底） -->
     <el-card v-if="submitted" shadow="never" class="block">
       <template #header>
         <div class="out-head">
           <span>本次执行输出</span>
           <span class="muted">
-            {{ anyRunning() ? '执行中…（2s 实时刷新）' : '已完成' }} · 完整历史见左侧菜单「执行记录」
+            {{ anyRunning() ? '执行中…（实时刷新）' : '已完成' }} · 完整历史见左侧菜单「执行记录」
           </span>
         </div>
       </template>

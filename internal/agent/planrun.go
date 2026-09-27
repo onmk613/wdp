@@ -7,6 +7,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -146,9 +148,47 @@ func (m *planManager) forget(runID string) {
 	}
 }
 
-// handlePlanSubmit 接受 plan 分片：校验完整性 → 落盘（0700/0600）→ 后台
+// reapZombieRuns 启动期扫描 runs 根目录，把无进程支撑的 running 状态改判
+// failed。崩溃窗口：WriteStateFile("running") 在执行 goroutine 启动前落盘
+// （apply.go 提交路径），此后进程崩溃/被杀 → 重启后磁盘状态永驻 running：
+// /plan/status 谎报进行中、/plan/cancel 404（内存表里没有该 run）、register
+// 的 running 检查与 byPlan 幂等映射永远卡死后续提交。本进程刚启动时
+// planManager 必为空（serve 在首个请求前调用本函数），磁盘上的 running
+// 不可能有进程支撑，统一改判 failed 并在 journal 追注说明——failed 语义
+// 下控制端可无须 force 直接重跑，自治收敛得以恢复。
+func (s *Server) reapZombieRuns() {
+	root := s.runsRoot()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return // 根目录不存在是常态（从未跑过自治执行）
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(root, e.Name())
+		if ReadStateFile(dir) != "running" {
+			continue
+		}
+		if err := WriteStateFile(dir, "failed"); err != nil {
+			s.logWarn("reap zombie run %s: failed to rewrite state: %v", e.Name(), err)
+			continue
+		}
+		// 注释进 journal（追加行协议，对 CompletedIdx 续跑重放无害：
+		// failed 且 idx=0 不计入完成集合），控制端 /plan/status 可见原因
+		if jr, jerr := OpenJournal(filepath.Join(dir, "journal.ndjson")); jerr == nil {
+			_ = jr.Append(JournalEntry{Host: "agent", Label: "state", State: "failed",
+				Msg: "agent restarted during run; state reaped as failed at startup"})
+			_ = jr.Close()
+		}
+		s.logWarn("reaped zombie run %s: state running had no live process (agent restarted during run), re-judged as failed", e.Name())
+	}
+}
 
-func (r *planRun) finish(state, _ string, err error) {
+// finish 把 run 落到终态：内存状态仅在仍为 running 时迁移（首个终态
+// 生效，后续调用只补写磁盘 state）。磁盘 state 无条件重写（幂等，
+// 崩溃恢复路径依赖终态文件落盘）。
+func (r *planRun) finish(state string, err error) {
 	r.mu.Lock()
 	if r.state == "running" {
 		r.state = state
@@ -166,13 +206,8 @@ func (r *planRun) stateLocked() string {
 	return r.state
 }
 
-// trimAfterRun 在 run 落终态后裁剪历史：runs 根目录只保留最近 keepRuns 个
-// run 目录（按目录修改时间裁最旧，当前 run 永不裁），planManager 内存记录
-
 func (m *planManager) lookup(runID string) *planRun {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.byRunID[runID]
 }
-
-// rejectSelfUpdate 拒绝以 agent 自身为目标的 plan（升级二进制/停用单元会

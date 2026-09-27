@@ -13,6 +13,17 @@ import (
 	"wdp/internal/shellquote"
 )
 
+// rollbackHostBudget 是单主机自动回滚的总时长预算：恢复动作
+// （mv/cp -a/rm -rf）常见秒级完成，120s 覆盖慢盘/大目录场景。
+const rollbackHostBudget = 120 * time.Second
+
+// snapshotCleanupBudget 是单台目标主机快照清理的时长预算（rm -rf 快照
+// 目录），与 rollbackHostBudget 同一"每主机独立"原则。
+const snapshotCleanupBudget = 30 * time.Second
+
+// journalActionTimeoutMs 是回滚/清理动作的单次远端执行超时（毫秒）。
+const journalActionTimeoutMs = 30_000
+
 // parseBatchSize 解析 batch 表达式："10%"（百分比，向上取整）或 "3"（绝对数）。
 // 空/非法时回退 25%（min 1）。
 func parseBatchSize(batch string, total int) int {
@@ -98,6 +109,7 @@ func (e *Executor) runGate(ctx context.Context, p *model.Play, gate *model.Task,
 // 全部失败，恰与该功能承诺兜底的场景相反（同 finishPlay 的处理）。
 // 限时预算每主机独立：共用总预算时大批次排在后面的主机回滚必然因
 // 预算耗尽失败——恰好发生在 auto_rollback 承诺兜底的场景。
+// 刻意保持串行：回滚是失败路径上的兜底，不与主流程争连接配额。
 func (e *Executor) rollbackBatch(_ context.Context, runs []*hostRun, stats map[string]*model.Stats) {
 	rolled, rollFailed := 0, 0
 	for _, hr := range runs {
@@ -110,78 +122,11 @@ func (e *Executor) rollbackBatch(_ context.Context, runs []*hostRun, stats map[s
 		if len(acts) == 0 && len(gaps) == 0 {
 			continue
 		}
-		for _, g := range gaps {
-			res := &model.TaskResult{
-				Host: hr.host.Name, Task: "auto-rollback", Module: "rollback",
-				Failed: true, Msg: "no snapshot was taken, cannot restore: " + g,
-			}
-			e.recordResult(hr, res, stats, false)
-			e.Rep.HostResult(hr.host.Name, res)
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-		hostOK := true
-		// 逆序恢复：后发生的变更先回滚
-		for _, je := range slices.Backward(acts) {
-
-			a := je.action
-			target := je.execOn
-			if target == nil {
-				target = hr.host
-			}
-			var script string
-			switch a.Kind {
-			case "restore":
-				// 先删后拷：目标可能已被后续任务重建（目录/文件形态都可能变），
-				// `cp -a shadow path` 在 path 已存在（尤其带尾斜杠）时会变成
-				// "拷入"——现场变成 path/<basename>，原内容不在原位却报成功。
-				// rm -rf 后目标必不存在，cp -a 才是"复原到该路径"的语义。
-				script = fmt.Sprintf("rm -rf -- %s && mkdir -p -- %s && cp -a -- %s %s",
-					shellquote.Quote(a.Path), shellquote.Quote(pathDir(a.Path)),
-					shellquote.Quote(a.Shadow), shellquote.Quote(a.Path))
-			case "remove":
-				script = fmt.Sprintf("rm -rf -- %s", shellquote.Quote(a.Path))
-			default:
-				continue
-			}
-			msg := a.Kind + " " + a.Path
-			if target.Name != hr.host.Name {
-				msg += " @" + target.Name // 委托产生的变更，标注实际执行主机
-			}
-			res := &model.TaskResult{
-				Host: hr.host.Name, Task: "auto-rollback", Module: "rollback",
-				Msg: msg,
-			}
-			cn, err := e.Conns.Get(ctx, target)
-			if err != nil {
-				res.Failed = true
-				res.Msg += " failed (connection unavailable): " + err.Error()
-				hostOK = false
-			} else {
-				// 与变更发生时同一提权身份执行：非 root 连接用户 + become 的
-				// 场景下，快照是 root 属主，不提权则恢复/删除必然权限不足
-				out, err := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30_000, BecomeUser: je.becomeUser})
-				switch {
-				case err != nil:
-					res.Failed = true
-					res.Msg += " failed: " + err.Error()
-					hostOK = false
-				case out.Code != 0:
-					res.Failed = true
-					res.Msg += fmt.Sprintf(" failed rc=%d: %s", out.Code, strings.TrimSpace(out.Stderr))
-					hostOK = false
-				default:
-					res.Changed = true
-				}
-			}
-			e.recordResult(hr, res, stats, false)
-			e.Rep.HostResult(hr.host.Name, res)
-		}
-		if hostOK && len(gaps) == 0 {
+		if e.rollbackHostRun(hr, acts, gaps, stats) {
 			rolled++
 		} else {
 			rollFailed++
 		}
-		cancel()
 	}
 	if rollFailed > 0 {
 		e.Rep.PlayMsg("auto rollback finished: %d hosts restored, %d hosts FAILED (manual check required); procedural changes like shell cannot be auto-rolled-back", rolled, rollFailed)
@@ -190,16 +135,95 @@ func (e *Executor) rollbackBatch(_ context.Context, runs []*hostRun, stats map[s
 	}
 }
 
+// rollbackHostRun 回滚单台主机（快照恢复/新建删除），返回该主机是否完整
+// 回滚。限时预算的 ctx 在本函数内创建并 defer 释放（防未来在循环体内
+// 新增提前 return 时泄漏）。
+func (e *Executor) rollbackHostRun(hr *hostRun, acts []journalEntry, gaps []string, stats map[string]*model.Stats) bool {
+	for _, g := range gaps {
+		res := &model.TaskResult{
+			Host: hr.host.Name, Task: "auto-rollback", Module: "rollback",
+			Failed: true, Msg: "no snapshot was taken, cannot restore: " + g,
+		}
+		e.recordResult(hr, res, stats, false)
+		e.Rep.HostResult(hr.host.Name, res)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), rollbackHostBudget)
+	defer cancel()
+	hostOK := true
+	// 逆序恢复：后发生的变更先回滚
+	for _, je := range slices.Backward(acts) {
+
+		a := je.action
+		target := je.execOn
+		if target == nil {
+			target = hr.host
+		}
+		var script string
+		switch a.Kind {
+		case "restore":
+			// 先删后拷：目标可能已被后续任务重建（目录/文件形态都可能变），
+			// `cp -a shadow path` 在 path 已存在（尤其带尾斜杠）时会变成
+			// "拷入"——现场变成 path/<basename>，原内容不在原位却报成功。
+			// rm -rf 后目标必不存在，cp -a 才是"复原到该路径"的语义。
+			script = fmt.Sprintf("rm -rf -- %s && mkdir -p -- %s && cp -a -- %s %s",
+				shellquote.Quote(a.Path), shellquote.Quote(pathDir(a.Path)),
+				shellquote.Quote(a.Shadow), shellquote.Quote(a.Path))
+		case "remove":
+			script = fmt.Sprintf("rm -rf -- %s", shellquote.Quote(a.Path))
+		default:
+			continue
+		}
+		msg := a.Kind + " " + a.Path
+		if target.Name != hr.host.Name {
+			msg += " @" + target.Name // 委托产生的变更，标注实际执行主机
+		}
+		res := &model.TaskResult{
+			Host: hr.host.Name, Task: "auto-rollback", Module: "rollback",
+			Msg: msg,
+		}
+		cn, err := e.Conns.Get(ctx, target)
+		if err != nil {
+			res.Failed = true
+			res.Msg += " failed (connection unavailable): " + err.Error()
+			hostOK = false
+		} else {
+			// 与变更发生时同一提权身份执行：非 root 连接用户 + become 的
+			// 场景下，快照是 root 属主，不提权则恢复/删除必然权限不足
+			out, err := execWithRetry(ctx, cn, conn.ExecRequest{Script: script, TimeoutMs: journalActionTimeoutMs, BecomeUser: je.becomeUser})
+			switch {
+			case err != nil:
+				res.Failed = true
+				res.Msg += " failed: " + err.Error()
+				hostOK = false
+			case out.Code != 0:
+				res.Failed = true
+				res.Msg += fmt.Sprintf(" failed rc=%d: %s", out.Code, strings.TrimSpace(out.Stderr))
+				hostOK = false
+			default:
+				res.Changed = true
+			}
+		}
+		e.recordResult(hr, res, stats, false)
+		e.Rep.HostResult(hr.host.Name, res)
+	}
+	return hostOK && len(gaps) == 0
+}
+
 // cleanupSnapshots 清除登记过回滚动作的主机上的快照目录（best-effort；
 // 未产生变更的主机不建连）。delegate_to 产生的变更快照在执行主机上，
-// 按动作的执行主机去重清理。
-// 限时预算每主机独立（与 rollbackBatch 同一原则）：共用总预算时大批次
-// 排在后面的主机清理必然因预算耗尽而静默失败——root 属主快照目录
-// （含部署文件副本）残留在远端 /tmp。清理以变更发生时的提权身份执行
-// （该主机任一动作提权即用其用户；多数场景下快照由 root 创建）。
+// 按动作的执行主机去重清理——去重发生在全部 hostRun 之上：多个主机
+// delegate_to 到同一执行主机时，同一快照目录只清一次，计数与播报的
+// "hosts" 数才是实际清理的主机数（此前按 hostRun × target 累加，同一
+// 目标会被计成 N 台）。
+// 限时预算每目标主机独立（与 rollbackBatch 同一原则）：共用总预算时
+// 大批次排在后面的主机清理必然因预算耗尽而静默失败——root 属主快照
+// 目录（含部署文件副本）残留在远端 /tmp。清理以变更发生时的提权身份
+// 执行（该主机任一动作提权即用其用户；多数场景下快照由 root 创建）。
+// 刻意保持串行：清理是收尾 best-effort，不与主流程争连接配额。
 func (e *Executor) cleanupSnapshots(_ context.Context, runs []*hostRun) {
 	script := fmt.Sprintf("rm -rf -- %s", shellquote.Quote(e.rollbackDir))
-	done := 0
+	targets := map[string]*model.Host{}
+	becomeOf := map[string]string{}
 	for _, hr := range runs {
 		hr.mu.Lock()
 		acts := append([]journalEntry{}, hr.journal...)
@@ -207,8 +231,6 @@ func (e *Executor) cleanupSnapshots(_ context.Context, runs []*hostRun) {
 		if len(acts) == 0 {
 			continue
 		}
-		targets := map[string]*model.Host{}
-		becomeOf := map[string]string{}
 		for _, je := range acts {
 			t := je.execOn
 			if t == nil {
@@ -219,21 +241,41 @@ func (e *Executor) cleanupSnapshots(_ context.Context, runs []*hostRun) {
 				becomeOf[t.Name] = je.becomeUser
 			}
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		for _, t := range targets {
-			cn, err := e.Conns.Get(ctx, t)
-			if err != nil {
-				continue
-			}
-			if out, bad := cn.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30_000, BecomeUser: becomeOf[t.Name]}); bad == nil && out.Code == 0 {
-				done++
-			}
+	}
+	done := 0
+	for _, t := range targets {
+		if e.cleanupHostSnapshots(t, becomeOf[t.Name], script) {
+			done++
 		}
-		cancel()
 	}
 	if done > 0 {
 		e.Rep.PlayMsg("rollback snapshots cleaned from %d hosts", done)
 	}
+}
+
+// cleanupHostSnapshots 清除单台目标主机上的快照目录（best-effort），返回
+// 是否成功。限时预算的 ctx 在本函数内创建并 defer 释放。
+func (e *Executor) cleanupHostSnapshots(t *model.Host, becomeUser, script string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), snapshotCleanupBudget)
+	defer cancel()
+	cn, err := e.Conns.Get(ctx, t)
+	if err != nil {
+		return false
+	}
+	out, bad := execWithRetry(ctx, cn, conn.ExecRequest{Script: script, TimeoutMs: journalActionTimeoutMs, BecomeUser: becomeUser})
+	return bad == nil && out.Code == 0
+}
+
+// execWithRetry 传输级失败重试一次的远端执行（回滚/清理动作共用）：
+// 批次失败/取消恰是连接最可能已断的时刻，回滚动作（mv/cp -a/rm -rf）
+// 与清理动作 rm -rf 都幂等可重放；连接层会在失败后作废底层连接，
+// 重试即隐式重建。
+func execWithRetry(ctx context.Context, cn conn.Conn, req conn.ExecRequest) (conn.ExecResult, error) {
+	out, err := cn.Exec(ctx, req)
+	if err != nil {
+		out, err = cn.Exec(ctx, req)
+	}
+	return out, err
 }
 
 func pathDir(p string) string {

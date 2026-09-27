@@ -126,7 +126,10 @@ func applyLimit(inv *Inventory, hosts []*model.Host, limit string) ([]*model.Hos
 	for _, h := range limited {
 		keep[h.Name] = true
 	}
-	filtered := hosts[:0]
+	// 新建切片而非 hosts[:0] 就地复用：就地过滤会改写入参数组的底层数组，
+	// 调用方若把 Select 的结果数组留作它用（后续仍要读全量清单）会被静默
+	// 改写——copy 语义消除这一隐性契约，代价只是一次小分配
+	filtered := make([]*model.Host, 0, len(hosts))
 	for _, h := range hosts {
 		if keep[h.Name] {
 			filtered = append(filtered, h)

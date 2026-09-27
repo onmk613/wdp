@@ -1560,24 +1560,6 @@ func TestRunQueueAbortOnShutdown(t *testing.T) {
 	}
 }
 
-// TestFirstHostValuesDeterministic 多主机 marker values 不一致时，选哪台
-// 主机的 values 必须确定（按主机名排序取首个），不得依赖 map 迭代顺序。
-func TestFirstHostValuesDeterministic(t *testing.T) {
-	hv := map[string]map[string]any{
-		"host-b": {"who": "b"},
-		"host-a": {"who": "a"},
-		"host-c": {"who": "c"},
-	}
-	for i := 0; i < 200; i++ {
-		if got := firstHostValues(hv); got == nil || got["who"] != "a" {
-			t.Fatalf("应确定取 host-a 的 values: %v", got)
-		}
-	}
-	if firstHostValues(nil) != nil || firstHostValues(map[string]map[string]any{}) != nil {
-		t.Fatal("空 map 应返回 nil（调用方保留原 values）")
-	}
-}
-
 // TestWebRunBareTasksAndGroupedPlays 新 hosts 语义 e2e：
 //  1. 裸任务相位（无 play 包装、无 hosts）→ web 打选择器全集，任务正常执行；
 //  2. 显式 hosts 的 play 在选择器范围内按台账组细分——组含选择器主机

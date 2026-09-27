@@ -7,20 +7,22 @@ package cli
 // 实际部署 values，-f/--set 降级为对 marker values 的显式覆盖。marker 缺失
 // 或为 v1（无 values）时报错——绝不静默回退到 values.yaml 默认值，那会让
 // 卸载任务作用在错误路径上并报告成功。
+//
+// 读取、missing/legacy/failed 三分类与聚合校验的核心收敛于 markerread
+//（与 console 共享同一实现）；本文件只保留 CLI 侧的错误文案排版与
+// -f/--set 覆盖合并。
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 
 	"wdp/internal/chart"
 	"wdp/internal/config"
 	"wdp/internal/conn"
+	"wdp/internal/markerread"
 	"wdp/internal/model"
-	"wdp/internal/shellquote"
 )
 
 // resolveMarkerValues 读取 hosts 的 release marker 并还原各主机实际生效的
@@ -46,99 +48,50 @@ func resolveMarkerValues(ctx context.Context, ch *chart.Chart, hosts []*model.Ho
 	}
 	// 校验（required + schema + 子 chart 走查）：清除 marker 的相位
 	//（uninstall 等）用 values 拼删除路径，非法入参必须在执行前拦截。
-	// 相同 values 只校验一次（多主机典型情形）。
+	// 相同 values 只校验一次、归因与序列化失败主机均按主机名字典序稳定
+	//（markerread.Validate；此前 map 迭代序随机且 json.Marshal 错误被吞）。
 	if !validate {
 		return out, nil
 	}
-	seen := map[string]bool{}
-	for host, v := range out {
-		key, _ := json.Marshal(v)
-		if seen[string(key)] {
-			continue
-		}
-		seen[string(key)] = true
-		if err := validatePhaseValues(ch, v, host); err != nil {
-			return nil, err
-		}
+	if err := markerread.Validate(ch, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
-// validatePhaseValues 按部署相位同等强度校验一份 values（错误带上主机名）。
-func validatePhaseValues(ch *chart.Chart, values map[string]any, host string) error {
-	if err := ch.ValidateRequired(values); err != nil {
-		return fmt.Errorf("host %s: %w", host, err)
-	}
-	if err := ch.ValidateValuesSchema(values); err != nil {
-		return fmt.Errorf("host %s: %w", host, err)
-	}
-	if err := ch.ValidateSubchartsSchema(values); err != nil {
-		return fmt.Errorf("host %s: %w", host, err)
-	}
-	return nil
-}
-
 // readHostMarkers 读取各主机 marker（并发受 forks 约束；become root——
-// marker 0600 含 values 内容）。marker 缺失 / v1 / 不可达分别汇总报错。
+// marker 0600 含 values 内容）。marker 缺失 / v1 / 不可达分别汇总报错；
+// 读取与分类走 markerread（与 console 共享），清单按 hosts 声明序——
+// 此前为并发完成序，报错主机次序随机漂移。
 func readHostMarkers(ctx context.Context, ch *chart.Chart, hosts []*model.Host) (map[string]*chart.Marker, error) {
 	conns := conn.NewManagerWithDefaults(connDefaults())
 	conns.SetConnectConcurrency(2 * config.Current().Forks())
 	defer conns.CloseAll()
 
-	script := fmt.Sprintf("cat -- %s 2>/dev/null || echo __MISSING__", shellquote.Quote(ch.MarkerPath()))
+	results := markerread.Read(ctx, ch.MarkerPath(), hosts,
+		func(ctx context.Context, h *model.Host) (conn.Conn, func(), error) {
+			// 连接由 Manager 跨主机复用（自愈），统一 CloseAll 收尾，
+			// 单主机读毕不关
+			c, err := conns.Get(ctx, h)
+			return c, nil, err
+		},
+		markerread.Options{Concurrency: max(2*config.Current().Forks(), 1)})
 
-	var mu sync.Mutex
 	out := make(map[string]*chart.Marker, len(hosts))
 	var missing, legacy, failed []string
-
-	sem := make(chan struct{}, max(2*config.Current().Forks(), 1))
-	var wg sync.WaitGroup
-	for _, h := range hosts {
-		wg.Add(1)
-		go func(h *model.Host) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			cn, err := conns.Get(ctx, h)
-			if err != nil {
-				mu.Lock()
-				failed = append(failed, fmt.Sprintf("%s (%v)", h.Name, err))
-				mu.Unlock()
-				return
-			}
-			res, err := cn.Exec(ctx, conn.ExecRequest{Script: script, BecomeUser: "root", TimeoutMs: 30_000})
-			if err != nil || res.Code != 0 {
-				mu.Lock()
-				failed = append(failed, fmt.Sprintf("%s (%v)", h.Name, errOrCode(err, res)))
-				mu.Unlock()
-				return
-			}
-			stdout := strings.TrimSpace(res.Stdout)
-			if stdout == "__MISSING__" || stdout == "" {
-				mu.Lock()
-				missing = append(missing, h.Name)
-				mu.Unlock()
-				return
-			}
-			mk, perr := chart.ParseMarker([]byte(stdout))
-			if perr != nil {
-				mu.Lock()
-				failed = append(failed, fmt.Sprintf("%s (marker unreadable: %v)", h.Name, perr))
-				mu.Unlock()
-				return
-			}
-			if mk.Schema() < chart.MarkerSchemaV2 {
-				mu.Lock()
-				legacy = append(legacy, h.Name)
-				mu.Unlock()
-				return
-			}
-			mu.Lock()
-			out[h.Name] = mk
-			mu.Unlock()
-		}(h)
+	for i, res := range results {
+		name := hosts[i].Name
+		switch res.Kind {
+		case markerread.KindOK:
+			out[name] = res.Marker
+		case markerread.KindMissing:
+			missing = append(missing, name)
+		case markerread.KindLegacy:
+			legacy = append(legacy, name)
+		default:
+			failed = append(failed, fmt.Sprintf("%s (%v)", name, failureDetail(res)))
+		}
 	}
-	wg.Wait()
 
 	switch {
 	case len(missing) > 0:
@@ -153,10 +106,22 @@ func readHostMarkers(ctx context.Context, ch *chart.Chart, hosts []*model.Host) 
 	return out, nil
 }
 
-func errOrCode(err error, res conn.ExecResult) any {
-	if err != nil {
-		return err
+// failureDetail 还原 CLI 版 failed 类明细文案：执行错误原样、退出码非零
+// 取 stderr 首行（无则 exit N）、解析失败注明 marker unreadable。
+func failureDetail(res markerread.HostResult) any {
+	switch {
+	case res.ParseErr != nil:
+		return fmt.Sprintf("marker unreadable: %v", res.ParseErr)
+	case res.Err != nil:
+		return res.Err
+	default:
+		return errOrCode(conn.ExecResult{Code: res.Code, Stderr: res.Stderr})
 	}
+}
+
+// errOrCode 归因非零退出的主机侧错误：stderr 首行（多行噪声只留一行），
+// 无 stderr 时退回退出码。
+func errOrCode(res conn.ExecResult) any {
 	if res.Stderr != "" {
 		return strings.TrimSpace(strings.SplitN(res.Stderr, "\n", 2)[0])
 	}

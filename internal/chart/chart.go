@@ -170,6 +170,12 @@ func loadDir(dir string) (*Chart, error) {
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
+			// Helm 惯例把子 chart 打成 charts/<name>-<version>.tgz；wdp 只
+			// 支持目录形式。静默跳过会让引用处以 "subchart not found"
+			// 失败且无从定位——显式报错并指明改法。
+			if strings.HasSuffix(e.Name(), ".tgz") {
+				return nil, fmt.Errorf("charts/%s: packaged subcharts (.tgz) are not supported; unpack it to charts/<name>/ (directory form) and retry", e.Name())
+			}
 			continue
 		}
 		sub, err := loadDir(filepath.Join(dir, "charts", e.Name()))

@@ -9,11 +9,8 @@ package selfexec
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"io/fs"
-	"os"
-	"path/filepath"
 
 	"wdp/internal/conn"
 	"wdp/internal/model"
@@ -64,44 +61,13 @@ func (s *SelfExec) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecRes
 	return conn.ExecResult{Code: resp.Code, Stdout: resp.Stdout, Stderr: resp.Stderr}, nil
 }
 
-// UploadFile 写本机文件（临时文件 + 原子改名；与 local 同实现）。
+// UploadFile 写本机文件（conn.WriteLocalFile 共享实现：建父目录 +
+// fsatomic 原子落盘，与 local 同口径）。
 func (s *SelfExec) UploadFile(_ context.Context, dst string, r io.Reader, mode fs.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".wdp-upload-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := io.Copy(tmp, r); err != nil {
-		tmp.Close()
-		return err
-	}
-	if mode == 0 {
-		mode = 0o644
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, dst); err != nil {
-		return fmt.Errorf("failed to write %s to disk: %w", dst, err)
-	}
-	return nil
+	return conn.WriteLocalFile(dst, r, mode)
 }
 
-// DownloadFile 读本机文件。
+// DownloadFile 读本机文件（conn.ReadLocalFile 共享实现）。
 func (s *SelfExec) DownloadFile(_ context.Context, src string, w io.Writer) error {
-	f, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = io.Copy(w, f)
-	return err
+	return conn.ReadLocalFile(src, w)
 }

@@ -8,7 +8,8 @@
     "build": "vite build",
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "lint": "eslint src"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
@@ -23,7 +24,11 @@
   "devDependencies": {
     "@types/js-yaml": "^4.0.9",
     "@vitejs/plugin-vue": "^5.2.1",
+    "@vue/eslint-config-typescript": "^14.9.0",
+    "eslint": "^10.11.0",
+    "eslint-plugin-vue": "^10.11.1",
     "typescript": "^5.7.2",
+    "typescript-eslint": "^8.70.1",
     "vite": "^6.0.3",
     "vitest": "^5.0.1",
     "vue-tsc": "^2.1.10"

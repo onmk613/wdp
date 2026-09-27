@@ -20,6 +20,13 @@ var chartNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 // （与 yaml 后缀歧义），路径分隔符与 ".." 直接拒绝。
 var phaseNameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*$`)
 
+// versionRe 限定 chart.yaml version 字符集：version 会拼进打包产物文件名
+// （package.go 的 <name>-<version>.tgz），"../../x" 之类含路径分隔符或以
+// 点开头的值经 filepath.Join 即逃出 outDir——与 name 同口径在加载入口
+// 拒绝。规则与 web 包 apps.go 的 versionRe 一致（此处本地自定义，
+// 不 import web：chart 是被 web 依赖的底层包，反向依赖成环）。
+var versionRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
 // validateMeta 在加载入口校验安全敏感的 chart.yaml 字段。
 func validateMeta(m *Meta) error {
 	if m.Name == "" {
@@ -27,6 +34,11 @@ func validateMeta(m *Meta) error {
 	}
 	if !chartNameRe.MatchString(m.Name) || m.Name == "." || m.Name == ".." {
 		return fmt.Errorf("chart.yaml name %q is invalid (allowed: letters, digits, '.', '_', '-'; path separators are rejected)", m.Name)
+	}
+	// version 允许缺省（历史 chart 与裸 playbook 兼容），但一旦给出即须过
+	// versionRe：首字符为字母数字即可天然拒绝 "." / ".." / "../x" 等逃逸形态。
+	if m.Version != "" && !versionRe.MatchString(m.Version) {
+		return fmt.Errorf("chart.yaml version %q is invalid (allowed: letters, digits, '.', '_', '-'; path separators are rejected)", m.Version)
 	}
 	for phase, spec := range m.Phases {
 		if !phaseNameRe.MatchString(phase) {

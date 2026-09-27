@@ -2,7 +2,6 @@ package module
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"wdp/internal/shellquote"
@@ -15,10 +14,8 @@ func init() {
 // ScriptModule 上传本地脚本到远端临时路径并执行。
 type ScriptModule struct{}
 
-// Name 模块名。
 func (m *ScriptModule) Name() string { return "script" }
 
-// Desc 模块说明。
 func (m *ScriptModule) Desc() string {
 	return "upload and execute a local script"
 }
@@ -31,7 +28,7 @@ func (m *ScriptModule) Run(rc *RunContext, args map[string]any, free string) *Re
 	if src == "" {
 		fields := strings.Fields(free)
 		if len(fields) == 0 {
-			return Fail("%s", "script requires a src parameter or a free-form script path")
+			return Fail("script requires a src parameter or a free-form script path")
 		}
 		src, scriptArgs = fields[0], strings.Join(fields[1:], " ")
 	}
@@ -39,7 +36,7 @@ func (m *ScriptModule) Run(rc *RunContext, args map[string]any, free string) *Re
 	if lerr != nil {
 		return Fail("%v", lerr)
 	}
-	data, err := os.ReadFile(local)
+	data, err := readLocalSrc(rc, local)
 	if err != nil {
 		return Fail("failed to read local script: %v", err)
 	}
@@ -66,10 +63,10 @@ func (m *ScriptModule) Run(rc *RunContext, args map[string]any, free string) *Re
 		script += " " + quoted
 	}
 	out, bad := rc.exec(script)
-	res := &Result{Stdout: out.Stdout, Stderr: out.Stderr, Rc: out.Code, Changed: true, Msg: src}
 	if bad != nil {
 		return bad
 	}
+	res := &Result{Stdout: out.Stdout, Stderr: out.Stderr, Rc: out.Code, Changed: true, Msg: src}
 	if out.Code != 0 {
 		res.Failed = true
 		res.Msg = fmt.Sprintf("script exit code rc=%d", out.Code)
@@ -77,7 +74,6 @@ func (m *ScriptModule) Run(rc *RunContext, args map[string]any, free string) *Re
 	return res
 }
 
-// Params 参数文档。
 func (m *ScriptModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "src", Type: "string", Desc: "local script path (chart/playbook-relative)"},
@@ -85,7 +81,6 @@ func (m *ScriptModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *ScriptModule) Example() string {
 	return `- name: upload and run the migration script
   script: scripts/migrate.sh --verbose

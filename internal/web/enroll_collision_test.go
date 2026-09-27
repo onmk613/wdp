@@ -62,7 +62,7 @@ func TestEnrollNameCollisionRejected(t *testing.T) {
 }
 
 // TestEnrollBoundTokenReinstallAllowed 绑定主机名的 token 允许同名异址重装
-//（管理员显式授权的迁移/重装路径）。
+// （管理员显式授权的迁移/重装路径）。
 func TestEnrollBoundTokenReinstallAllowed(t *testing.T) {
 	s, st := newEnrollServer(t)
 	if _, err := st.CreateHost(&store.Host{Name: "prod-db-01", Address: "10.9.9.9", AgentPort: 7602}); err != nil {

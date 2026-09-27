@@ -1,7 +1,7 @@
 package console
 
 // 应用 spec 的物化与入库：编辑器/上传共用的 chart 内容读写、部分保存
-// 语义、verbatim 三件套、打包归位（从 web 迁入；HTTP 语义留在传输层）。
+// 语义、verbatim 三件套、打包归位（HTTP 语义留在传输层）。
 
 import (
 	"fmt"
@@ -103,7 +103,7 @@ func parseCheckModeNode(s string) bool {
 
 const specTextLimit = 512 << 10 // 单文件可编辑上限（超出按二进制列出）
 
-// readSpecFromDir 从 chart 目录读取编辑器快照（values.yaml/deploy.yaml
+// ReadSpecFromDir 从 chart 目录读取编辑器快照（values.yaml/deploy.yaml
 // 是 spec 的独立字段；chart.yaml 原文进 files 且投影出 ChartMeta；其余
 // 文本文件可编辑，二进制只列元信息）。
 func ReadSpecFromDir(dir, name, version, description string) (*AppSpec, error) {
@@ -130,34 +130,47 @@ func ReadSpecFromDir(dir, name, version, description string) (*AppSpec, error) {
 		if ferr != nil {
 			return ferr
 		}
+		// 三件套读失败必须上抛（错误带文件名，由调用方按基础设施错误
+		// 返回）：静默跳过会让编辑器拿到空底本快照，保存时 values 兜底
+		// "{}\n"、chart.yaml 走生成路径再读失败即丢 marker_dir/phases 元
+		// 数据——都是用户以为读到了、实际丢内容的数据问题
 		switch rel {
 		case "chart.yaml":
-			if b, rerr := os.ReadFile(path); rerr == nil {
-				// 原文进 files（IDE 纯文本编辑、注释保真）
-				c := string(b)
-				spec.Files = append(spec.Files, SpecFile{Path: rel, Content: &c, Size: fi.Size()})
+			b, rerr := os.ReadFile(path)
+			if rerr != nil {
+				return rerr
 			}
+			// 原文进 files（IDE 纯文本编辑、注释保真）
+			c := string(b)
+			spec.Files = append(spec.Files, SpecFile{Path: rel, Content: &c, Size: fi.Size()})
 			return nil
 		case "values.yaml":
 			b, rerr := os.ReadFile(path)
-			if rerr == nil {
-				spec.ValuesYAML = string(b)
+			if rerr != nil {
+				return rerr
 			}
+			spec.ValuesYAML = string(b)
 			return nil
 		case "deploy.yaml":
 			b, rerr := os.ReadFile(path)
-			if rerr == nil {
-				spec.DeployYAML = string(b)
+			if rerr != nil {
+				return rerr
 			}
+			spec.DeployYAML = string(b)
 			return nil
 		}
 		sf := SpecFile{Path: rel, Size: fi.Size()}
 		if fi.Size() <= specTextLimit {
 			b, rerr := os.ReadFile(path)
-			if rerr == nil && utf8.Valid(b) {
+			switch {
+			case rerr != nil:
+				// 读失败上抛（区别于二进制：混为一谈会把权限/竞态问题
+				// 当二进制只列元信息，保存即丢内容）
+				return rerr
+			case utf8.Valid(b):
 				c := string(b)
 				sf.Content = &c
-			} else {
+			default:
 				sf.Binary = true
 			}
 		} else {
@@ -204,7 +217,7 @@ func specFileContent0(req *SpecReq, rel string, baseFile func(string) string) st
 	return baseFile(rel)
 }
 
-// applySpec 把编辑内容落到 workDir（在底本目录副本上就地修改）。
+// ApplySpec 把编辑内容落到 workDir（在底本目录副本上就地修改）。
 func ApplySpec(workDir, name string, req *SpecReq) error {
 	if !AppNameRe.MatchString(name) {
 		return fmt.Errorf("invalid app name %q", name)
@@ -268,12 +281,14 @@ func ApplySpec(workDir, name string, req *SpecReq) error {
 			return err
 		}
 	}
+	// 三件套 0600：对齐 plan.Write/marker 的敏感口径——values.yaml 可含
+	// 密码等敏感入参，不因"中间工作目录/打包制品"就放宽权限
 	for _, f := range []struct{ rel, body string }{
 		{"chart.yaml", chartYAML},
 		{"values.yaml", values},
 		{"deploy.yaml", deploy},
 	} {
-		if err := os.WriteFile(filepath.Join(workDir, f.rel), []byte(f.body), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(workDir, f.rel), []byte(f.body), 0o600); err != nil {
 			return err
 		}
 	}
@@ -310,7 +325,7 @@ func ApplySpec(workDir, name string, req *SpecReq) error {
 	return ch.Close()
 }
 
-// buildChartYAML 生成 chart.yaml：保留底本已有的元数据字段（上传的
+// BuildChartYAML 生成 chart.yaml：保留底本已有的元数据字段（上传的
 // chart 升版本保存不丢 marker_dir/phases 等）。
 func BuildChartYAML(workDir, name string, req *SpecReq) (string, error) {
 	var m *ChartMetaReq
@@ -339,8 +354,6 @@ func BuildChartYAML(workDir, name string, req *SpecReq) (string, error) {
 	}
 	return string(b), nil
 }
-
-// writeSpecErr spec 物化错误分流：业务错误 400 原文、底本不存在 404、
 
 // BizError spec 物化过程的业务错误（结构/语法/一致性校验不过）——
 // 传输层对它回 400 + 原文，区别于基础设施错误（500）。
@@ -382,7 +395,8 @@ func (a *AppService) PrepareWorkspace(appID int64, baseVersion, name string, req
 	return workDir, nil
 }
 
-// handleSaveSpec 修改应用（在底本版本的 chart 上就地修改，保存为版本——
+// PackAndStore 把工作目录打包为 tgz 并归位到应用版本目录，返回归档
+// 路径、sha256 与大小（入库版本制品由它产出）。
 
 func (a *AppService) PackAndStore(workDir, name, version string) (string, string, int64, error) {
 	dir := filepath.Join(a.AppsDir(), name)
@@ -412,7 +426,7 @@ func (a *AppService) PackAndStore(workDir, name, version string) (string, string
 	return dst, sha, fi.Size(), nil
 }
 
-// chartYAMLVersion 读 chart.yaml 顶层 version（解析失败返回空串）。
+// ChartYAMLVersion 读 chart.yaml 顶层 version（解析失败返回空串）。
 func ChartYAMLVersion(content string) string {
 	var meta struct {
 		Version string `yaml:"version"`

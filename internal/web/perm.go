@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"sort"
 
 	"wdp/internal/store"
@@ -134,11 +135,11 @@ func matchScope(sels []*scopeSel, pools, groups []string, labels map[string]bool
 		case "":
 			return true // 追加授权里显式的"全部"
 		case "pool":
-			if contains(pools, sc.value) {
+			if slices.Contains(pools, sc.value) {
 				return true
 			}
 		case "group":
-			if contains(groups, sc.value) {
+			if slices.Contains(groups, sc.value) {
 				return true
 			}
 		case "label":
@@ -150,18 +151,12 @@ func matchScope(sels []*scopeSel, pools, groups []string, labels map[string]bool
 	return false
 }
 
-func contains(list []string, v string) bool {
-	for _, x := range list {
-		if x == v {
-			return true
-		}
-	}
-	return false
-}
-
 // ---- Server 侧缓存 ----
 
-// permsOf 取用户权限视图（进程内缓存；用户/授权变更时失效）。
+// permsOf 取用户权限视图（进程内缓存；用户/授权变更时失效）。store 查询
+// 出错时绝不写入缓存：瞬时 DB 故障产生的空/残缺视图一旦入缓存，该用户
+// 在缓存失效或重启前恒被最小权限对待（scoped 用户直接恒 403）。出错路径
+// 返回临时视图并留 warn（与 hostScopeSet 的静默跳过留痕同口径）。
 func (s *Server) permsOf(user string) *userPerms {
 	s.permMu.RLock()
 	p, ok := s.permCache[user]
@@ -170,7 +165,13 @@ func (s *Server) permsOf(user string) *userPerms {
 		return p
 	}
 	p = &userPerms{global: map[string]bool{}, scoped: map[string][]*scopeSel{}}
-	if u, err := s.st.UserByName(user); err == nil {
+	u, err := s.st.UserByName(user)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		// 非 NotFound 的 DB 错误：返回临时空视图，不缓存（下次请求重查）
+		s.logger.Warn("permsOf: load user failed, serving uncached empty view", "user", user, "err", err)
+		return p
+	}
+	if err == nil {
 		p.role = u.Role
 		if u.Disabled {
 			return p // 禁用 = 无任何权限（会话也应已被踢）
@@ -179,19 +180,24 @@ func (s *Server) permsOf(user string) *userPerms {
 		if u.Role == "admin" {
 			return p
 		}
-		if scopes, err := s.st.UserScopes(u.ID); err == nil {
-			for _, sc := range scopes {
-				if !scopeableVerbs[sc.Verb] {
-					continue // 不可作用域化的忽略
-				}
-				p.scoped[sc.Verb] = append(p.scoped[sc.Verb], &scopeSel{kind: sc.Kind, value: sc.Value})
+		scopes, serr := s.st.UserScopes(u.ID)
+		if serr != nil {
+			// 静默吞掉会让 scoped 用户临时只剩角色全局权限且无人知晓；
+			// 同样不缓存，恢复后下次请求自动还原
+			s.logger.Warn("permsOf: load scopes failed, serving uncached view without scopes", "user", user, "err", serr)
+			return p
+		}
+		for _, sc := range scopes {
+			if !scopeableVerbs[sc.Verb] {
+				continue // 不可作用域化的忽略
 			}
-			// 覆盖语义：某权限点一旦有作用域行，取代该点的全局授予——
-			// 既可提权（viewer + host:edit@pool），也可收窄（把 viewer 的
-			// host:view 限定到某池，列表/详情随之裁剪）
-			for v := range p.scoped {
-				delete(p.global, v)
-			}
+			p.scoped[sc.Verb] = append(p.scoped[sc.Verb], &scopeSel{kind: sc.Kind, value: sc.Value})
+		}
+		// 覆盖语义：某权限点一旦有作用域行，取代该点的全局授予——
+		// 既可提权（viewer + host:edit@pool），也可收窄（把 viewer 的
+		// host:view 限定到某池，列表/详情随之裁剪）
+		for v := range p.scoped {
+			delete(p.global, v)
 		}
 	}
 	s.permMu.Lock()
@@ -294,12 +300,8 @@ func (s *Server) filterHosts(r *http.Request, verb string, hosts []*store.Host) 
 // 返回 false）。
 func (s *Server) checkHost(w http.ResponseWriter, r *http.Request, verb string, id int64) (*store.Host, bool) {
 	h, err := s.st.GetHost(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "host not found")
-		return nil, false
-	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeStoreErr(w, err)
 		return nil, false
 	}
 	if !s.permsOf(permUser(r)).canHost(verb, h.Pools, h.Groups, h.Labels) {
@@ -312,12 +314,8 @@ func (s *Server) checkHost(w http.ResponseWriter, r *http.Request, verb string, 
 // checkApp 取应用并校验作用域。
 func (s *Server) checkApp(w http.ResponseWriter, r *http.Request, verb string, id int64) (*store.App, bool) {
 	a, err := s.st.GetApp(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "app not found")
-		return nil, false
-	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.writeStoreErr(w, err)
 		return nil, false
 	}
 	if !s.permsOf(permUser(r)).canApp(verb, a.Pools, a.Groups, a.Labels) {

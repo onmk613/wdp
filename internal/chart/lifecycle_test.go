@@ -153,14 +153,22 @@ func TestMarkerContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b := string(c.MarkerContent("0.3.0", map[string]any{"a": 1}, "update"))
+	raw, err := c.MarkerContent("0.3.0", map[string]any{"a": 1}, "update")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := string(raw)
 	for _, want := range []string{`"chart": "myapp"`, `"version": "1.0.0"`, `"phase": "update"`, `"wdp_version": "0.3.0"`} {
 		if !strings.Contains(b, want) {
 			t.Fatalf("marker 缺 %s: %s", want, b)
 		}
 	}
 	// 空相位归一化为 deploy
-	if b := string(c.MarkerContent("0.3.0", nil, "")); !strings.Contains(b, `"phase": "deploy"`) {
+	raw, err = c.MarkerContent("0.3.0", nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b := string(raw); !strings.Contains(b, `"phase": "deploy"`) {
 		t.Fatalf("空相位应按 deploy: %s", b)
 	}
 	if len(ValuesDigest(map[string]any{"a": 1})) != 12 {

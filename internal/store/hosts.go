@@ -34,7 +34,7 @@ type Host struct {
 // CreateHost 新增主机（name 唯一；重复返回错误）。
 func (s *Store) CreateHost(h *Host) (int64, error) {
 	if strings.TrimSpace(h.Name) == "" || strings.TrimSpace(h.Address) == "" {
-		return 0, fmt.Errorf("name and address are required")
+		return 0, Bizf("name and address are required")
 	}
 	if h.AgentPort <= 0 {
 		h.AgentPort = 7602
@@ -106,7 +106,7 @@ func setHostGroups(q execer, id int64, groups []string) error {
 // UpdateHost 更新主机连接信息（status/last_seen 由探活维护，不在此覆盖）。
 func (s *Store) UpdateHost(id int64, h *Host) error {
 	if strings.TrimSpace(h.Address) == "" {
-		return fmt.Errorf("address is required")
+		return Bizf("address is required")
 	}
 	if h.AgentPort <= 0 {
 		h.AgentPort = 7602
@@ -165,17 +165,32 @@ func (s *Store) GetHost(id int64) (*Host, error) {
 // ListHosts 台账（按 name 排序）。q 非空时按 主机名/地址/池/组/标签
 // 模糊匹配过滤（标签为 JSON 文本 LIKE，键值子串均可命中）。
 func (s *Store) ListHosts(q string) ([]*Host, error) {
+	if q = strings.TrimSpace(q); q == "" {
+		return s.listHostsWhere("")
+	}
+	like := "%" + escapeLike(q) + "%"
+	return s.listHostsWhere(`name LIKE ? ESCAPE '\' OR address LIKE ? ESCAPE '\' OR labels LIKE ? ESCAPE '\'
+		OR EXISTS (SELECT 1 FROM host_pools hp WHERE hp.host_id = hosts.id AND hp.pool LIKE ? ESCAPE '\')
+		OR EXISTS (SELECT 1 FROM host_group_map hg WHERE hg.host_id = hosts.id AND hg.group_name LIKE ? ESCAPE '\')`,
+		like, like, like, like, like)
+}
+
+// escapeLike 转义 LIKE 通配符（%/_/\），配合 ESCAPE '\' 使用：不转义时
+// 搜索串里的元字符会意外全匹配/单字符通配。
+func escapeLike(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
+// listHostsWhere 台账查询的参数化内核：ListHosts 与 HostsBySelector 共用
+// （后者把 pool/group/hosts 选择器下推到 SQL，避免"全表扫 + Go 侧逐行
+// 过滤"——权限解析每个请求都会走这里，主机上千台后是热点）。
+func (s *Store) listHostsWhere(where string, args ...any) ([]*Host, error) {
 	sqlStr := `SELECT id, name, address, agent_port, labels, status, last_seen_at, created_at, updated_at, allow_plaintext,
 		(SELECT COALESCE(group_concat(pool, ','), '') FROM host_pools WHERE host_id = hosts.id),
 		(SELECT COALESCE(group_concat(group_name, ','), '') FROM host_group_map WHERE host_id = hosts.id)
 		FROM hosts`
-	args := []any{}
-	if q = strings.TrimSpace(q); q != "" {
-		sqlStr += ` WHERE name LIKE ? OR address LIKE ? OR labels LIKE ?
-			OR EXISTS (SELECT 1 FROM host_pools hp WHERE hp.host_id = hosts.id AND hp.pool LIKE ?)
-			OR EXISTS (SELECT 1 FROM host_group_map hg WHERE hg.host_id = hosts.id AND hg.group_name LIKE ?)`
-		like := "%" + q + "%"
-		args = append(args, like, like, like, like, like)
+	if where != "" {
+		sqlStr += " WHERE " + where
 	}
 	sqlStr += ` ORDER BY name`
 	rows, err := s.db.Query(sqlStr, args...)
@@ -219,7 +234,7 @@ func (s *Store) GetHostByName(name string) (*Host, error) {
 // 不存在则创建。返回台账 id。
 func (s *Store) UpsertHostByName(name, address string, agentPort int) (int64, error) {
 	if strings.TrimSpace(name) == "" || strings.TrimSpace(address) == "" {
-		return 0, fmt.Errorf("name and address are required")
+		return 0, Bizf("name and address are required")
 	}
 	if agentPort <= 0 {
 		agentPort = 7602
@@ -245,8 +260,16 @@ func (s *Store) UpsertHostByName(name, address string, agentPort int) (int64, er
 	if err != nil {
 		return 0, err
 	}
-	_, err = s.db.Exec(`UPDATE hosts SET address = ?, agent_port = ?, updated_at = ? WHERE id = ?`, address, agentPort, nowUTC(), id)
-	return id, err
+	res, err := s.db.Exec(`UPDATE hosts SET address = ?, agent_port = ?, updated_at = ? WHERE id = ?`, address, agentPort, nowUTC(), id)
+	if err != nil {
+		return 0, err
+	}
+	// SELECT 与 UPDATE 之间主机被删：RowsAffected 为 0，返回 ErrNotFound
+	// 而非已删主机的 id
+	if n, _ := res.RowsAffected(); n == 0 {
+		return 0, ErrNotFound
+	}
+	return id, nil
 }
 
 // HostIDs 返回全部主机 id（探活遍历）。
@@ -302,8 +325,6 @@ func scanHostMulti(row rowScanner) (*Host, error) {
 	return h, nil
 }
 
-// validLabels 校验 labels 是 JSON 对象（键值都为字符串的轻量约束：能解码
-
 // ---- 批量操作 ----
 
 // BatchAssign 批量设置池/组/标签：pools/groups 为 nil 表示不改
@@ -356,41 +377,47 @@ func (s *Store) BatchAssign(ids []int64, pools, groups []string, setPools, setGr
 }
 
 // HostsBySelector 按选择器解析主机：kind = all|pool|group|label|hosts。
+// pool/group/hosts 下推 SQL；label 用"JSON 键字面量 LIKE 预筛 + Go 侧
+// 精确判定"（JSON 路径函数对含点/特殊字符的键不可靠，预筛已把候选集
+// 从全表收敛到近命中集）。
 func (s *Store) HostsBySelector(kind, value string, hostIDs []int64) ([]*Host, error) {
-	hosts, err := s.ListHosts("")
-	if err != nil {
-		return nil, err
-	}
-	var out []*Host
-	for _, h := range hosts {
-		switch kind {
-		case "", "all":
-			out = append(out, h)
-		case "pool":
-			if slices.Contains(h.Pools, value) {
-				out = append(out, h)
-			}
-		case "group":
-			if slices.Contains(h.Groups, value) {
-				out = append(out, h)
-			}
-		case "label":
+	switch kind {
+	case "pool":
+		return s.listHostsWhere(`EXISTS (SELECT 1 FROM host_pools hp WHERE hp.host_id = hosts.id AND hp.pool = ?)`, value)
+	case "group":
+		return s.listHostsWhere(`EXISTS (SELECT 1 FROM host_group_map hg WHERE hg.host_id = hosts.id AND hg.group_name = ?)`, value)
+	case "label":
+		k, v, hasV := strings.Cut(value, "=")
+		cands, err := s.listHostsWhere(`labels LIKE ? ESCAPE '\'`, "%"+escapeLike(`"`+k+`"`)+"%")
+		if err != nil {
+			return nil, err
+		}
+		var out []*Host
+		for _, h := range cands {
 			var m map[string]string
 			// labels 写入时 validLabels 已保证是 JSON 对象，解码失败按无标签处理（不命中）
 			_ = json.Unmarshal([]byte(h.Labels), &m)
 			// value 形态：键存在（env）或键值精确匹配（env=prod）
-			if k, v, ok := strings.Cut(value, "="); ok {
+			if hasV {
 				if m[k] == v {
 					out = append(out, h)
 				}
-			} else if _, ok := m[value]; ok {
-				out = append(out, h)
-			}
-		case "hosts":
-			if slices.Contains(hostIDs, h.ID) {
+			} else if _, ok := m[k]; ok {
 				out = append(out, h)
 			}
 		}
+		return out, nil
+	case "hosts":
+		if len(hostIDs) == 0 {
+			return []*Host{}, nil
+		}
+		ph := strings.TrimSuffix(strings.Repeat("?,", len(hostIDs)), ",")
+		args := make([]any, 0, len(hostIDs))
+		for _, id := range hostIDs {
+			args = append(args, id)
+		}
+		return s.listHostsWhere("id IN ("+ph+")", args...)
+	default: // "", "all"
+		return s.listHostsWhere("")
 	}
-	return out, nil
 }

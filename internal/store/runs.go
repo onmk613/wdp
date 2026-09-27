@@ -153,6 +153,7 @@ func (s *Store) ReconcileStaleRuns(reason string) (int64, error) {
 	var n int64
 	err := s.tx(func(q execer) error {
 		now := nowUTC()
+		// detail 已有内容时以全角分号追加（与半角内容区分），空串/NULL 直接写入
 		if _, err := q.Exec(`UPDATE run_tasks SET status = 'failed', detail = COALESCE(NULLIF(detail, '') || '；', '') || ? WHERE run_id IN (SELECT id FROM runs WHERE status IN ('queued','running')) AND status = 'running'`, reason); err != nil {
 			return err
 		}
@@ -254,7 +255,11 @@ func (s *Store) CreateRunsExclusive(items []RunInput) (ids []int64, err error) {
 	if errors.Is(txErr, errConflict) {
 		return nil, &RunConflictError{Active: conflict}
 	}
-	return ids, txErr
+	// 出错时不返回半填充 ids：事务已回滚，残留 id 指向不存在的行
+	if txErr != nil {
+		return nil, txErr
+	}
+	return ids, nil
 }
 
 // errConflict 是事务内部 sentinel：回滚插入并以 RunConflictError 对外交付。
@@ -309,7 +314,7 @@ type HostTaskItem struct {
 	StartAt string `json:"StartAt"`
 }
 
-// HostTasksByName 主机名匹配的最近执行任务（runs.started_at 排序）。
+// HostTasksByName 主机名匹配的最近执行任务（按任务行插入序倒排）。
 func (s *Store) HostTasksByName(host string, limit int) ([]*HostTaskItem, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 20

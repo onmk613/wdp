@@ -42,6 +42,12 @@ func Init(o InitOptions) (string, string, string, error) {
 	if _, err := os.Stat(caPath); err == nil {
 		return "", "", "", fmt.Errorf("%s already exists (delete it first to rebuild)", caPath)
 	}
+	// 私钥同样不能静默覆盖："ca.crt 缺失但 ca.key 留存"的半初始化状态若
+	// 放行，会生成新 CA 并原子覆盖旧私钥——等于静默更换信任根，已签出的
+	// 叶子证书将全部失去归属，事后无从察觉。
+	if _, err := os.Stat(keyPath); err == nil {
+		return "", "", "", fmt.Errorf("%s already exists (delete it first to rebuild)", keyPath)
+	}
 
 	caKey, err := o.Key.Generate()
 	if err != nil {

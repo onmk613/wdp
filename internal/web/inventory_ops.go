@@ -10,120 +10,136 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"wdp/internal/store"
 )
 
-// ---- 池 ----
+// ---- 池 / 组 / 标签注册表（同构 CRUD 收敛）----
+
+// registryResource 描述一类注册表资源的 CRUD 差异点：池/组的
+// List/Create/Delete 与标签的 List/Delete 完全同构，收敛为按表分发的
+// 通用实现（见 registryList/registryCreate/registryDelete）。路由注册与
+// 权限校验不动（routes.go），六个具名 handler 退化为薄委托。
+//
+// 标签的 Create 不入表：键值语义（key/value + 多键兼容路径）与响应形态
+// （{"id","key"} / 多键 {"ok":true}）都不同，硬塞进通用实现需要按资源
+// 类型开特例分支，可读性反而低于现状，故保留专用 handleCreateLabel。
+type registryResource struct {
+	auditName string // 审计对象类型（pool/group/label）
+	list      func(st *store.Store) (any, error)
+	create    func(st *store.Store, name, note string, hostIDs []int64) (int64, error) // 标签为 nil（专用 handler）
+	del       func(st *store.Store, id int64) error
+	delDetail string // 删除审计附注（各资源成员/归属联动语义不同）
+}
+
+var (
+	registryPool = registryResource{
+		auditName: "pool",
+		list:      func(st *store.Store) (any, error) { return st.ListPools() },
+		create: func(st *store.Store, name, note string, ids []int64) (int64, error) {
+			return st.CreatePool(name, note, ids)
+		},
+		del:       func(st *store.Store, id int64) error { return st.DeletePool(id) },
+		delDetail: "成员归属一并解除",
+	}
+	registryGroup = registryResource{
+		auditName: "group",
+		list:      func(st *store.Store) (any, error) { return st.ListGroups() },
+		create: func(st *store.Store, name, note string, ids []int64) (int64, error) {
+			return st.CreateGroup(name, note, ids)
+		},
+		del:       func(st *store.Store, id int64) error { return st.DeleteGroup(id) },
+		delDetail: "成员归属一并解除",
+	}
+	registryLabel = registryResource{
+		auditName: "label",
+		list:      func(st *store.Store) (any, error) { return st.ListLabels() },
+		del:       func(st *store.Store, id int64) error { return st.DeleteLabel(id) },
+		delDetail: "从主机移除该键",
+	}
+)
+
+// registryList 通用列表（路由层 requireAuth：全员可见）。
+func (s *Server) registryList(w http.ResponseWriter, res registryResource) {
+	list, err := res.list(s.st)
+	if err != nil {
+		s.writeInternal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// registryCreate 通用新建（池/组同构）。store 层已把重名/命名校验翻译为
+// 可读错误（dupErr/validScopeName），均为用户输入问题，直接 400。
+func (s *Server) registryCreate(w http.ResponseWriter, r *http.Request, res registryResource) {
+	var req struct {
+		Name    string  `json:"name"`
+		Note    string  `json:"note"`
+		HostIDs []int64 `json:"host_ids"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	id, err := res.create(s.st, req.Name, req.Note, req.HostIDs)
+	if err != nil {
+		s.writeStoreErr(w, err)
+		return
+	}
+	s.audit(r, "create", res.auditName, req.Name, fmt.Sprintf("%d 台主机划入", len(req.HostIDs)))
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": req.Name})
+}
+
+// registryDelete 通用删除：成员/归属联动语义的差异由 delDetail 描述。
+func (s *Server) registryDelete(w http.ResponseWriter, r *http.Request, res registryResource) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := res.del(s.st, id); err != nil {
+		s.writeStoreErr(w, err)
+		return
+	}
+	s.audit(r, "delete", res.auditName, fmt.Sprint(id), res.delDetail)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// 六个具名 handler：路由表（routes.go）的绑定点，薄委托到通用实现。
 
 func (s *Server) handleListPools(w http.ResponseWriter, _ *http.Request) {
-	list, err := s.st.ListPools()
-	if err != nil {
-		s.writeInternal(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, list)
+	s.registryList(w, registryPool)
 }
-
 func (s *Server) handleCreatePool(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name    string  `json:"name"`
-		Note    string  `json:"note"`
-		HostIDs []int64 `json:"host_ids"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	id, err := s.st.CreatePool(req.Name, req.Note, req.HostIDs)
-	if err != nil {
-		// store 层已把重名/命名校验翻译为可读错误（dupErr/validScopeName），
-		// 均为用户输入问题，直接 400
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	s.audit(r, "create", "pool", req.Name, fmt.Sprintf("%d 台主机划入", len(req.HostIDs)))
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": req.Name})
+	s.registryCreate(w, r, registryPool)
 }
-
 func (s *Server) handleDeletePool(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
-	if !ok {
-		return
-	}
-	if err := s.st.DeletePool(id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "pool not found")
-			return
-		}
-		s.writeInternal(w, err)
-		return
-	}
-	s.audit(r, "delete", "pool", fmt.Sprint(id), "成员归属一并解除")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	s.registryDelete(w, r, registryPool)
 }
-
-// ---- 组 ----
 
 func (s *Server) handleListGroups(w http.ResponseWriter, _ *http.Request) {
-	list, err := s.st.ListGroups()
-	if err != nil {
-		s.writeInternal(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, list)
+	s.registryList(w, registryGroup)
 }
-
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name    string  `json:"name"`
-		Note    string  `json:"note"`
-		HostIDs []int64 `json:"host_ids"`
-	}
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	id, err := s.st.CreateGroup(req.Name, req.Note, req.HostIDs)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-	s.audit(r, "create", "group", req.Name, fmt.Sprintf("%d 台主机划入", len(req.HostIDs)))
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "name": req.Name})
+	s.registryCreate(w, r, registryGroup)
 }
-
 func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
-	if !ok {
-		return
-	}
-	if err := s.st.DeleteGroup(id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "group not found")
-			return
-		}
-		s.writeInternal(w, err)
-		return
-	}
-	s.audit(r, "delete", "group", fmt.Sprint(id), "成员归属一并解除")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	s.registryDelete(w, r, registryGroup)
 }
-
-// ---- 标签 ----
 
 func (s *Server) handleListLabels(w http.ResponseWriter, _ *http.Request) {
-	list, err := s.st.ListLabels()
-	if err != nil {
-		s.writeInternal(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, list)
+	s.registryList(w, registryLabel)
 }
+func (s *Server) handleDeleteLabel(w http.ResponseWriter, r *http.Request) {
+	s.registryDelete(w, r, registryLabel)
+}
+
+// ---- 标签新建（键值语义，专用）----
 
 func (s *Server) handleCreateLabel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
@@ -143,7 +159,7 @@ func (s *Server) handleCreateLabel(w http.ResponseWriter, r *http.Request) {
 	if req.Key == "" { // 多键路径：逐键注册（与单键路径同口径逐键审计）
 		for k, v := range req.Labels {
 			if _, err := s.st.CreateLabel(k, req.Note, req.HostIDs, v); err != nil {
-				writeError(w, http.StatusBadRequest, err.Error())
+				s.writeStoreErr(w, err)
 				return
 			}
 			s.audit(r, "create", "label", k, v)
@@ -153,38 +169,31 @@ func (s *Server) handleCreateLabel(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.st.CreateLabel(req.Key, req.Note, req.HostIDs, req.Value)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeStoreErr(w, err)
 		return
 	}
 	s.audit(r, "create", "label", req.Key, req.Value)
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "key": req.Key})
 }
 
-func (s *Server) handleDeleteLabel(w http.ResponseWriter, r *http.Request) {
-	id, ok := pathID(w, r)
-	if !ok {
-		return
-	}
-	if err := s.st.DeleteLabel(id); err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "label not found")
-			return
-		}
-		s.writeInternal(w, err)
-		return
-	}
-	s.audit(r, "delete", "label", fmt.Sprint(id), "从主机移除该键")
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-}
-
 // ---- 删除即退役 ----
 
-// retireAgent 通知 agent 自清理退出。mTLS（ctl 客户端证书）优先，明文
-// http 兜底（手工添加的回环 agent）。返回是否成功退役与失败原因。
+// retireAgent 通知 agent 自清理退出。mTLS（ctl 客户端证书）优先；明文
+// http 兜底仅限台账声明明文的主机（手工添加的回环 agent）。返回是否成功
+// 退役与失败原因（失败不阻断台账删除，由调用方转 warning）。
 func (s *Server) retireAgent(ctx context.Context, h *store.Host) (bool, string) {
 	if s.cam != nil {
-		if err := postShutdown(ctx, s.cam.tlsClient, "https", h); err == nil {
+		err := postShutdown(ctx, s.cam.tlsClient, "https", h)
+		if err == nil {
 			return true, ""
+		}
+		// 纳管主机不降级明文（信任模型同 agentHostModel：签发过证书的主机
+		// 一律走 mTLS，"TLS 失败回落明文"是可被中间人主动触发的降级）。
+		// 失败只记 warning，落账删除照常继续
+		if s.useTLS(h) {
+			s.logger.Warn("retire agent over mTLS failed (no plaintext fallback for TLS host)",
+				"host", h.Name, "address", h.Address, "err", err)
+			return false, err.Error()
 		}
 	}
 	if err := postShutdown(ctx, plainProbeClient(), "http", h); err != nil {
@@ -220,12 +229,8 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h, err := s.st.GetHost(id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "host not found")
-		return
-	}
 	if err != nil {
-		s.writeInternal(w, err)
+		s.writeStoreErr(w, err)
 		return
 	}
 	retired, warn := s.retireAgent(r.Context(), h)
@@ -270,6 +275,10 @@ type BatchResult struct {
 	Retired bool   `json:"retired,omitempty"`
 }
 
+// batchProbeConcurrency 批量探活的并发度（信号量）：逐台串行时单台最坏
+// 10s 超时随台数线性累加，百台批量的总时长不可用。
+const batchProbeConcurrency = 8
+
 func (s *Server) handleBatchHosts(w http.ResponseWriter, r *http.Request) {
 	var req BatchRequest
 	if !decodeJSON(w, r, &req) {
@@ -299,7 +308,10 @@ func (s *Server) handleBatchHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// assign 的目标归属是写入语义：scope 级 host:edit 只能改到授权覆盖的
-	// 池/组（matchScope"任一命中"不够——那会把主机挪进任意池扩大可见面）
+	// 池/组（matchScope"任一命中"不够——那会把主机挪进任意池扩大可见面）。
+	// 标签同口径：labels 驱动 label 型授权面（按"主机带该键"匹配），不校验
+	// 会允许作用域用户给主机盖上任意 label 键、间接扩大 label 型授权的
+	// 覆盖面（handleUpdateHost 已是同口径）
 	if req.Action == "assign" {
 		var tp, tg []string
 		if req.SetPools {
@@ -308,54 +320,26 @@ func (s *Server) handleBatchHosts(w http.ResponseWriter, r *http.Request) {
 		if req.SetGroups {
 			tg = req.Groups
 		}
-		if !s.scopeWriteAllowed(r, verbHostEdit, tp, tg, nil) {
-			writeError(w, http.StatusForbidden, "forbidden: assign target pools/groups outside your host:edit scope")
+		tk := make([]string, 0, len(req.Labels))
+		for k := range req.Labels {
+			tk = append(tk, k)
+		}
+		slices.Sort(tk)
+		if !s.scopeWriteAllowed(r, verbHostEdit, tp, tg, tk) {
+			writeError(w, http.StatusForbidden, "forbidden: assign target pools/groups/labels outside your host:edit scope")
 			return
 		}
 	}
-	results := make([]BatchResult, 0, len(req.IDs))
-	for _, id := range req.IDs {
-		h, err := s.st.GetHost(id)
-		if err != nil {
-			results = append(results, BatchResult{ID: id, OK: false, Detail: "host not found"})
-			continue
-		}
-		if !p.canHost(needVerb, h.Pools, h.Groups, h.Labels) {
-			results = append(results, BatchResult{ID: id, Name: h.Name, OK: false, Detail: "forbidden: outside your scope"})
-			continue
-		}
-		res := BatchResult{ID: id, Name: h.Name}
-		switch req.Action {
-		case "probe":
-			pr := probeHost(r.Context(), h, s.probeClientFor(h))
-			_ = s.st.SetHostStatus(id, pr.Status)
-			res.OK = pr.Status == "online"
-			res.Detail = pr.Status + " " + pr.Error
-		case "delete":
-			retired, warn := s.retireAgent(r.Context(), h)
-			if err := s.st.DeleteHost(id); err != nil {
-				res.Detail = err.Error()
-				break
-			}
-			// 主机已删：差分快照与执行闸门锁一并回收
-			s.monitor.Forget(id)
-			s.gate.Forget(id)
-			res.OK = true
-			res.Retired = retired
-			if warn != "" {
-				res.Detail = "agent 退役失败: " + warn
-			}
-		case "assign":
-			n, err := s.st.BatchAssign([]int64{id}, req.Pools, req.Groups, req.SetPools, req.SetGroups, req.Labels, req.ReplaceLabels)
-			res.OK = err == nil && n == 1
-			if err != nil {
-				res.Detail = err.Error()
-			}
-		default:
-			writeError(w, http.StatusBadRequest, "unknown action "+req.Action)
-			return
-		}
-		results = append(results, res)
+	// 逐台校验/执行按 action 拆开（batchResolveHost 共用前置），行为口径
+	// 与原单循环一致
+	var results []BatchResult
+	switch req.Action {
+	case "probe":
+		results = s.batchProbeHosts(p, needVerb, &req)
+	case "delete":
+		results = s.batchDeleteHosts(r, p, needVerb, &req)
+	default: // assign（action 合法性已在上方 switch 收敛）
+		results = s.batchAssignHosts(r, p, needVerb, &req)
 	}
 	okN := 0
 	for _, res := range results {
@@ -367,9 +351,139 @@ func (s *Server) handleBatchHosts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"results": results, "ok": okN, "failed": len(results) - okN})
 }
 
+// batchResolveHost 批量动作的逐台前置（校验）：取主机 + 作用域校验；
+// 失败时返回已填 Detail 的结果（ok=false，调用方计入 results 不中断）。
+func (s *Server) batchResolveHost(p *userPerms, needVerb string, id int64) (*store.Host, BatchResult, bool) {
+	h, err := s.st.GetHost(id)
+	if err != nil {
+		return nil, BatchResult{ID: id, OK: false, Detail: "host not found"}, false
+	}
+	if !p.canHost(needVerb, h.Pools, h.Groups, h.Labels) {
+		return nil, BatchResult{ID: id, Name: h.Name, OK: false, Detail: "forbidden: outside your scope"}, false
+	}
+	return h, BatchResult{ID: id, Name: h.Name}, true
+}
+
+// batchProbeHosts probe 动作（执行）：有限并发探活 + 在线状态落库。
+// 探活挂 background ctx 脱离请求生命周期（对齐 exec/upgrade/sshinstall
+// 的 background() 口径，动机见 httpx.background 注释）：r.Context() 会随
+// 客户端断连取消，把整批探活拦腰打断——而探活结果本来就要落库，不随
+// 断连作废。结果按请求顺序返回（槽位预分配，goroutine 只回填自己的槽）。
+func (s *Server) batchProbeHosts(p *userPerms, needVerb string, req *BatchRequest) []BatchResult {
+	results := make([]BatchResult, len(req.IDs))
+	var (
+		pending []*store.Host // 待探活主机
+		slots   []int         // 对应 results 下标
+	)
+	for i, id := range req.IDs {
+		h, fail, ok := s.batchResolveHost(p, needVerb, id)
+		if !ok {
+			results[i] = fail
+			continue
+		}
+		results[i] = BatchResult{ID: id, Name: h.Name}
+		pending = append(pending, h)
+		slots = append(slots, i)
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, batchProbeConcurrency)
+	ctx := s.background()
+	for k, h := range pending {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			pr := probeHost(ctx, h, s.probeClientFor(h))
+			_ = s.st.SetHostStatus(h.ID, pr.Status)
+			res := &results[slots[k]]
+			res.OK = pr.Status == "online"
+			res.Detail = pr.Status + " " + pr.Error
+		}()
+	}
+	wg.Wait()
+	return results
+}
+
+// batchDeleteHosts delete 动作（执行）：退役 agent（不可达仅告警）→ 删
+// 台账 → 回收差分快照与闸门锁。retireAgent 保持挂请求 ctx 不动（与单删
+// handleDeleteHost 同口径：退役是尽力而为的附带动作，不脱离请求执行）。
+func (s *Server) batchDeleteHosts(r *http.Request, p *userPerms, needVerb string, req *BatchRequest) []BatchResult {
+	results := make([]BatchResult, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		h, fail, ok := s.batchResolveHost(p, needVerb, id)
+		if !ok {
+			results = append(results, fail)
+			continue
+		}
+		res := BatchResult{ID: id, Name: h.Name}
+		retired, warn := s.retireAgent(r.Context(), h)
+		if err := s.st.DeleteHost(id); err != nil {
+			res.Detail = err.Error()
+			results = append(results, res)
+			continue
+		}
+		// 同单删：回收差分快照与闸门锁
+		s.monitor.Forget(id)
+		s.gate.Forget(id)
+		res.OK = true
+		res.Retired = retired
+		if warn != "" {
+			res.Detail = "agent 退役失败: " + warn
+		}
+		results = append(results, res)
+	}
+	return results
+}
+
+// batchAssignHosts assign 动作（执行）：归属/标签逐台写入。
+func (s *Server) batchAssignHosts(r *http.Request, p *userPerms, needVerb string, req *BatchRequest) []BatchResult {
+	results := make([]BatchResult, 0, len(req.IDs))
+	for _, id := range req.IDs {
+		h, fail, ok := s.batchResolveHost(p, needVerb, id)
+		if !ok {
+			results = append(results, fail)
+			continue
+		}
+		res := BatchResult{ID: id, Name: h.Name}
+		// replace_labels 整体替换：被替换掉的旧键也是写入面——scope 用户
+		// 不应能拆掉自己不覆盖的 label 绑定（他人/未来的 label 型授权会
+		// 随该键消失而静默失效）。逐台判定：各主机现有键不同
+		if req.ReplaceLabels {
+			if removed := removedLabelKeys(h.Labels, req.Labels); len(removed) > 0 &&
+				!s.scopeWriteAllowed(r, verbHostEdit, nil, nil, removed) {
+				res.Detail = "forbidden: replaced labels outside your host:edit scope"
+				results = append(results, res)
+				continue
+			}
+		}
+		n, err := s.st.BatchAssign([]int64{id}, req.Pools, req.Groups, req.SetPools, req.SetGroups, req.Labels, req.ReplaceLabels)
+		res.OK = err == nil && n == 1
+		if err != nil {
+			res.Detail = err.Error()
+		}
+		results = append(results, res)
+	}
+	return results
+}
+
 // hostPort 供直连 URL 拼接（IPv6 安全）。
 func hostPort(h *store.Host) string {
 	return net.JoinHostPort(h.Address, fmt.Sprint(h.AgentPort))
+}
+
+// removedLabelKeys replace_labels 整体替换时将被移除的旧键（主机现有键 −
+// 请求新键集合），排序保证输出稳定。
+func removedLabelKeys(cur string, next map[string]string) []string {
+	old := labelKeys(cur)
+	out := make([]string, 0, len(old))
+	for k := range old {
+		if _, ok := next[k]; !ok {
+			out = append(out, k)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // ---- 批量建档（CSV 导入的服务端入口）----

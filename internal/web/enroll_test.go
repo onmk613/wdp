@@ -219,8 +219,86 @@ func TestEnrollTokenRequiresPerm(t *testing.T) {
 	}
 }
 
-// TestEnrollScriptHostHeaderInjection Host 头不可信：host 部分含引号直接
-// 报错；引号落在端口部分时 BASE 为单引号安全引用（不闭合注入）。
+// TestEnrollTTLExplicitCap TTL 上限显式 400 拒绝（不再静默钳到 24h）：
+// 调用方拿到的有效期应当是自己请求的值，或一个明确的错误。
+func TestEnrollTTLExplicitCap(t *testing.T) {
+	s, _ := newEnrollServer(t)
+	h := s.Handler()
+	admin := loginSession(t, s)
+
+	// 超上限：400 且错误消息说明上限
+	rec := do(t, h, "POST", "/api/enroll-tokens", map[string]any{"host": "cap1", "ttl_min": 1441}, &admin)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "ttl_min exceeds the 24h cap (1440)") {
+		t.Fatalf("ttl_min=1441 应 400 并说明上限: %d %s", rec.Code, rec.Body)
+	}
+	// 恰在上限：放行，expires_in 就是请求值（不被缩水）
+	rec = do(t, h, "POST", "/api/enroll-tokens", map[string]any{"host": "cap2", "ttl_min": 1440}, &admin)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("ttl_min=1440 应 201: %d %s", rec.Code, rec.Body)
+	}
+	var created struct {
+		ExpiresIn int `json:"expires_in"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &created)
+	if created.ExpiresIn != 1440 {
+		t.Fatalf("边界值 expires_in 应为 1440: %+v", created)
+	}
+}
+
+// TestEnrollScriptAgentPort 签发时指定的 agent_port 必须真正生效：
+// 下发脚本的 done 回报与 unit 文件的 --listen 都用 token 绑定端口
+// （此前两处硬编码 7602，API 字段形同虚设）；未指定时缺省 7602。
+func TestEnrollScriptAgentPort(t *testing.T) {
+	s, _ := newEnrollServer(t)
+	h := s.Handler()
+	admin := loginSession(t, s)
+
+	createToken := func(t *testing.T, body map[string]any) string {
+		rec := do(t, h, "POST", "/api/enroll-tokens", body, &admin)
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("生成 token 应 201: %d %s", rec.Code, rec.Body)
+		}
+		var created struct {
+			Token string `json:"token"`
+		}
+		json.Unmarshal(rec.Body.Bytes(), &created)
+		return created.Token
+	}
+	scriptOf := func(t *testing.T, token string) string {
+		rec := do(t, h, "GET", "/enroll/"+token+"/script.sh", nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("脚本应 200: %d %s", rec.Code, rec.Body)
+		}
+		return rec.Body.String()
+	}
+
+	// 自定义端口：done 回报与 unit 监听两处注入点都用该值
+	tok := createToken(t, map[string]any{"host": "port8800", "agent_port": 8800})
+	script := scriptOf(t, tok)
+	for _, want := range []string{`-d '{"agent_port":8800}'`, "--listen 0.0.0.0:8800"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("自定义端口脚本缺 %q:\n%s", want, script)
+		}
+	}
+	// 注入点之外不得残留缺省端口的旧形态（模板注释里的"7602"字样不算）
+	if strings.Contains(script, `{"agent_port":7602}`) || strings.Contains(script, "--listen 0.0.0.0:7602") {
+		t.Fatalf("自定义端口下注入点不应残留缺省 7602:\n%s", script)
+	}
+
+	// 未指定端口：缺省 7602（store 层 CreateEnrollToken 保证）
+	tok = createToken(t, map[string]any{"host": "portdefault"})
+	script = scriptOf(t, tok)
+	for _, want := range []string{`-d '{"agent_port":7602}'`, "--listen 0.0.0.0:7602"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("缺省端口脚本缺 %q:\n%s", want, script)
+		}
+	}
+}
+
+// TestEnrollScriptHostHeaderInjection Host 头不可信：host 部分含引号、端口
+// 非数字/超界（含引号、元字符）一律 400——Host 头片段会原样进入
+// `curl | sudo sh` 提示串，拒绝非法输入优于依赖引用兜底（纵深防御仍在：
+// 合法 Host 下 BASE 也走单引号安全引用）。
 func TestEnrollScriptHostHeaderInjection(t *testing.T) {
 	s, _ := newEnrollServer(t)
 	if err := s.st.CreateEnrollToken("injtoken", "", 7602, time.Hour); err != nil {
@@ -228,22 +306,32 @@ func TestEnrollScriptHostHeaderInjection(t *testing.T) {
 	}
 	h := s.Handler()
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/enroll/injtoken/script.sh", nil)
-	req.Host = "10.0.0.1':7603"
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("host 部分含引号应 400: %d %s", rec.Code, rec.Body)
+	for _, host := range []string{
+		"10.0.0.1':7603", // 引号落在 host 部分
+		`10.0.0.1:7603'`, // 引号落在端口部分
+		"10.0.0.1:76;03", // 端口含元字符
+		"10.0.0.1:abc",   // 端口非数字
+		"10.0.0.1:0",     // 端口越界（下界）
+		"10.0.0.1:99999", // 端口越界（上界）
+	} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/enroll/injtoken/script.sh", nil)
+		req.Host = host
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("Host %q 应 400: %d %s", host, rec.Code, rec.Body)
+		}
 	}
 
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest("GET", "/enroll/injtoken/script.sh", nil)
-	req.Host = `10.0.0.1:7603'`
+	// 合法 Host：脚本可出，且 BASE 仍为单引号引用（纵深防御口径保持）
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/enroll/injtoken/script.sh", nil)
+	req.Host = "10.0.0.1:7603"
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("端口部分引号应仍出脚本（安全引用兜底）: %d %s", rec.Code, rec.Body)
+		t.Fatalf("合法 Host 应 200: %d %s", rec.Code, rec.Body)
 	}
-	if want := `BASE='http://10.0.0.1:7603'\'''`; !strings.Contains(rec.Body.String(), want) {
+	if want := `BASE='http://10.0.0.1:7603'`; !strings.Contains(rec.Body.String(), want) {
 		t.Fatalf("BASE 应为安全单引号引用:\n%s", rec.Body)
 	}
 }

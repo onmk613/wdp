@@ -46,7 +46,7 @@ func (c *Console) buildRow(host string, r *model.TaskResult) taskRow {
 		if c.Level >= 2 || spec == "full" {
 			limit = 1 << 20
 		}
-		detail = truncateOut(model.ApplyOutputSpec(spec, strings.TrimSpace(r.Stdout)), limit)
+		detail = fmtutil.TruncateDisplay(model.ApplyOutputSpec(spec, strings.TrimSpace(r.Stdout)), limit)
 	} else if detail != "" {
 		detail = model.ApplyOutputSpec(spec, detail)
 	}
@@ -119,7 +119,7 @@ func (c *Console) itemsBlock(r *model.TaskResult) string {
 		st := statusCell(it)
 		detail := it.Msg
 		if detail == "" && it.Stdout != "" {
-			detail = truncateOut(strings.TrimSpace(it.Stdout), 300)
+			detail = fmtutil.TruncateDisplay(strings.TrimSpace(it.Stdout), 300)
 		}
 		if detail != "" {
 			detail = ": " + detail

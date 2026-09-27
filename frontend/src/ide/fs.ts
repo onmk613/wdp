@@ -122,8 +122,7 @@ export class ChartFS {
         fromBase: false,
       }))
     }
-    // 底本里有、草稿快照里没有的非删除文件 = 曾被删除但旧草稿未记录：
-    // 不存在这种情况（草稿快照含删除标记），无需处理
+    // 草稿快照含全部文件与删除标记，底本无需补差集。
     for (const p of d.deleted_files) {
       const f = this.files.get(p)
       if (f) {
@@ -309,7 +308,6 @@ export class ChartFS {
       }
       f.original = f.content
       f.fromBase = true
-      if (f.binary) f.size = f.size
     }
     this.baseVersion = baseVersion
   }
@@ -403,7 +401,7 @@ export function chartYAMLDescription(content: string): string {
   return m ? m[1].trim().replace(/^["']|["']$/g, '') : ''
 }
 
-// bumpVersion/nextVersion 版本号推进（沿用旧编辑器语义）
+// bumpVersion/nextVersion 版本号推进
 export function bumpVersion(v: string): string {
   const m = v.match(/^(.*?)(\d+)$/)
   if (!m) return v ? v + '.1' : '1.0.0'

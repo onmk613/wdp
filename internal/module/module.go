@@ -48,10 +48,9 @@ type ParamDoc struct {
 	Type    string `json:"type"` // string / list / bool / int / mode / map
 	Default string `json:"default,omitempty"`
 	Desc    string `json:"desc"`
-	// Enum 声明固定值域：解析期硬校验的参数（state 等）在这里投影白名单，
-	// /api/modules 自动透出、编辑器值补全直接消费——声明处与解析校验
-	// 共用同一包级变量（如 fileStates），文档与白名单永不漂移。
-	// 个别参数是"建议值"而非硬校验（如 user.shell 的常见登录 shell），
+	// Enum 声明固定值域：硬校验参数（state 等）在此投影白名单（声明与
+	// 校验共用同一包级变量，如 fileStates），经 /api/modules 透出供编辑器
+	// 补全，文档与白名单永不漂移；个别参数仅为"建议值"（如 user.shell），
 	// 解析器不拦截枚举外的值。
 	Enum []string `json:"enum,omitempty"`
 }
@@ -123,9 +122,13 @@ func IsReadOnlyModule(name string) bool {
 	return false
 }
 
+// registry 内置模块注册表。并发契约：仅各模块文件的 init() 期写入、
+// 运行期只读（Get/Names/Resolve 会被 executor 的并发 worker 同时调用），
+// 因此不加锁；Register 虽是导出函数，但不支持运行期动态注册——启动后再
+// 调用即 data race。
 var registry = map[string]Module{}
 
-// Register 注册模块
+// Register 注册模块（仅限 init() 期调用，并发契约见 registry）
 func Register(m Module) {
 	registry[m.Name()] = m
 }

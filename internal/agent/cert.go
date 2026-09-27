@@ -18,9 +18,9 @@ import (
 	"encoding/pem"
 	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"time"
+
+	"wdp/internal/fsatomic"
 )
 
 // maxCertBodyBytes 换证请求体上限：PEM 证书链正常 1-5KiB，64KiB 已远超
@@ -85,7 +85,9 @@ func (s *Server) handleCert(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no certificate file path configured", http.StatusBadRequest)
 		return
 	}
-	if err := writeFileAtomic(s.tlsCertFile, normalizeCertPEM(chain), 0o600); err != nil {
+	// 原子落盘（tmp+fsync+rename）收敛在 fsatomic：断电后要么旧文件
+	// 要么完整新文件，不会留截断件——与 /upload 同语义
+	if err := fsatomic.WriteFile(s.tlsCertFile, bytes.NewReader(normalizeCertPEM(chain)), 0o600); err != nil {
 		http.Error(w, "failed to persist certificate: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -115,32 +117,4 @@ func normalizeCertPEM(chain [][]byte) []byte {
 		_ = pem.Encode(&out, &pem.Block{Type: "CERTIFICATE", Bytes: der})
 	}
 	return out.Bytes()
-}
-
-// writeFileAtomic 原子写文件：同目录临时文件 + fsync + rename（断电后
-// 要么旧文件要么完整新文件，不会留截断件——与 /upload 同语义）。
-func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".wdp-cert-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }

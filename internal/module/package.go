@@ -19,19 +19,60 @@ var packageStates = []string{"present", "latest", "absent"}
 // PackageModule 跨发行版的包管理（自动识别 apt/dnf/yum/apk/zypper）。
 type PackageModule struct{}
 
-// Name 模块名。
 func (m *PackageModule) Name() string { return "package" }
 
-// Desc 模块说明。
 func (m *PackageModule) Desc() string {
 	return "install/remove packages (auto-detects the package manager)"
 }
 
-// Run 执行包操作。
+// pkgPlan 是单包的动作计划：kind 取 install/remove/upgrade（需要执行）
+// 或 latest/none（无需执行；latest 仅用于日志措辞区分"已是最新"）。
+type pkgPlan struct {
+	name string
+	kind string
+}
+
+// planPackages 探测逐包安装/升级状态并推导动作计划——check 展示与实跑
+// 执行共用同一决策树（此前 check 循环与实跑循环各写一份，口径易漂移）。
+// 探测全部只读（installed/upgradable）；实跑先整体计划再依序执行，
+// 同批前序安装拉入依赖时，后续包的探测结论是计划时点的快照（对已装包
+// 重复执行包管理器命令是幂等 no-op，仅日志措辞不同）。
+func planPackages(rc *RunContext, mgr *pkgManager, names []string, state string) ([]pkgPlan, *Result) {
+	plans := make([]pkgPlan, 0, len(names))
+	for _, name := range names {
+		installed, bad := mgr.installed(rc, name)
+		if bad != nil {
+			return nil, bad
+		}
+		kind := "none"
+		switch {
+		case state == "absent" && installed:
+			kind = "remove"
+		case state != "absent" && !installed:
+			kind = "install"
+		case state == "latest" && installed:
+			// 幂等：先探测是否存在可用升级，无升级不进计划（不再每次无脑 upgrade）
+			up, bad := mgr.upgradable(rc, name)
+			if bad != nil {
+				return nil, bad
+			}
+			if up {
+				kind = "upgrade"
+			} else {
+				kind = "latest"
+			}
+		}
+		plans = append(plans, pkgPlan{name: name, kind: kind})
+	}
+	return plans, nil
+}
+
+// Run 执行包操作：解析 → 探测包管理器 → 逐包计划（唯一决策树）→
+// check 展示或实跑执行（骨架与 user 模块一致）。
 func (m *PackageModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	names, ok := argStrList(args, "name")
 	if !ok || len(names) == 0 {
-		return Fail("%s", "package requires a name parameter")
+		return Fail("package requires a name parameter")
 	}
 	state, ok := parseState(args, "present", packageStates...)
 	if !ok {
@@ -43,82 +84,90 @@ func (m *PackageModule) Run(rc *RunContext, args map[string]any, _ string) *Resu
 		return bad
 	}
 
-	// check 模式：只探测当前安装状态，返回变更预估（--diff 列出逐包增删；
-	// latest 会真实查询可用升级，与实跑判定一致）
-	if rc.CheckMode {
-		would := false
-		var logs []string
-		var diffLines []string
-		for _, name := range names {
-			installed, bad := mgr.installed(rc, name)
-			if bad != nil {
-				return bad
-			}
-			switch {
-			case state == "absent" && installed:
-				would = true
-				logs = append(logs, name+" will be removed")
-				diffLines = append(diffLines, "- "+name)
-			case state != "absent" && !installed:
-				would = true
-				logs = append(logs, name+" will be installed")
-				diffLines = append(diffLines, "+ "+name)
-			case state == "latest" && installed:
-				up, bad := mgr.upgradable(rc, name)
-				if bad != nil {
-					return bad
-				}
-				if up {
-					would = true
-					logs = append(logs, name+" will be upgraded")
-					diffLines = append(diffLines, "~ "+name)
-				} else {
-					logs = append(logs, name+" already latest")
-				}
-			default:
-				logs = append(logs, name+" is already in the target state")
-			}
-		}
-		return &Result{Changed: would, Msg: "[check] " + strings.Join(logs, "; "), Diff: strings.Join(diffLines, "\n")}
+	plans, bad := planPackages(rc, mgr, names, state)
+	if bad != nil {
+		return bad
 	}
+	if rc.CheckMode {
+		return packageCheck(rc, plans)
+	}
+	return packageApply(rc, mgr, plans)
+}
 
+// packageCheck 是 check 模式分支：按计划展示变更预估（--diff 列出逐包
+// 增删；latest 的升级探测在 planPackages 已真实查询，与实跑判定一致）。
+func packageCheck(rc *RunContext, plans []pkgPlan) *Result {
+	would := false
+	var logs []string
+	var diffLines []string
+	for _, p := range plans {
+		switch p.kind {
+		case "remove":
+			would = true
+			logs = append(logs, p.name+" will be removed")
+			diffLines = append(diffLines, "- "+p.name)
+		case "install":
+			would = true
+			logs = append(logs, p.name+" will be installed")
+			diffLines = append(diffLines, "+ "+p.name)
+		case "upgrade":
+			would = true
+			logs = append(logs, p.name+" will be upgraded")
+			diffLines = append(diffLines, "~ "+p.name)
+		case "latest":
+			logs = append(logs, p.name+" already latest")
+		default:
+			logs = append(logs, p.name+" is already in the target state")
+		}
+	}
+	res := &Result{Changed: would, Msg: "[check] " + strings.Join(logs, "; ")}
+	if rc.DiffMode { // 与其他模块一致：Diff 仅在 --diff 下填充
+		res.Diff = strings.Join(diffLines, "\n")
+	}
+	return res
+}
+
+// packageApply 实跑分支：按计划依序执行逐包动作。become 守卫只卡写操作
+// （installed/upgradable 是只读探测，已在 planPackages 完成，不受守卫
+// 影响），install/remove/upgrade 是系统级变更——非 root 未 become 时
+// apt-get/dnf 会以远端晦涩报错失败（甚至源锁死），与 user/group 模块
+// 同口径显式拦截（报错文案一致）。
+func packageApply(rc *RunContext, mgr *pkgManager, plans []pkgPlan) *Result {
 	changed := false
 	var logs []string
-	for _, name := range names {
-		installed, bad := mgr.installed(rc, name)
-		if bad != nil {
-			return bad
-		}
-		switch {
-		case state == "absent" && installed:
-			if bad := mgr.remove(rc, name); bad != nil {
+	for _, p := range plans {
+		switch p.kind {
+		case "remove":
+			if !rc.Become {
+				return Fail("removing package %s requires become: true", p.name)
+			}
+			if bad := mgr.remove(rc, p.name); bad != nil {
 				return bad
 			}
 			changed = true
-			logs = append(logs, name+" removed")
-		case state != "absent" && !installed:
-			if bad := mgr.install(rc, name); bad != nil {
+			logs = append(logs, p.name+" removed")
+		case "install":
+			if !rc.Become {
+				return Fail("installing package %s requires become: true", p.name)
+			}
+			if bad := mgr.install(rc, p.name); bad != nil {
 				return bad
 			}
 			changed = true
-			logs = append(logs, name+" installed")
-		case state == "latest" && installed:
-			// 幂等：先探测是否存在可用升级，无升级则跳过（不再每次无脑 upgrade）
-			up, bad := mgr.upgradable(rc, name)
-			if bad != nil {
-				return bad
+			logs = append(logs, p.name+" installed")
+		case "upgrade":
+			if !rc.Become {
+				return Fail("upgrading package %s requires become: true", p.name)
 			}
-			if !up {
-				logs = append(logs, name+" already latest")
-				continue
-			}
-			if bad := mgr.upgrade(rc, name); bad != nil {
+			if bad := mgr.upgrade(rc, p.name); bad != nil {
 				return bad
 			}
 			changed = true
-			logs = append(logs, name+" upgraded")
+			logs = append(logs, p.name+" upgraded")
+		case "latest":
+			logs = append(logs, p.name+" already latest")
 		default:
-			logs = append(logs, name+" is already in the target state")
+			logs = append(logs, p.name+" is already in the target state")
 		}
 	}
 	return &Result{Changed: changed, Msg: strings.Join(logs, "; ")}
@@ -204,12 +253,10 @@ func (p *pkgManager) install(rc *RunContext, name string) *Result {
 }
 
 func (p *pkgManager) remove(rc *RunContext, name string) *Result {
+	// 各包管理器默认动词均为 remove，仅 apk 用 del
 	verb := "remove"
-	switch p.kind {
-	case "apk":
+	if p.kind == "apk" {
 		verb = "del"
-	case "zypper":
-		verb = "remove"
 	}
 	return p.run(rc, p.cmd(verb, name))
 }
@@ -325,7 +372,6 @@ func (p *pkgManager) run(rc *RunContext, script string) *Result {
 	return nil
 }
 
-// Params 参数文档。
 func (m *PackageModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "name", Type: "list", Desc: "package name(s) (whitespace-separated string or list, required)"},
@@ -333,7 +379,6 @@ func (m *PackageModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *PackageModule) Example() string {
 	return `- name: install dependencies
   package:

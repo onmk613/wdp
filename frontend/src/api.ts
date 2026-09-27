@@ -89,6 +89,21 @@ export interface HostFactsResponse {
   error?: string
 }
 
+// handleResponse 响应统一处理：401 全局事件 + JSON 容错解析 + error 字段
+// 提取。api() 与 upload() 共用一份——此前两处逐行复制，401 事件与错误
+// 口径需双处同步维护。
+async function handleResponse<T>(resp: Response): Promise<T> {
+  if (resp.status === 401) {
+    window.dispatchEvent(new Event('wdp-unauthorized'))
+    throw new Error('登录已失效')
+  }
+  const data = (await resp.json().catch(() => ({}))) as T & { error?: string }
+  if (!resp.ok) {
+    throw new Error(data?.error || `HTTP ${resp.status}`)
+  }
+  return data
+}
+
 export async function api<T>(method: string, url: string, body?: unknown): Promise<T> {
   // Content-Type 恒带（含空体 POST）：后端对变更类请求拒绝空 Content-Type
   // （CSRF 纵深防御），无体调用（probe/latest 等）不带会被 415 挡下
@@ -100,15 +115,7 @@ export async function api<T>(method: string, url: string, body?: unknown): Promi
     opt.body = JSON.stringify(body)
   }
   const resp = await fetch(url, opt)
-  if (resp.status === 401) {
-    window.dispatchEvent(new Event('wdp-unauthorized'))
-    throw new Error('登录已失效')
-  }
-  const data = (await resp.json().catch(() => ({}))) as T & { error?: string }
-  if (!resp.ok) {
-    throw new Error(data?.error || `HTTP ${resp.status}`)
-  }
-  return data
+  return handleResponse<T>(resp)
 }
 
 export interface App {
@@ -159,13 +166,13 @@ export interface UserScope {
 }
 
 export interface User {
-  ID: number
-  Name: string
-  Role: string
-  Disabled: boolean
-  CreatedAt: string
-  Scopes: UserScope[] | null
-  Online: boolean
+  id: number
+  name: string
+  role: string
+  disabled: boolean
+  created_at: string
+  scopes: UserScope[] | null
+  online: boolean
 }
 
 export interface SessionInfo {
@@ -236,8 +243,7 @@ export interface RunTask {
   Detail: string
 }
 
-// 注意：字段名与后端 JSON 键一一对应（Go 侧 json tag 为小写，
-// 曾因写成 PascalCase 导致执行结果全部 undefined——页面显示 rc=undefined/无输出）
+// 字段名必须与后端 json tag 一致（小写）
 export interface ExecHostResult {
   id: number
   name: string
@@ -247,20 +253,13 @@ export interface ExecHostResult {
   err?: string
 }
 
-// multipart 上传（应用 tgz）。泛型返回值：此前 Promise<any> 已传染到
-// 调用方（AppNew 需要 as App 断言），改为调用方显式声明响应类型。
+// multipart 上传（应用 tgz）；调用方显式声明响应类型。
 export async function upload<T = unknown>(url: string, fields: Record<string, string>, file: File): Promise<T> {
   const fd = new FormData()
   for (const [k, v] of Object.entries(fields)) fd.append(k, v)
   fd.append('tgz', file)
   const resp = await fetch(url, { method: 'POST', body: fd, headers: { Accept: 'application/json' } })
-  if (resp.status === 401) {
-    window.dispatchEvent(new Event('wdp-unauthorized'))
-    throw new Error('登录已失效')
-  }
-  const data = (await resp.json().catch(() => ({}))) as T & { error?: string }
-  if (!resp.ok) throw new Error(data?.error || `HTTP ${resp.status}`)
-  return data
+  return handleResponse<T>(resp)
 }
 
 export interface SpecFile {
@@ -397,8 +396,9 @@ export function appDownloadURL(appID: number, version?: string): string {
 
 // ---- run 事件流（SSE）----
 // 执行状态变化的服务端推送：取代高频全量轮询（读放大主源）。返回断开
-// 函数；EventSource 同源自动带会话 cookie，断线自动重连，重连后靠
-// 调用方的兜底轮询补齐错过的状态。
+// 函数；EventSource 同源自动带会话 cookie。连接层断线由 EventSource
+// 自动重连；HTTP 错误（如 401/502）后不再重连，错过的状态靠调用方的
+// 兜底轮询补齐。
 export interface RunEvent {
   id: number
   status: string

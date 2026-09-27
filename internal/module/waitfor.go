@@ -22,15 +22,12 @@ var waitforStates = []string{"present", "absent"}
 // 模块本身不产生任何变更。
 type WaitForModule struct{}
 
-// Name 模块名。
 func (m *WaitForModule) Name() string { return "wait_for" }
 
-// Desc 模块说明。
 func (m *WaitForModule) Desc() string {
 	return "wait until a port/path condition is met (polled from the controller)"
 }
 
-// Params 参数文档。
 func (m *WaitForModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "host", Type: "string", Desc: "probe address (defaults to the host Address)"},
@@ -44,7 +41,6 @@ func (m *WaitForModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *WaitForModule) Example() string {
 	return `- name: wait for the service port (host defaults to the host address)
   wait_for:
@@ -61,8 +57,32 @@ func (m *WaitForModule) Example() string {
 `
 }
 
-// Run 执行等待。
-func (m *WaitForModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
+// minPollInterval 是轮询探测的最小间隔（见 poll 的轮询循环）。
+const minPollInterval = time.Second
+
+// probeDialTimeout 是单次 TCP 探测的拨号超时：探测失败仅代表"当下不可达"
+// （由轮询重试），过长则单轮探测就能占满整个等待窗口。
+const probeDialTimeout = time.Second
+
+// waitForReq 是 wait_for 解析后的参数。
+type waitForReq struct {
+	host       string
+	path       string
+	hasPath    bool
+	absent     bool // state=absent：等待条件消除而非达成
+	port       int
+	timeoutSec int
+	delaySec   int
+	sleepSec   int
+	msg        string // 自定义超时失败文案
+	desc       string // 展示用条件描述（host:port 或 path）
+	readyWord  string // 条件达成时的措辞
+	goneWord   string // 条件消除时的措辞
+}
+
+// parseWaitForArgs 解析并校验 wait_for 参数（host 缺省取主机地址/名、
+// port 范围与 port/path 互斥、timeout/delay/sleep 非负）。
+func parseWaitForArgs(rc *RunContext, args map[string]any) (*waitForReq, *Result) {
 	host, _ := argStr(args, "host")
 	if host == "" {
 		host = rc.Host.Address
@@ -73,94 +93,119 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, _ string) *Resu
 	path, hasPath := argStr(args, "path")
 	state, ok := parseState(args, "present", waitforStates...)
 	if !ok {
-		return Fail("unsupported state %q (options: %s)", state, strings.Join(waitforStates, "/"))
+		return nil, Fail("unsupported state %q (options: %s)", state, strings.Join(waitforStates, "/"))
 	}
-	absent := state == "absent"
+	w := &waitForReq{host: host, path: path, hasPath: hasPath, absent: state == "absent"}
 
-	var port int
 	if s, ok := argStr(args, "port"); ok && strings.TrimSpace(s) != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil || n < 1 || n > 65535 {
-			return Fail("%s", "port must be an integer between 1 and 65535")
+			return nil, Fail("port must be an integer between 1 and 65535")
 		}
-		port = n
+		w.port = n
 	}
-	if port == 0 && !hasPath {
-		return Fail("%s", "wait_for requires a port or path parameter")
+	if w.port == 0 && !hasPath {
+		return nil, Fail("wait_for requires a port or path parameter")
 	}
-	if port != 0 && hasPath {
-		return Fail("%s", "port and path are mutually exclusive")
+	if w.port != 0 && hasPath {
+		return nil, Fail("port and path are mutually exclusive")
 	}
 	if hasPath && path == "" {
-		return Fail("%s", "path must not be empty")
+		return nil, Fail("path must not be empty")
 	}
 
 	timeoutSec, ok := argSecs(args, "timeout", 300)
 	if !ok || timeoutSec <= 0 {
-		return Fail("%s", "timeout must be a positive integer")
+		return nil, Fail("timeout must be a positive integer")
 	}
 	delaySec, ok := argSecs(args, "delay", 0)
 	if !ok {
-		return Fail("%s", "delay must be a non-negative integer")
+		return nil, Fail("delay must be a non-negative integer")
 	}
 	sleepSec, ok := argSecs(args, "sleep", 1)
 	if !ok || sleepSec < 0 {
-		return Fail("%s", "sleep must be a non-negative integer")
+		return nil, Fail("sleep must be a non-negative integer")
 	}
-	customMsg, _ := argStr(args, "msg")
+	w.timeoutSec, w.delaySec, w.sleepSec = timeoutSec, delaySec, sleepSec
+	w.msg, _ = argStr(args, "msg")
 
-	desc := path
-	readyWord, goneWord := "ready", "removed"
-	if port != 0 {
-		desc = net.JoinHostPort(host, strconv.Itoa(port))
-		goneWord = "closed"
+	w.desc = path
+	w.readyWord, w.goneWord = "ready", "removed"
+	if w.port != 0 {
+		w.desc = net.JoinHostPort(host, strconv.Itoa(w.port))
+		w.goneWord = "closed"
 	}
+	return w, nil
+}
 
+// Run 执行等待：解析 → check 单次探测 / 轮询等待（骨架与 user 模块一致）。
+func (m *WaitForModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
+	w, bad := parseWaitForArgs(rc, args)
+	if bad != nil {
+		return bad
+	}
 	// check 模式：单次只读探测报告当前状态，不等待
 	if rc.CheckMode {
-		ok, bad := m.probe(rc, host, port, path, absent)
-		if bad != nil {
-			return bad
-		}
-		label := "not ready"
-		if ok {
-			label = readyWord
-			if absent {
-				label = goneWord
-			}
-		}
-		return &Result{Msg: fmt.Sprintf("[check] %s currently %s (single probe, no waiting)", desc, label)}
+		return m.checkProbe(rc, w)
 	}
+	return m.poll(rc, w)
+}
 
+// checkProbe 单次只读探测并报告当前状态（check 模式，不等待）。
+func (m *WaitForModule) checkProbe(rc *RunContext, w *waitForReq) *Result {
+	ok, bad := m.probe(rc, w.host, w.port, w.path, w.absent)
+	if bad != nil {
+		return bad
+	}
+	label := "not ready"
+	if ok {
+		label = w.readyWord
+		if w.absent {
+			label = w.goneWord
+		}
+	}
+	return &Result{Msg: fmt.Sprintf("[check] %s currently %s (single probe, no waiting)", w.desc, label)}
+}
+
+// poll 轮询等待条件满足：delay 先行，探测-休眠循环收口到 deadline，
+// 超时（或 ctx 取消）失败。
+func (m *WaitForModule) poll(rc *RunContext, w *waitForReq) *Result {
 	// 轮询窗口：timeout 与任务级超时（rc.TimeoutMs）取较小值
-	deadline := time.Now().Add(time.Duration(timeoutSec) * time.Second)
+	deadline := time.Now().Add(time.Duration(w.timeoutSec) * time.Second)
 	if rc.TimeoutMs > 0 {
 		if t := time.Now().Add(time.Duration(rc.TimeoutMs) * time.Millisecond); t.Before(deadline) {
 			deadline = t
 		}
 	}
-	if delaySec > 0 && !waitInterruptible(rc.Ctx, time.Duration(delaySec)*time.Second) {
+	if w.delaySec > 0 && !waitInterruptible(rc.Ctx, time.Duration(w.delaySec)*time.Second) {
 		return Fail("wait_for cancelled: %v", rc.Ctx.Err())
 	}
 
 	start := time.Now()
 	for {
-		ok, bad := m.probe(rc, host, port, path, absent)
+		ok, bad := m.probe(rc, w.host, w.port, w.path, w.absent)
 		if bad != nil {
 			return bad
 		}
 		if ok {
-			word := readyWord
-			if absent {
-				word = goneWord
+			word := w.readyWord
+			if w.absent {
+				word = w.goneWord
 			}
-			return &Result{Msg: fmt.Sprintf("%s %s (%.0fs)", desc, word, time.Since(start).Seconds())}
+			return &Result{Msg: fmt.Sprintf("%s %s (%.0fs)", w.desc, word, time.Since(start).Seconds())}
 		}
 		now := time.Now()
 		if !now.Before(deadline) {
 			break
 		}
-		wait := time.Duration(sleepSec) * time.Second
+		wait := time.Duration(w.sleepSec) * time.Second
+		if wait < minPollInterval {
+			// sleep: 0 合法，但轮询间隔会退化成探测本身的耗时：path 探测
+			// 每轮一次远端 exec，无间隔即高频轰炸连接层（连接复用与并发
+			// 审计都会把放大效应叠上去）。轮询设最小间隔；sleep >= 1s 时
+			// 尊重用户值。
+			wait = minPollInterval
+		}
 		if now.Add(wait).After(deadline) {
 			wait = deadline.Sub(now) // 收口到 deadline，避免超出 timeout
 		}
@@ -169,17 +214,17 @@ func (m *WaitForModule) Run(rc *RunContext, args map[string]any, _ string) *Resu
 		}
 	}
 
-	base := customMsg
+	base := w.msg
 	if base == "" {
-		base = fmt.Sprintf("timed out waiting for %s", desc)
+		base = fmt.Sprintf("timed out waiting for %s", w.desc)
 	}
-	return &Result{Failed: true, Msg: fmt.Sprintf("%s (timeout %ds)", base, timeoutSec)}
+	return &Result{Failed: true, Msg: fmt.Sprintf("%s (timeout %ds)", base, w.timeoutSec)}
 }
 
 // probe 单次探测条件是否满足（ok=条件达成）。
 func (m *WaitForModule) probe(rc *RunContext, host string, port int, path string, absent bool) (bool, *Result) {
 	if port != 0 {
-		d := net.Dialer{Timeout: time.Second}
+		d := net.Dialer{Timeout: probeDialTimeout}
 		conn, err := d.DialContext(rc.Ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 		if err != nil {
 			return absent, nil

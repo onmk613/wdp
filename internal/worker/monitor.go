@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"wdp/internal/fmtutil"
 	"wdp/internal/store"
 )
 
@@ -26,19 +27,6 @@ type MetricSample struct {
 	Name   string            `json:"name"`
 	Labels map[string]string `json:"labels,omitempty"`
 	Value  float64           `json:"value"`
-}
-
-// key 是样本的序列键（name + 排序后的标签）。
-func (m MetricSample) key() string {
-	if len(m.Labels) == 0 {
-		return m.Name
-	}
-	parts := make([]string, 0, len(m.Labels))
-	for k, v := range m.Labels {
-		parts = append(parts, k+"="+v)
-	}
-	// 挂载点/设备名拼接顺序稳定即可（同一次输出内一致）
-	return m.Name + "{" + strings.Join(parts, ",") + "}"
 }
 
 var labelRe = regexp.MustCompile(`([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"`)
@@ -78,24 +66,55 @@ func ParsePromText(body string) []MetricSample {
 		}
 		m := MetricSample{Name: name, Value: v, Labels: map[string]string{}}
 		for _, kv := range labelRe.FindAllStringSubmatch(labelsRaw, -1) {
-			m.Labels[kv[1]] = strings.ReplaceAll(kv[2], `\"`, `"`)
+			m.Labels[kv[1]] = unescapeLabelValue(kv[2])
 		}
 		out = append(out, m)
 	}
 	return out
 }
 
+// unescapeLabelValue 还原 PromText label 值的转义序列（\\、\"、\n——
+// 与 Prometheus 文本暴露格式的转义集合一致）。此前只还原 \"，含反斜杠
+// 或换行转义的值（如挂载点 "\\srv\share"、多行 label）会带着字面转义
+// 入库，检索与告警匹配都对不上原始值。单趟顺序扫描而非链式 ReplaceAll：
+// `\\n` 是"反斜杠 + n"，链式先把 `\\` 换成 `\` 再把 `\n` 当换行会过度
+// 还原；未知转义序列原样保留（宽容解析，与库行为一致）。
+func unescapeLabelValue(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
+			continue
+		}
+		switch s[i+1] {
+		case '\\':
+			b.WriteByte('\\')
+		case '"':
+			b.WriteByte('"')
+		case 'n':
+			b.WriteByte('\n')
+		default:
+			b.WriteByte('\\')
+			b.WriteByte(s[i+1])
+		}
+		i++
+	}
+	return b.String()
+}
+
 // sampleIndex 建索引用于快速取值/求和。
 type sampleIndex struct {
 	byName map[string][]MetricSample // name → 同名全部序列
-	byKey  map[string]float64
 }
 
 func indexSamples(ss []MetricSample) *sampleIndex {
-	idx := &sampleIndex{byName: map[string][]MetricSample{}, byKey: map[string]float64{}}
+	idx := &sampleIndex{byName: map[string][]MetricSample{}}
 	for _, s := range ss {
 		idx.byName[s.Name] = append(idx.byName[s.Name], s)
-		idx.byKey[s.key()] = s.Value
 	}
 	return idx
 }
@@ -127,7 +146,7 @@ type scrapeState struct {
 	cpuTotal, cpuIdle   float64
 	netRx, netTx        float64
 	diskRead, diskWrite float64
-	diskIO              float64
+	diskIO              map[string]float64 // device → 累计 io_time 秒（逐盘差分）
 }
 
 // fsUsage 单挂载点使用率（告警评估用）。
@@ -186,6 +205,7 @@ func (m *Monitor) scrapeOnce(ctx context.Context) {
 		}
 		h, err := m.Store.GetHost(id)
 		if err != nil {
+			m.Logger.Warn("scrape: get host", "id", id, "err", err)
 			continue
 		}
 		wg.Add(1)
@@ -194,9 +214,15 @@ func (m *Monitor) scrapeOnce(ctx context.Context) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			body, err := m.Fetch(ctx, h)
+			// ctx 已取消（server 关停）：已派发 goroutine 的抓取以失败收场，
+			// 据此写 offline crit 告警会把全网打成不可达——关停不应污染告警
+			// 面板，下一轮采样自会给出真实结论
+			if ctx.Err() != nil {
+				return
+			}
 			if err != nil {
 				// 离线：置一条 crit 告警（探活状态由 Prober 维护）
-				_ = m.Store.SetHostAlert(id, "offline", "crit", "agent 不可达："+firstLineOf(err.Error()), 0)
+				_ = m.Store.SetHostAlert(id, "offline", "crit", "agent 不可达："+fmtutil.FirstLine(err.Error()), 0)
 				return
 			}
 			_ = m.Store.ClearHostAlert(id, "offline")
@@ -206,19 +232,31 @@ func (m *Monitor) scrapeOnce(ctx context.Context) {
 	wg.Wait()
 }
 
-// IngestSamples 派生瞬时指标并写桶、评估告警。
+// IngestSamples 派生瞬时指标并写桶、评估告警：按"比率类 / 文件系统类 /
+// 计数器差分类"三类派生（见各自方法），最后单事务并入 5 分钟桶。
 func (m *Monitor) IngestSamples(hostID int64, ss []MetricSample) {
 	idx := indexSamples(ss)
 	now := time.Now()
 	bucket := now.Unix() - now.Unix()%300
 
 	pts := []store.MetricPoint{}
-	fsList := []fsUsage{} // 全部挂载点使用率（阈值评估顺序无关）
 	store1 := func(metric, labels string, v float64) {
 		pts = append(pts, store.MetricPoint{Metric: metric, Labels: labels, V: v})
 	}
 
-	// 比率类（无需差分）
+	m.ingestRatios(hostID, idx, store1)
+	m.ingestFilesystems(hostID, idx, store1)
+	m.ingestCounters(hostID, idx, now, store1)
+
+	if len(pts) > 0 {
+		if err := m.Store.BatchUpsertMetric5m(hostID, bucket, pts); err != nil {
+			m.Logger.Warn("metrics batch upsert failed", "host", hostID, "err", err)
+		}
+	}
+}
+
+// ingestRatios 比率类（无需差分）：内存 / swap / 负载。
+func (m *Monitor) ingestRatios(hostID int64, idx *sampleIndex, store1 func(metric, labels string, v float64)) {
 	if t := idx.sum("node_memory_MemTotal_bytes"); t > 0 {
 		if a := idx.sum("node_memory_MemAvailable_bytes"); a > 0 {
 			store1("mem_used_pct", "", 100*(t-a)/t)
@@ -230,6 +268,18 @@ func (m *Monitor) IngestSamples(hostID int64, ss []MetricSample) {
 		pct := 100 * (st - sf) / st
 		store1("swap_used_pct", "", pct)
 	}
+	for _, l := range []struct{ m string }{{"node_load1"}, {"node_load5"}} {
+		if v := idx.sum(l.m); v > 0 {
+			store1(strings.TrimPrefix(l.m, "node_"), "", v)
+		}
+	}
+}
+
+// ingestFilesystems 文件系统类：逐挂载点使用率入库并评估告警。全部
+// 挂载点收集完再统一评估（顺序无关）——逐点即时评估会把同轮靠后的
+// 正常挂载点误判成"恢复"。
+func (m *Monitor) ingestFilesystems(hostID int64, idx *sampleIndex, store1 func(metric, labels string, v float64)) {
+	fsList := []fsUsage{} // 全部挂载点使用率（阈值评估顺序无关）
 	for _, fs := range idx.byName["node_filesystem_size_bytes"] {
 		mount := fs.Labels["mount"]
 		if mount == "" {
@@ -238,19 +288,15 @@ func (m *Monitor) IngestSamples(hostID int64, ss []MetricSample) {
 		if a, ok := idx.labeled("node_filesystem_avail_bytes", "mount", mount); ok && fs.Value > 0 {
 			pct := 100 * (fs.Value - a.Value) / fs.Value
 			store1("fs_used_pct", "mount="+mount, pct)
-			// 全部挂载点收集完再统一评估（顺序无关）——逐点即时评估会把
-			// 同轮靠后的正常挂载点误判成"恢复"
 			fsList = append(fsList, fsUsage{mount: mount, pct: pct})
 		}
 	}
 	m.alarmFS(hostID, fsList)
-	for _, l := range []struct{ m string }{{"node_load1"}, {"node_load5"}} {
-		if v := idx.sum(l.m); v > 0 {
-			store1(strings.TrimPrefix(l.m, "node_"), "", v)
-		}
-	}
+}
 
-	// 速率/差分类（需要上次计数器）
+// ingestCounters 计数器差分类：CPU / 网络 / 磁盘速率与忙碌度（需要上次
+// 计数器快照差分），差分完落本轮快照供下轮使用。
+func (m *Monitor) ingestCounters(hostID int64, idx *sampleIndex, now time.Time, store1 func(metric, labels string, v float64)) {
 	prevAny := false
 	stAny, _ := m.states.Load(hostID)
 	var prev *scrapeState
@@ -271,7 +317,14 @@ func (m *Monitor) IngestSamples(hostID int64, ss []MetricSample) {
 	cur.netTx = idx.sum("node_network_transmit_bytes_total")
 	cur.diskRead = idx.sum("node_disk_read_bytes_total")
 	cur.diskWrite = idx.sum("node_disk_written_bytes_total")
-	cur.diskIO = idx.sum("node_disk_io_time_seconds_total")
+	// io_time 按设备快照：跨设备求和再差分会让 N 块盘的忙碌度叠成 N×100%
+	// （busy% 是单设备定义）——逐盘分别记，与 fs 指标逐 mount 入库同款
+	cur.diskIO = map[string]float64{}
+	for _, smp := range idx.byName["node_disk_io_time_seconds_total"] {
+		if dev := smp.Labels["device"]; dev != "" {
+			cur.diskIO[dev] = smp.Value
+		}
+	}
 
 	// 计数器回绕/清零（主机重启）时差分非正，速率照算会入库负值——
 	// 该指标本轮跳过，等下一轮重新建立基线；CPU 百分比按定义域钳到 [0,100]
@@ -304,16 +357,17 @@ func (m *Monitor) IngestSamples(hostID int64, ss []MetricSample) {
 		if v, ok := rate(cur.diskWrite, prev.diskWrite); ok {
 			store1("disk_write_bps", "", v)
 		}
-		if v, ok := rate(cur.diskIO, prev.diskIO); ok {
-			store1("disk_busy_pct", "", 100*v)
+		for dev, nowIO := range cur.diskIO {
+			prevIO, has := prev.diskIO[dev]
+			if !has {
+				continue // 新盘无差分基线：本轮跳过，下一轮重建（与回绕同口径）
+			}
+			if v, ok := rate(nowIO, prevIO); ok {
+				store1("disk_busy_pct", "device="+dev, 100*v)
+			}
 		}
 	}
 	m.states.Store(hostID, cur)
-	if len(pts) > 0 {
-		if err := m.Store.BatchUpsertMetric5m(hostID, bucket, pts); err != nil {
-			m.Logger.Warn("metrics batch upsert failed", "host", hostID, "err", err)
-		}
-	}
 }
 
 func prevTime(has bool, p *scrapeState, now time.Time) time.Time {
@@ -323,25 +377,36 @@ func prevTime(has bool, p *scrapeState, now time.Time) time.Time {
 	return now
 }
 
-// alarm 评估阈值并写/清告警（crit ≥95%、warn ≥85%）。
+// 阈值（百分比）：crit 通用 95；warn 对 CPU/内存为 85，文件系统放宽到
+// 88。switch 判定与告警文案共用这几个常量，避免两处口径漂移。
+const (
+	critPct   = 95
+	warnPct   = 85
+	warnFsPct = 88
+)
+
+// pctLabel 生成告警文案里的阈值表示（如 "≥95%"）。
+func pctLabel(p int) string { return fmt.Sprintf("≥%d%%", p) }
+
+// alarm 评估阈值并写/清告警（crit ≥critPct、warn ≥warnPct）。
 func (m *Monitor) alarm(hostID int64, kind string, v float64, what, human string) {
 	set := func(level string) {
-		if err := m.Store.SetHostAlert(hostID, kind, level, fmt.Sprintf("%s %s（阈值 %s）", what, human, map[string]string{"crit": "≥95%", "warn": "≥85%"}[level]), v); err != nil {
+		if err := m.Store.SetHostAlert(hostID, kind, level, fmt.Sprintf("%s %s（阈值 %s）", what, human, map[string]string{"crit": pctLabel(critPct), "warn": pctLabel(warnPct)}[level]), v); err != nil {
 			m.Logger.Warn("alert set failed", "err", err)
 		}
 	}
 	switch {
-	case v >= 95:
+	case v >= critPct:
 		set("crit")
-	case v >= 85:
+	case v >= warnPct:
 		set("warn")
 	default:
 		_ = m.Store.ClearHostAlert(hostID, kind)
 	}
 }
 
-// alarmFS 文件系统阈值（crit ≥95%、warn ≥88%）：任一挂载点超阈值即告警
-// （detail 取最严重挂载点——alert 粒度按主机），全部正常才清。
+// alarmFS 文件系统阈值（crit ≥critPct、warn ≥warnFsPct）：任一挂载点超
+// 阈值即告警（detail 取最严重挂载点——alert 粒度按主机），全部正常才清。
 func (m *Monitor) alarmFS(hostID int64, mounts []fsUsage) {
 	var worst fsUsage
 	for _, mnt := range mounts {
@@ -350,23 +415,16 @@ func (m *Monitor) alarmFS(hostID int64, mounts []fsUsage) {
 		}
 	}
 	set := func(level string) {
-		if err := m.Store.SetHostAlert(hostID, "fs", level, fmt.Sprintf("挂载点 %s 使用率 %.1f%%（阈值 %s）", worst.mount, worst.pct, map[string]string{"crit": "≥95%", "warn": "≥88%"}[level]), worst.pct); err != nil {
+		if err := m.Store.SetHostAlert(hostID, "fs", level, fmt.Sprintf("挂载点 %s 使用率 %.1f%%（阈值 %s）", worst.mount, worst.pct, map[string]string{"crit": pctLabel(critPct), "warn": pctLabel(warnFsPct)}[level]), worst.pct); err != nil {
 			m.Logger.Warn("alert set failed", "err", err)
 		}
 	}
 	switch {
-	case worst.pct >= 95:
+	case worst.pct >= critPct:
 		set("crit")
-	case worst.pct >= 88:
+	case worst.pct >= warnFsPct:
 		set("warn")
 	default:
 		_ = m.Store.ClearHostAlert(hostID, "fs")
 	}
-}
-
-func firstLineOf(s string) string {
-	if i := strings.IndexByte(s, '\n'); i > 0 {
-		return s[:i]
-	}
-	return s
 }

@@ -2,25 +2,25 @@ package console
 
 // 应用执行的领域编排：加载 chart → 相位 plays → values 来源推导
 //（chart values / 主机 release marker）→ hosts 模式回退判定 → executor
-// 执行。从 web 迁入；进度上报经 report.Reporter 接口注入（web 的
-// dbReporter 落库 + SSE），传输侧的 mTLS scheme 探测留 web。
+// 执行。进度上报经 report.Reporter 接口注入（web 的 dbReporter 落库 +
+// SSE），传输侧的 mTLS scheme 探测留 web。
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"slices"
 	"strings"
 	"time"
 
 	"wdp/internal/chart"
+	"wdp/internal/config"
 	"wdp/internal/conn"
 	"wdp/internal/conn/agentc"
 	"wdp/internal/executor"
 	"wdp/internal/inventory"
+	"wdp/internal/markerread"
 	"wdp/internal/model"
 	"wdp/internal/report"
-	"wdp/internal/shellquote"
 	"wdp/internal/store"
 )
 
@@ -57,9 +57,17 @@ func (r *RunService) RunOneApp(ctx context.Context, tgz string, hosts []*model.H
 	}
 	spec := ch.PhaseSpecFor(phase)
 
+	// 并发与任务超时从 wdp.cfg 取值（server 经 CLI 组合根启动，配置已
+	// 装载）；缺省回退保持既有硬编码口径：forks 归一方法内置默认 5，
+	// task_timeout 未配置（<=0）时回退 600
+	taskTimeout := config.Current().Run.TaskTimeout
+	if taskTimeout <= 0 {
+		taskTimeout = 600
+	}
 	opts := executor.Options{
-		Forks: 5, BaseDir: ch.Dir, Phase: phase, WdpVersion: "server", TaskTimeout: 600,
-		Chart: ch, Engine: eng,
+		Forks: config.Current().Forks(), BaseDir: ch.Dir, Phase: phase, WdpVersion: "server",
+		TaskTimeout: taskTimeout,
+		Chart:       ch, Engine: eng,
 	}
 	// values 来源按相位推导（与 CLI 同规则）：部署类相位用 chart values
 	//（过 required + schema 校验）；清除 marker 的相位（uninstall 等）用
@@ -114,6 +122,8 @@ func (r *RunService) RunOneApp(ctx context.Context, tgz string, hosts []*model.H
 	// 组存在但选择器范围内无成员的 play 跳过（按需局部执行的语义：
 	// 只圈了 db 的选择器跑 web+db 应用，web play 空跑）——而不是让
 	// executor 的选择报错把整个 run 判失败
+	// 原地过滤覆盖 PhasePlays 返回的内部切片——当前每次 run 用新 chart 故无害，
+	// 复用 chart 缓存前必须改为新切片。
 	runnable := plays[:0]
 	for _, p := range plays {
 		sel, serr := inv.Select(p.Hosts)
@@ -129,7 +139,8 @@ func (r *RunService) RunOneApp(ctx context.Context, tgz string, hosts []*model.H
 	plays = runnable
 
 	conns := conn.NewManagerWithDefaults(&conn.Defaults{Conn: "agent"})
-	conns.SetConnectConcurrency(10)
+	// 连接并发与 CLI 同口径 2×forks（缺省 5 → 10）
+	conns.SetConnectConcurrency(2 * config.Current().Forks())
 	ex := executor.New(inv, conns, rep, opts)
 	failed := ex.Run(ctx, plays)
 	if failed {
@@ -140,40 +151,53 @@ func (r *RunService) RunOneApp(ctx context.Context, tgz string, hosts []*model.H
 
 // MarkerValues 读取各主机 release marker 还原实际部署 values（与 CLI 的
 // resolveMarkerValues 同语义）：marker 缺失/v1/不可达都报错并列出主机名。
+// 读取、三分类与聚合校验核心收敛于 markerread（与 CLI 共享），此处只保留
+// console 侧的合并报错文案。并发与单主机超时同 RunOneApp 从 wdp.cfg 取值
+// （并发 2×forks、task_timeout 未配置回退 30s）；结果按 hosts 序回放
+// 聚合——并发不引入结果漂移。
 func (r *RunService) MarkerValues(ctx context.Context, ch *chart.Chart, hosts []*model.Host, validate bool) (map[string]map[string]any, error) {
-	script := fmt.Sprintf("cat -- %s 2>/dev/null || echo __MISSING__", shellquote.Quote(ch.MarkerPath()))
 	dc := &conn.Defaults{Conn: "agent"}
+	// 单主机超时取 [run].task_timeout；未配置（<=0，含"不限"）对单次
+	// marker 读取无意义，回退 30s——串行版最坏 N×30s，上百台主机的
+	// uninstall 相位会拖到小时级
+	perHost := 30 * time.Second
+	if t := time.Duration(config.Current().Run.TaskTimeout) * time.Second; t > 0 {
+		perHost = t
+	}
+	results := markerread.Read(ctx, ch.MarkerPath(), hosts,
+		func(ctx context.Context, h *model.Host) (conn.Conn, func(), error) {
+			// 直拨 agentc：不建 Manager，单主机读毕即关
+			ac := agentc.New(h, dc)
+			return ac, func() { _ = ac.Close() }, nil
+		},
+		// 并发与 RunOneApp 的连接并发同口径 2×forks（forks 缺省 5 → 10）
+		markerread.Options{Concurrency: 2 * config.Current().Forks(), PerHostTimeout: perHost})
+
 	out := make(map[string]map[string]any, len(hosts))
 	var missing, legacy, failed []string
-	for _, h := range hosts {
-		ac := agentc.New(h, dc)
-		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		res, err := ac.Exec(cctx, conn.ExecRequest{Script: script, BecomeUser: "root", TimeoutMs: 30_000})
-		cancel()
-		ac.Close()
-		if err != nil {
-			failed = append(failed, h.Name+" ("+err.Error()+")")
-			continue
+	for i, res := range results {
+		name := hosts[i].Name
+		switch res.Kind {
+		case markerread.KindOK:
+			out[name] = res.Marker.Values
+		case markerread.KindMissing:
+			missing = append(missing, name)
+		case markerread.KindLegacy:
+			legacy = append(legacy, name)
+		default:
+			// failed 明细按 console 侧原文案：执行错误原样、退出码带
+			// stderr（截断 120）、解析失败注明 marker unreadable
+			var d string
+			switch {
+			case res.ParseErr != nil:
+				d = "marker unreadable: " + res.ParseErr.Error()
+			case res.Err != nil:
+				d = res.Err.Error()
+			default:
+				d = fmt.Sprintf("exit %d: %s", res.Code, Truncate(strings.TrimSpace(res.Stderr), 120))
+			}
+			failed = append(failed, name+" ("+d+")")
 		}
-		if res.Code != 0 {
-			failed = append(failed, fmt.Sprintf("%s (exit %d: %s)", h.Name, res.Code, Truncate(strings.TrimSpace(res.Stderr), 120)))
-			continue
-		}
-		stdout := strings.TrimSpace(res.Stdout)
-		if stdout == "__MISSING__" || stdout == "" {
-			missing = append(missing, h.Name)
-			continue
-		}
-		mk, perr := chart.ParseMarker([]byte(stdout))
-		if perr != nil {
-			failed = append(failed, h.Name+" (marker unreadable: "+perr.Error()+")")
-			continue
-		}
-		if mk.Values == nil {
-			legacy = append(legacy, h.Name)
-			continue
-		}
-		out[h.Name] = mk.Values
 	}
 	if len(missing) > 0 || len(legacy) > 0 || len(failed) > 0 {
 		var parts []string
@@ -190,16 +214,11 @@ func (r *RunService) MarkerValues(ctx context.Context, ch *chart.Chart, hosts []
 			strings.Join(parts, "; "))
 	}
 	if validate {
-		for host, v := range out {
-			if err := ch.ValidateRequired(v); err != nil {
-				return nil, fmt.Errorf("host %s: %w", host, err)
-			}
-			if err := ch.ValidateValuesSchema(v); err != nil {
-				return nil, fmt.Errorf("host %s: %w", host, err)
-			}
-			if err := ch.ValidateSubchartsSchema(v); err != nil {
-				return nil, fmt.Errorf("host %s: %w", host, err)
-			}
+		// 聚合校验（与 CLI 同口径）：相同 values 只校验一次、归因与序列化
+		// 失败主机按主机名字典序稳定（此前逐主机全量校验、报错主机随
+		// map 迭代序漂移）
+		if err := markerread.Validate(ch, out); err != nil {
+			return nil, err
 		}
 	}
 	return out, nil
@@ -243,17 +262,10 @@ func UnknownHostPattern(pattern string, known map[string]bool) (string, bool) {
 }
 
 // FirstHostValues 多主机 marker values 不一致时按主机名排序取首个
-// （确定性：run 级 values 不随 map 迭代顺序漂移）。
+// （确定性：run 级 values 不随 map 迭代顺序漂移；实现收敛于
+// markerread.FirstValues，与 CLI 共享同一口径）。
 func FirstHostValues(hostValues map[string]map[string]any) map[string]any {
-	if len(hostValues) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(hostValues))
-	for name := range hostValues {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return hostValues[names[0]]
+	return markerread.FirstValues(hostValues)
 }
 
 // Truncate 截断长文本（marker 错误信息等入 message 用）。

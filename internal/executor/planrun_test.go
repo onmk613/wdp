@@ -15,9 +15,11 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"wdp/internal/model"
 	"wdp/internal/plan"
 )
 
@@ -156,5 +158,75 @@ func TestRunPlanPayloadMismatchAborts(t *testing.T) {
 	}
 	if !strings.Contains(rep2.joined(), "unavailable via --chart-dir") {
 		t.Fatalf("缺失应告警:\n%s", rep2.joined())
+	}
+}
+
+// TestTaskOfMirrorsResolvedTask 字段对账（参考 playbook/taskdoc 的对账
+// 测试先例）：taskOf 手工镜像 plan.ResolvedTask → model.Task，两结构体
+// 独立演化，漏抄一个字段不会有编译错误，只会在 plan 执行路径（apply/
+// agent 自治）静默丢数据、与 run 路径行为分叉。此处用反射逐字段点名：
+// 新增 ResolvedTask 字段必须同步 taskOf，或显式列入不镜像清单并注明理由。
+func TestTaskOfMirrorsResolvedTask(t *testing.T) {
+	become := true
+	sub := &plan.ResolvedTask{Idx: 2, Module: "sh", FreeForm: "x"}
+	rt := &plan.ResolvedTask{
+		Idx: 7, Label: "zz", Module: "sh", Rollback: "full", Hook: "post_deploy",
+		ChartRef: "jdk@1.0", TasksFrom: "install",
+		ChartVars: map[string]any{"k": "v"}, ChartHosts: "webservers",
+		ChartValuesFrom: []string{"vals/prod.yaml"},
+		Args:            map[string]any{"a": 1}, FreeForm: "echo hi",
+		When: []string{"true"}, Loop: []any{"a"}, LoopVar: "it",
+		Register: "r", Notify: []string{"n"}, Tags: []string{"t"},
+		Environment: map[string]string{"K": "V"}, IgnoreErrors: true,
+		Retries: 3, DelaySec: 4, TimeoutSec: 5,
+		Become: &become, BecomeUser: "root", ChangedWhen: "true", FailedWhen: "false",
+		Until: "ok", Output: "none", NoLog: true, DelegateTo: "h2", RunOnce: true,
+		Block: []*plan.ResolvedTask{sub}, Rescue: []*plan.ResolvedTask{sub}, Always: []*plan.ResolvedTask{sub},
+	}
+	got := taskOf(rt)
+
+	// 改名落点：Idx → PlanIdx（计划内序号），Label → Name（仅非缺省名时回填）
+	renames := map[string]string{"Idx": "PlanIdx", "Label": "Name"}
+	// 不镜像清单：新增条目必须像这样注明理由
+	skip := map[string]string{
+		"Rollback": "模块声明的回滚类别（full|partial|none|readonly），仅计划展示用，执行侧不消费",
+		"Block":    "组字段递归镜像，下方单独断言",
+		"Rescue":   "组字段递归镜像，下方单独断言",
+		"Always":   "组字段递归镜像，下方单独断言",
+	}
+	src := reflect.TypeOf(*rt)
+	dst := reflect.Indirect(reflect.ValueOf(got))
+	for i := range src.NumField() {
+		f := src.Field(i)
+		if _, ok := skip[f.Name]; ok {
+			continue
+		}
+		name := renames[f.Name]
+		if name == "" {
+			name = f.Name
+		}
+		v := dst.FieldByName(name)
+		if !v.IsValid() {
+			t.Errorf("ResolvedTask 字段 %q 的落点 model.Task.%s 不存在（字段改名？同步 taskOf）", f.Name, name)
+			continue
+		}
+		if v.IsZero() {
+			t.Errorf("ResolvedTask 字段 %q 未被 taskOf 镜像进 model.Task.%s（漏抄？）", f.Name, name)
+		}
+	}
+
+	// 组字段递归镜像（含子任务自身的字段）
+	for _, seg := range [3][]*model.Task{got.Block, got.Rescue, got.Always} {
+		if len(seg) != 1 || seg[0].PlanIdx != 2 || seg[0].Module != "sh" || seg[0].FreeForm != "x" {
+			t.Errorf("组字段未递归镜像: %#v", seg)
+		}
+	}
+	// IsHandler 恒 false：handler 标记由 playsOf 按 Handlers 分片另行置位
+	if got.IsHandler {
+		t.Error("taskOf 不应置 IsHandler")
+	}
+	// Label 与 Module 相同（缺省名）时 Name 不回填
+	if anon := taskOf(&plan.ResolvedTask{Module: "sh", Label: "sh"}); anon.Name != "" {
+		t.Errorf("Label==Module 时不应回填 Name: %q", anon.Name)
 	}
 }

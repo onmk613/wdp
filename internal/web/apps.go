@@ -37,8 +37,10 @@ var maxUploadBytes int64 = 2 << 30
 // 上传低频，一把锁足够。
 
 // runQueueTimeout run 排队等主机闸门的上限：闸门被长执行占用时排队不能
-// 无限等（goroutine 只增不减，server 关停也无法中断）。
-const runQueueTimeout = 30 * time.Minute
+// 无限等（goroutine 只增不减，server 关停也无法中断）。只封顶排队阶段，
+// 不封顶执行（apps_run.go：取得闸门后执行换挂独立 ctx）。
+// 变量而非常量：测试收窄用（同 maxUploadBytes）。
+var runQueueTimeout = 30 * time.Minute
 
 // appsDir 应用制品根目录。
 func (s *Server) appsDir() string {
@@ -100,21 +102,6 @@ func (s *Server) artifactReferenced(name, version string) bool {
 	}
 	ref, herr := s.st.HasVersion(a.ID, version)
 	return herr == nil && ref
-}
-
-// firstHostValues 按主机名排序取首个 hostValues。约束：map 迭代随机，
-// 多主机 marker values 不一致时选哪台必须确定，否则 run 级 values 每次
-// 执行都不一样；空 map 返回 nil（调用方保留原 values）。
-func firstHostValues(hostValues map[string]map[string]any) map[string]any {
-	if len(hostValues) == 0 {
-		return nil
-	}
-	names := make([]string, 0, len(hostValues))
-	for name := range hostValues {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return hostValues[names[0]]
 }
 
 // saveTgzTemp 把上传的 tgz 落临时文件（此时还不知道 chart.yaml 的名称/
@@ -209,7 +196,13 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, in)
-	return err
+	// 写入与 Close 错误都要返回：NFS 等异步落盘文件系统上数据可能在
+	// Close 时才真正刷出（半截文件/配额溢出此时才报错），defer 丢弃会把
+	// 截断制品当成功留给上层 rename 归位（与 saveTgzTemp 同口径）
+	_, werr := io.Copy(out, in)
+	cerr := out.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
 }

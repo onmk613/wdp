@@ -91,13 +91,36 @@ func fileSHA256(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// putFileOpts 是 putFile 的参数集：mode 与 hasMode 合并为 *fs.FileMode
+// （nil = 未指定权限，上传沿用通道缺省；非 nil = 始终显式下发，含调用方
+// 的缺省口径 0644/0755），其余字段与原位置参数一一对应。
+type putFileOpts struct {
+	data   []byte
+	dest   string
+	mode   *fs.FileMode
+	backup bool
+	owner  string
+	group  string
+}
+
+// modePtr 返回权限值的指针（构造 putFileOpts.mode 字面量用）。
+func modePtr(m fs.FileMode) *fs.FileMode { return &m }
+
 // putFile 将数据落盘到远端：校验和对比幂等、可选备份、可选属主设置。
 // 返回 (changed, 失败结果)。check 模式下只读对比返回变更预估；
 // diff 模式（--diff）追加内容级 unified diff。
-func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMode bool, owner, group string) (bool, *Result) {
-	// 属主要求提权（与 file 模块行为一致：显式报错而非静默跳过）
-	if (owner != "" || group != "") && !rc.Become {
-		return false, Fail("setting owner/group requires become: true (%s)", dest)
+func putFile(rc *RunContext, o putFileOpts) (bool, *Result) {
+	data, dest, owner, group := o.data, o.dest, o.owner, o.group
+	backup := o.backup
+	// mode/hasMode 展开回 (权限值, 是否指定)：函数体按这两个变量走原逻辑
+	var mode int64
+	hasMode := o.mode != nil
+	if hasMode {
+		mode = int64(o.mode.Perm())
+	}
+	// 属主要求提权（requireBecomeForOwner：文件类模块共用口径）
+	if bad := requireBecomeForOwner(rc, owner, group, dest); bad != nil {
+		return false, bad
 	}
 	sum := sha256hex(data)
 	remote, exists, bad := remoteChecksum(rc, dest)
@@ -105,69 +128,77 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 		return false, bad
 	}
 	changed := !exists || remote != sum
-	// ownerDrift 探测属主漂移（check 预演与实跑判定共用；此前 check 模式
-	// 完全不评估属主，实跑修复了属主却报 changed=false，notify 不触发）
+	// ownerDrift 探测属主漂移（此前 check 模式完全不评估属主，实跑修复了
+	// 属主却报 changed=false，notify 不触发）。内容变更时实走"上传 + chown"
+	// 路径无需探测（chown 无条件执行）；但 check 预估需要——实跑会改属主，
+	// 预估与 diff 必须同样覆盖。远端不存在（新建文件）时无现状可比对，
+	// 属主设置隐含在"写入"里。实跑的内容未变收尾改走 fixAttrs（探测在
+	// 校正内部进行，不共用此处的预计算）。
 	ownerDrift := false
-	if !changed && (owner != "" || group != "") {
-		curOwner, curGroup, ok, obad := remoteOwnerGroup(rc, dest)
+	if (owner != "" || group != "") && exists && rc.CheckMode {
+		drift, obad := ownerGroupDrift(rc, dest, owner, group)
 		if obad != nil {
 			return false, obad
 		}
-		ownerDrift = !ok || (owner != "" && curOwner != owner) || (group != "" && curGroup != group)
+		ownerDrift = drift
 	}
 	if rc.CheckMode {
-		if !changed && hasMode {
-			if cur, ok, mbad := remoteMode(rc, dest); mbad != nil {
+		contentChanged := changed
+		// mode 漂移同样不因内容变更而跳过：实跑的内容变更路径以带 mode
+		// 的上传落盘，check 只报内容 diff 会漏报权限变化（与实跑变更面
+		// 不一致）。远端不存在时无现状可比，跳过。
+		modeDrift := false
+		var curMode int64
+		if hasMode && exists {
+			cur, ok, mbad := remoteMode(rc, dest)
+			if mbad != nil {
 				return false, mbad
-			} else if ok && cur != mode {
-				changed = true
+			}
+			if ok && cur != mode {
+				modeDrift, curMode = true, cur
 			}
 		}
-		if ownerDrift {
-			changed = true
-		}
+		attrDrift := ownerDrift || modeDrift
+		changed = contentChanged || attrDrift
 		var res *Result
-		if changed {
-			if !exists || remote != sum {
-				res = &Result{Changed: true, Msg: fmt.Sprintf("[check] %s will be written (%d bytes)", dest, len(data))}
-				if rc.DiffMode {
-					res.Diff = contentDiff(rc, dest, exists, string(data))
-				}
-			} else {
-				res = &Result{Changed: true, Msg: fmt.Sprintf("[check] %s content is unchanged, attributes will be corrected", dest)}
-				if rc.DiffMode {
-					res.Diff = modeDiff(rc, dest, mode)
-				}
+		switch {
+		case contentChanged:
+			msg := fmt.Sprintf("[check] %s will be written (%d bytes)", dest, len(data))
+			if attrDrift {
+				msg += ", attributes will be corrected"
 			}
-		} else {
+			res = &Result{Changed: true, Msg: msg}
+			if rc.DiffMode {
+				parts := []string{contentDiff(rc, dest, exists, string(data))}
+				if modeDrift {
+					parts = append(parts, fmt.Sprintf("- mode: %04o\n+ mode: %04o", curMode, mode))
+				}
+				if ownerDrift {
+					parts = append(parts, ownerDiff(rc, dest, owner, group)...)
+				}
+				res.Diff = strings.Join(parts, "\n")
+			}
+		case attrDrift:
+			res = &Result{Changed: true, Msg: fmt.Sprintf("[check] %s content is unchanged, attributes will be corrected", dest)}
+			if rc.DiffMode {
+				res.Diff = modeDiff(rc, dest, mode)
+			}
+		default:
 			res = &Result{Changed: false, Msg: fmt.Sprintf("[check] %s content and attributes are unchanged", dest)}
 		}
 		return changed, res
 	}
 	if !changed {
 		// 内容未变时仍校正权限/属主（变更计入 changed，不再被丢弃）
-		if hasMode {
-			if fixed, bad := chmodIfDiffers(rc, dest, mode); bad != nil {
-				return false, bad
-			} else if fixed {
-				changed = true
-			}
+		fixedMode, fixedOwner, bad := fixAttrs(rc, dest, o.mode, owner, group)
+		if bad != nil {
+			return false, bad
 		}
-		if ownerDrift {
-			if bad := chownPath(rc, dest, owner, group); bad != nil {
-				return false, bad
-			}
-			changed = true
-		}
-		return changed, nil
+		return fixedMode || fixedOwner, nil
 	}
 	if exists && backup {
-		bak := fmt.Sprintf("%s.bak.%d", dest, time.Now().UnixNano()) // 亚秒：同秒二次备份不再覆盖
-		script := fmt.Sprintf("cp -a -- %s %s", shellquote.Quote(dest), shellquote.Quote(bak))
-		if out, bad := rc.exec(script); bad != nil {
+		if bad := backupRemote(rc, dest); bad != nil {
 			return false, bad
-		} else if out.Code != 0 {
-			return false, Fail("backup failed: %s", firstLine(out.Stderr))
 		}
 	}
 	// 变更前登记回滚动作（auto_rollback）：已存在 → 快照恢复；新建 → 回滚时删除
@@ -187,6 +218,19 @@ func putFile(rc *RunContext, data []byte, dest string, mode int64, backup, hasMo
 		}
 	}
 	return true, nil
+}
+
+// backupRemote 将远端路径备份为 <path>.bak.<UnixNano>（cp -a 保留属主与
+// 权限；亚秒时间戳：同秒二次备份不再覆盖）。putFile 与 lineinfile 共用。
+func backupRemote(rc *RunContext, path string) *Result {
+	bak := fmt.Sprintf("%s.bak.%d", path, time.Now().UnixNano())
+	script := fmt.Sprintf("cp -a -- %s %s", shellquote.Quote(path), shellquote.Quote(bak))
+	if out, bad := rc.exec(script); bad != nil {
+		return bad
+	} else if out.Code != 0 {
+		return Fail("backup failed: %s", firstLine(out.Stderr))
+	}
+	return nil
 }
 
 // chmodIfDiffers 校正权限（八进制比较），返回是否发生变更。
@@ -262,6 +306,19 @@ func modeDiff(rc *RunContext, path string, want int64) string {
 	return fmt.Sprintf("- mode: %04o\n+ mode: %04o", cur, want)
 }
 
+// ownerDiff 生成属主校正的 diff 行（内容变更 + 属主漂移同时发生时的
+// check/diff 输出；格式与 file 模块 fixFileAttrs 的 owner 行一致）。
+func ownerDiff(rc *RunContext, path, owner, group string) []string {
+	co, cg, ok, bad := remoteOwnerGroup(rc, path)
+	if bad != nil || !ok {
+		return []string{fmt.Sprintf("+ owner: %s:%s", owner, group)}
+	}
+	return []string{
+		fmt.Sprintf("- owner: %s:%s", co, cg),
+		fmt.Sprintf("+ owner: %s:%s", owner, group),
+	}
+}
+
 func firstLine(s string) string {
 	if before, _, ok := strings.Cut(s, "\n"); ok {
 		return strings.TrimSpace(before)
@@ -280,7 +337,7 @@ func contentDiff(rc *RunContext, dest string, exists bool, want string) string {
 	if !exists {
 		return diffText("", want, "(remote does not exist)", dest)
 	}
-	buf := &cappedBuffer{cap: maxDiffBytes}
+	buf := &cappedBuffer{max: maxDiffBytes}
 	if err := rc.Conn.DownloadFile(rc.Ctx, dest, buf); err != nil {
 		return fmt.Sprintf("(failed to read remote content: %v)", err)
 	}

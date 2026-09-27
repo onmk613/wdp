@@ -77,13 +77,14 @@ func authMethods(h *model.Host) ([]ssh.AuthMethod, func(), []string) {
 	// 是独立的 publickey 方法，签名者非空时才会排在文件密钥后生效，
 	// 见函数注释）
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
-		if conn, err := net.Dial("unix", sock); err == nil {
-			agentCl := agent.NewClient(conn)
+		// 变量名避开包名 conn（此处指 agent 的 unix 连接，非 conn 包）
+		if agentSock, err := net.Dial("unix", sock); err == nil {
+			agentCl := agent.NewClient(agentSock)
 			if agentSigners, err := agentCl.Signers(); err == nil && len(agentSigners) > 0 {
 				signers = append(signers, agentSigners...)
-				cleanups = append(cleanups, func() { _ = conn.Close() })
+				cleanups = append(cleanups, func() { _ = agentSock.Close() })
 			} else {
-				_ = conn.Close() // 无可用 signer，立即释放
+				_ = agentSock.Close() // 无可用 signer，立即释放
 			}
 		}
 	}

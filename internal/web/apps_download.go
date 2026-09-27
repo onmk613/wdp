@@ -5,15 +5,12 @@ package web
 // 可直接 `wdp apply` 或再上传导入。下载是只读操作（app:view），进审计。
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
-
-	"wdp/internal/store"
 )
 
 func (s *Server) handleDownloadChart(w http.ResponseWriter, r *http.Request) {
@@ -34,12 +31,8 @@ func (s *Server) handleDownloadChart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tgz, err := s.st.VersionTgz(id, version)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("version %s not found", version))
-		return
-	}
 	if err != nil {
-		s.writeInternal(w, err)
+		s.writeStoreErr(w, err)
 		return
 	}
 	f, err := os.Open(tgz)

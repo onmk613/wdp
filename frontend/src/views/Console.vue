@@ -10,8 +10,8 @@ import { authUser, authPerms, can, resetAuth } from '../auth'
 const route = useRoute()
 const router = useRouter()
 
-// 菜单高亮取自路由：/apps/new 独立高亮；编辑器（/apps/:id/edit）归属「应用列表」；
-// 主机详情（/hosts/:id）归属「主机管理」
+// 菜单高亮取自路由：/apps/new 独立高亮；编辑器（/apps/ide，query 传参）
+// 归属「应用列表」；主机详情（/hosts/:id）归属「主机管理」
 const activeMenu = computed(() => {
   const p = route.path
   if (p === '/apps/new') return 'apps/new'

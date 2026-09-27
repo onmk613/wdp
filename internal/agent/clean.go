@@ -44,10 +44,24 @@ func (s *Server) handleShutdown(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.logInfo("shutdown requested, self-cleanup follows (systemd unit %q, %d extra path(s))", s.cleanupUnit(req.SystemdUnit), len(req.Files))
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	resp := map[string]any{"ok": true}
+	// files 的白名单判定与删除收敛到 removeExtraPaths 单一实现（此前此处
+	// 平行实现预检逻辑，与清理路径重复且易漂移；performCleanup 侧返回值
+	// 被忽略，"被拒路径在响应中说明"实际只靠这条平行实现）。提前同步执行
+	// 并用其返回值组装响应：清理若推迟到响应后的 goroutine，越界拒绝若只
+	// 写日志，调用方无从得知额外路径没被删（会误以为退役完成）。拒绝不
+	// 影响默认清理与退出流程，状态码保持 200（既有调用方只看状态码）。
+	_, refused := s.removeExtraPaths(req.Files)
+	if len(refused) > 0 {
+		resp["refused_files"] = refused
+		s.logWarn("shutdown: refusing to remove %d out-of-scope path(s): %v (allowed: agent binary, cert dir, runs dir)", len(refused), refused)
+	}
+	writeJSON(w, http.StatusOK, resp)
 	go func() {
 		time.Sleep(200 * time.Millisecond) // 等响应送达
-		s.initiateShutdown(req, true)
+		// files 已在响应前处理完毕（含拒绝说明），这里只传单元名走默认
+		// 清理路径，避免对同一批路径二次 RemoveAll
+		s.initiateShutdown(shutdownReq{SystemdUnit: req.SystemdUnit}, true)
 	}()
 }
 
@@ -88,6 +102,9 @@ func (s *Server) performCleanup(req shutdownReq) {
 	s.disableSystemService(unit)
 	s.removeCertFiles()
 	s.removeBootstrapSidecars()
+	// /shutdown 路径的 files 已由 handleShutdown 在响应前处理（返回值用于
+	// 组装 refused_files）；这里兜底处理直接调用 initiateShutdown 的场景
+	//（拒绝只落日志，removeExtraPaths 逐条记录）
 	s.removeExtraPaths(req.Files)
 	s.removeSelfBinary()
 	s.removeUnitFile(unit)
@@ -134,9 +151,52 @@ func (s *Server) removeCertFiles() {
 	}
 }
 
+// extraPathAllowed 判定 /shutdown files 参数的一条路径是否允许删除。
+// files 是经认证可达的"任意路径 os.RemoveAll"原语——只拒根路径时，持有
+// 控制端证书的一方可让 root agent 删除目标机上任意文件。控制端实际调用
+// （web 删除即退役）只发空 JSON，files 的合法来源仅剩 agent 自清理清单
+// 本身，故收紧到 agent 自身领地：自身二进制及其自举附属（<bin>.log/.pid
+// 与 Windows 自删改名残留）、证书材料所在目录、runs 持久化根目录。退役
+// 场景要删的恰是这些路径，合法用法不受影响；越界路径拒绝并在响应与日志
+// 中说明（调用方可改走 /file 或登录主机清理）。
+func (s *Server) extraPathAllowed(p string) bool {
+	p = filepath.Clean(p)
+	// 自身二进制与自举附属/自删残留（removeBootstrapSidecars/removeSelfBinary 清单）
+	if s.selfBin != "" {
+		if p == s.selfBin || p == s.selfBin+".wdp-agent-deleted" {
+			return true
+		}
+		for _, suffix := range []string{".log", ".pid"} {
+			if p == s.selfBin+suffix {
+				return true
+			}
+		}
+	}
+	// 证书材料所在目录（removeCertFiles 的清理对象与其目录回收）
+	for _, f := range []string{s.tlsCertFile, s.tlsKeyFile, s.tlsCAFile} {
+		if f == "" {
+			continue
+		}
+		dir := filepath.Dir(f)
+		if dir != "." && dir != string(filepath.Separator) &&
+			(p == dir || strings.HasPrefix(p, dir+string(filepath.Separator))) {
+			return true
+		}
+	}
+	// runs 持久化根目录（自治执行的 journal/state 落点，退役时数据一并下线）
+	if root := s.runsRoot(); root != "" && root != string(filepath.Separator) {
+		if p == root || strings.HasPrefix(p, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
 // removeExtraPaths 删除调用方指定的文件或目录（远程清理附加项）。
-// 空串跳过；解析到根路径拒删（手滑防呆）。RemoveAll 兼容文件与目录。
-func (s *Server) removeExtraPaths(paths []string) {
+// 空串跳过；根路径拒删（手滑防呆）；越出 agent 领地的路径拒绝（见
+// extraPathAllowed）。RemoveAll 兼容文件与目录。返回（已受理, 被拒），
+// 被拒路径由调用方在响应/日志中说明。
+func (s *Server) removeExtraPaths(paths []string) (accepted, refused []string) {
 	for _, p := range paths {
 		p = strings.TrimSpace(p)
 		if p == "" {
@@ -144,12 +204,20 @@ func (s *Server) removeExtraPaths(paths []string) {
 		}
 		if abs, err := filepath.Abs(p); err == nil && abs == string(filepath.Separator) {
 			s.logWarn("cleanup refused to remove root path %s", p)
+			refused = append(refused, p)
 			continue
 		}
+		if !s.extraPathAllowed(p) {
+			s.logWarn("cleanup refused to remove out-of-scope path %s (allowed: agent binary, cert dir, runs dir)", p)
+			refused = append(refused, p)
+			continue
+		}
+		accepted = append(accepted, p)
 		if err := os.RemoveAll(p); err != nil {
 			s.logWarn("cleanup failed to remove %s: %v", p, err)
 		}
 	}
+	return accepted, refused
 }
 
 // removeSelfBinary 删除自身二进制。运行中的进程在 Unix 上可自删；

@@ -16,20 +16,22 @@ import (
 	"wdp/internal/shellquote"
 )
 
-// sftpCopy 在 SFTP 通道上执行 copy 并响应 ctx：SFTP 协议本身无 deadline，
-// 取消时强制关闭文件与 SFTP 客户端解除阻塞（连接降级为 exec 流式通道，
-// 下次传输自动走 streamUpload——它原生响应 ctx）。killSftp 只关闭不置
-// nil：并发共享该连接的传输持有的指针继续安全（已关闭通道上的操作返回
-// 错误），不会 TOCTOU nil 解引用。
-func (c *Conn) sftpCopy(ctx context.Context, f *sftp.File, r io.Reader) error {
+// sftpCopy 在 SFTP 通道上执行一次 copy（src → dst）并响应 ctx：SFTP
+// 协议本身无 deadline，取消时强制关闭文件与 SFTP 客户端解除阻塞（连接
+// 降级为 exec 流式通道，下次传输自动走 streamUpload——它原生响应 ctx）。
+// killSftp 只关闭不置 nil：并发共享该连接的传输持有的指针继续安全
+// （已关闭通道上的操作返回错误），不会 TOCTOU nil 解引用。
+// 双向通用：f 是本次传输涉及的 sftp 文件（上传为写端、下载为读端），
+// 取消时关闭它解除阻塞；上传方向 io.Copy(f, r)，下载方向 io.Copy(w, f)。
+func (c *Conn) sftpCopy(ctx context.Context, f *sftp.File, dst io.Writer, src io.Reader) error {
 	if ctx == nil {
-		_, err := io.Copy(f, r)
+		_, err := io.Copy(dst, src)
 		return err
 	}
 	type res struct{ err error }
 	done := make(chan res, 1)
 	go func() {
-		_, err := io.Copy(f, r)
+		_, err := io.Copy(dst, src)
 		done <- res{err}
 	}()
 	select {
@@ -61,7 +63,7 @@ func (c *Conn) UploadFile(ctx context.Context, dst string, r io.Reader, mode fs.
 		if err != nil {
 			return fmt.Errorf("failed to create remote temp file: %w", err)
 		}
-		if err := c.sftpCopy(ctx, f, r); err != nil {
+		if err := c.sftpCopy(ctx, f, f, r); err != nil {
 			f.Close()
 			_ = sc.Remove(tmp)
 			return fmt.Errorf("write failed: %w", err)
@@ -130,32 +132,18 @@ func (c *Conn) DownloadFile(ctx context.Context, src string, w io.Writer) error 
 			return fmt.Errorf("failed to open remote file: %w", err)
 		}
 		defer f.Close()
-		// SFTP 读方向的 copy 包一层 ctx 看护（读阻塞同样可无限挂起）
-		type res struct{ err error }
-		done := make(chan res, 1)
-		go func() {
-			_, err := io.Copy(w, f)
-			done <- res{err}
-		}()
-		select {
-		case r := <-done:
-			return r.err
-		case <-ctx.Done():
-			_ = f.Close()
-			c.killSftp()
-			<-done
-			return ctx.Err()
+		// SFTP 读方向的 copy 同样包 ctx 看护（读阻塞与写阻塞一样可无限
+		// 挂起），复用 sftpCopy 的双向实现
+		if err := c.sftpCopy(ctx, f, w, f); err != nil {
+			return err
 		}
 	}
-	res, err := c.Exec(ctx, conn.ExecRequest{Script: fmt.Sprintf("cat -- %s", shellquote.Quote(src))})
-	if err != nil {
-		return err
+	// cat 降级路径：stdout 流式直写目标（execTo），文件本体不做内存缓冲
+	// 也绝不可截断——此前经 Exec 全量缓冲，cat 大文件即控制端 OOM
+	if err := c.execTo(ctx, fmt.Sprintf("cat -- %s", shellquote.Quote(src)), w); err != nil {
+		return fmt.Errorf("cat failed: %w", err)
 	}
-	if res.Code != 0 {
-		return fmt.Errorf("cat failed: %s", res.Stderr)
-	}
-	_, err = io.WriteString(w, res.Stdout)
-	return err
+	return nil
 }
 
 // mkdirRemote 逐级创建远端目录（已存在则忽略）。

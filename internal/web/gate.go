@@ -73,6 +73,9 @@ func (g *hostGate) AcquireCtx(ctx context.Context, hostIDs []int64) (func(), boo
 				}
 				return nil, false
 			case <-time.After(50 * time.Millisecond):
+				// 轮询而非 channel 广播：锁逐台升序获取，广播需按锁
+				// 注册/唤醒 waiter；闸门等待通常以秒计，50ms 轮询是
+				// 最简取舍（TryAcquire 同款）。
 			}
 		}
 	}

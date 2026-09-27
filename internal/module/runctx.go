@@ -18,6 +18,12 @@ import (
 	"wdp/internal/render"
 )
 
+// defaultTransferLimit 是传输类上限的内置兜底（2GiB）：本地分发源读取
+// （max_upload_mb）、下载响应体（max_download_mb）与归档成员解压总量在
+// 配置未注入（<=0）时共用同一缺省——无上限时大文件/解压炸弹可在超时
+// 窗口内累积数 GB 内存打爆控制端。
+const defaultTransferLimit int64 = 2 << 30
+
 // tempSuffix 生成不可预测的临时文件后缀（crypto/rand）：
 // 远端 /tmp 下 UnixNano 时间戳路径可被本机低权限用户预创建符号链接劫持
 // （上传/执行/快照重定向到任意路径）。
@@ -42,17 +48,14 @@ func uploadLimit(rc *RunContext) int64 {
 	if rc.MaxUploadBytes > 0 {
 		return rc.MaxUploadBytes
 	}
-	return 2 << 30
+	return defaultTransferLimit
 }
 
 // readLocalCap 读取本地文件并封顶 cap 字节（<=0 = 内置 2GiB）。
-// 读中截断 + 超限 fail-loud：本地与远端两条读取路径此前口径不一
-// （有的走 max_upload_mb，有的裸 ReadAll/ReadFile/DownloadFile），
-// 压缩比高的归档或一条 `yes` 的远端文件即可打爆控制端——web 控制台是
-// 进程内执行，OOM 会连整个控制台一起带走。
+// 读中截断 + 超限 fail-loud，防大文件 OOM 控制端。
 func readLocalCap(rc *RunContext, path string, cap int64) ([]byte, error) {
 	if cap <= 0 {
-		cap = 2 << 30
+		cap = defaultTransferLimit
 	}
 	f, err := os.Open(path)
 	if err != nil {
@@ -69,17 +72,19 @@ func readLocalCap(rc *RunContext, path string, cap int64) ([]byte, error) {
 	return data, nil
 }
 
-// cappedBuffer 是带上限的字节缓冲：超过 cap 后继续接收但丢弃（不中断
+// cappedBuffer 是带上限的字节缓冲：超过 max 后继续接收但丢弃（不中断
 // 上游读取，便于把"超限"作为结果上报而不是当成传输失败），并记录总长度。
+// 字段名不用 cap：遮蔽内建 cap() 易在阅读时造成误导。
 type cappedBuffer struct {
 	buf   bytes.Buffer
-	cap   int64
+	max   int64
 	total int64
 }
 
 func (w *cappedBuffer) Write(p []byte) (int, error) {
 	w.total += int64(len(p))
-	if room := w.cap - int64(w.buf.Len()); room > 0 {
+	// 只保留前 max 字节，超出部分仅计数（截断与否由 total > max 判定）
+	if room := w.max - int64(w.buf.Len()); room > 0 {
 		if int64(len(p)) <= room {
 			w.buf.Write(p)
 		} else {
@@ -90,7 +95,7 @@ func (w *cappedBuffer) Write(p []byte) (int, error) {
 }
 
 // truncated 报告是否发生截断。
-func (w *cappedBuffer) truncated() bool { return w.total > w.cap }
+func (w *cappedBuffer) truncated() bool { return w.total > w.max }
 
 // RunContext 是模块执行上下文（单主机、单任务项）。
 type RunContext struct {
@@ -106,20 +111,26 @@ type RunContext struct {
 	TimeoutMs  int64          // 任务超时毫秒（0 不限），透传给连接层
 	CheckMode  bool           // check 模式：模块预演不实际变更
 	DiffMode   bool           // diff 模式：check 下产出内容级差异
-	// MaxDownloadBytes 是 get_url 下载响应体上限（字节；0 = 内置默认 2GiB）。
-	// 由组合根经 CLI --max-download-mb / wdp.cfg [transfer].max_download_mb 注入。
+	// MaxDownloadBytes get_url 下载响应体上限（字节；0 = 默认 2GiB），
+	// 经 --max-download-mb / wdp.cfg [transfer].max_download_mb 注入。
 	MaxDownloadBytes int64
-	// MaxUploadBytes 是 copy/unarchive 读取本地分发源的上限（字节；0 =
-	// 内置默认 2GiB）。分发路径整体读入内存再上传（checksum 短路/diff
-	// 依赖内容），forks 并发下内存 = 并发数 × 文件大小，误配大文件直接
-	// 打爆控制端——get_url 有 max_download_mb 上限而这两个最常用的分发
-	// 路径此前没有任何上限。经 wdp.cfg [transfer].max_upload_mb 注入。
+	// MaxUploadBytes copy/unarchive 本地分发源读取上限（字节；0 = 默认 2GiB），
+	// 经 wdp.cfg [transfer].max_upload_mb 注入，防 forks 并发下内存打爆。
 	MaxUploadBytes int64
 	// CheckScriptAllowed 由 executor 依据 chart.yaml 的 check_mode: supported
 	// 声明注入：未声明时脚本模块在 check 模式下直接跳过（脚本是外部代码，
 	// 无法保证预演安全），避免 --check 意外执行第三方脚本造成变更。
 	CheckScriptAllowed bool
 	Rollback           *RollbackCtx // auto_rollback 时的变更日志（nil = 不记录）
+}
+
+// engine 返回渲染引擎：Engine 为 nil 时回退默认引擎（template/systemd_unit/
+// debug 三处共用口径）。
+func (rc *RunContext) engine() *render.Engine {
+	if rc.Engine == nil {
+		return render.DefaultEngine()
+	}
+	return rc.Engine
 }
 
 // exec 通过连接执行脚本，自动带上环境变量与提权配置。

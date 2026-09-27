@@ -46,6 +46,10 @@ wdp plan diff plan-a.json plan-b.json               # 任务级 + values 级差�
 
 // newPlanCmd 构造 `wdp plan`。
 func newPlanCmd() *cobra.Command {
+	// flag 绑定局部变量（与 run/apply 同写法）：包级可变全局会在命令
+	// 重复构造/测试间残留旧值
+	var out string
+	var opts planCompileOptions
 	cmd := &cobra.Command{
 		Use:   "plan <chart-dir|chart.tgz>",
 		Short: "compile a fully-resolved execution plan (offline) for review and `wdp apply`",
@@ -55,91 +59,82 @@ func newPlanCmd() *cobra.Command {
 		// 默认 NoFileComp，本地路径无法补全——回落文件补全，子命令仍可补全
 		ValidArgsFunction: completePathArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPlanCompile(cmd.Context(), args[0])
+			return runPlanCompile(cmd.Context(), args[0], out, opts)
 		},
 	}
 	f := cmd.Flags()
-	f.StringVarP(&planOut, "output-file", "o", "",
+	f.StringVarP(&out, "output-file", "o", "",
 		"write the plan to this file (default: stdout)")
-	f.StringVar(&planOpts.limit, "limit", "", "further limit hosts (group/host/!exclude)")
-	f.StringVar(&planOpts.phase, "phase", "deploy", "chart lifecycle phase")
-	f.StringVar(&planOpts.factCache, "fact-cache", "", "freeze facts from this JSON cache into the plan")
-	chartValueFlags(cmd, &planOpts.valuesFiles, &planOpts.setArgs)
+	f.StringVar(&opts.limit, "limit", "", "further limit hosts (group/host/!exclude)")
+	f.StringVar(&opts.phase, "phase", "deploy", "chart lifecycle phase")
+	f.StringVar(&opts.factCache, "fact-cache", "", "freeze facts from this JSON cache into the plan")
+	chartValueFlags(cmd, &opts.valuesFiles, &opts.setArgs)
 
 	cmd.AddCommand(newPlanShowCmd())
 	cmd.AddCommand(newPlanDiffCmd())
 	return cmd
 }
 
-var (
-	planOut  string
-	planOpts struct {
-		limit       string
-		phase       string
-		factCache   string
-		valuesFiles []string
-		setArgs     []string
-	}
-)
+// planCompileOptions 是 `wdp plan` 的编译参数（flag 的落点）。
+type planCompileOptions struct {
+	limit       string
+	phase       string
+	factCache   string
+	valuesFiles []string
+	setArgs     []string
+}
 
 // runPlanCompile 编译计划。部署相位（deploy 及声明 release 的相位）完全
 // 离线；非部署相位的 values 从各主机 marker 还原（与 run 同语义）。
-func runPlanCompile(ctx context.Context, target string) error {
+func runPlanCompile(ctx context.Context, target, out string, opts planCompileOptions) error {
 	inv, err := loadInventories()
 	if err != nil {
 		return err
 	}
 	limits := chart.Limits{MaxExtractBytes: config.Current().MaxExtractBytes()}
-	opts := plan.CompileOptions{
-		Phase:      planOpts.phase,
-		Limit:      planOpts.limit,
+	copts := plan.CompileOptions{
+		Phase:      opts.phase,
+		Limit:      opts.limit,
 		WdpVersion: Version,
-		FactCache:  planOpts.factCache,
+		FactCache:  opts.factCache,
 		Limits:     limits,
 	}
-	// 从 marker 取 values 的相位（uninstall 等）：编译期先行解析（需连接主机）
+	// chart 只加载一次并复用给编译：marker 相位需先加载 chart 解析相位
+	// 属性与目标主机（读 marker），此前 probe 与 plan.Compile 内部各加载
+	// 一遍——tgz 形态的 LoadWithLimits 含解包，等于同一制品解包两次
 	probe, err := chart.LoadWithLimits(target, limits)
 	if err != nil {
 		return err
 	}
-	spec := probe.PhaseSpecFor(planOpts.phase)
+	defer probe.Close()
+	spec := probe.PhaseSpecFor(opts.phase)
 	if spec.EffectiveValuesFrom() == chart.ValuesFromMarker {
-		plays, perr := probe.PhasePlays(planOpts.phase)
+		plays, perr := probe.PhasePlays(opts.phase)
 		if perr != nil {
-			probe.Close()
 			return perr
 		}
-		hosts := inv.SelectPlays(plays, planOpts.limit)
+		hosts := inv.SelectPlays(plays, opts.limit)
 		if len(hosts) == 0 {
-			probe.Close()
-			return noHostsError(planOpts.limit, target)
+			return noHostsError(opts.limit, target)
 		}
-		if cerr := func() error {
-			defer probe.Close()
-			hostValues, rerr := resolveMarkerValues(ctx, probe, hosts,
-				planOpts.valuesFiles, planOpts.setArgs, spec.Destructive())
-			if rerr != nil {
-				return rerr
-			}
-			opts.HostValues = hostValues
-			return nil
-		}(); cerr != nil {
-			return cerr
+		hostValues, rerr := resolveMarkerValues(ctx, probe, hosts,
+			opts.valuesFiles, opts.setArgs, spec.Destructive())
+		if rerr != nil {
+			return rerr
 		}
-	} else {
-		probe.Close()
+		copts.HostValues = hostValues
 	}
 
-	p, err := plan.Compile(target, inv, planOpts.valuesFiles, planOpts.setArgs, opts)
+	p, err := plan.CompileChart(probe, inv, opts.valuesFiles, opts.setArgs, copts)
 	if err != nil {
 		return err
 	}
-	if planOut != "" {
-		if err := p.Write(planOut); err != nil {
+	if out != "" {
+		if err := p.Write(out); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "[plan] %s written (plan_id=%s, %d host plan(s), %d file(s))\n",
-			planOut, p.PlanID, len(p.Hosts), len(p.Files))
+			out, p.PlanID, len(p.Hosts), len(p.Files))
 		return nil
 	}
 	data, err := json.MarshalIndent(p, "", "  ")

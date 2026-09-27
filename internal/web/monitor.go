@@ -6,6 +6,7 @@ package web
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -38,7 +39,13 @@ func (s *Server) handleHostMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := s.fetchAgentMetrics(r.Context(), h)
 	if err != nil {
-		// 错误原文回传（运维定位 agent 不可达的现场需要），同时落日志
+		// 超限是 server 侧策略拒绝（500），其余（agent 不可达等）按上游
+		// 错误回 502；错误原文回传（运维定位 agent 不可达的现场需要），
+		// 同时落日志
+		if errors.Is(err, errMetricsTooLarge) {
+			s.writeInternal(w, err)
+			return
+		}
 		s.logger.Warn("fetch agent metrics failed", "host", h.Name, "err", err)
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
@@ -50,6 +57,11 @@ func (s *Server) handleHostMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	_, _ = w.Write([]byte(body))
 }
+
+// errMetricsTooLarge agent 指标体超过拉取上限。区别于 agent 不可达等
+// 上游错误（502）：这是 server 侧的策略拒绝，走 500——继续截断会把
+// 半个样本行交给 parsePromText，产出错误的指标值。
+var errMetricsTooLarge = errors.New("agent metrics exceed fetch limit")
 
 // fetchAgentMetrics 从 agent 拉取 /metrics 原文（通道与远程执行同一条路：
 // 已纳管走 mTLS，未纳管走明文，不探活、不降级）。
@@ -73,9 +85,17 @@ func (s *Server) fetchAgentMetrics(ctx context.Context, h *store.Host) (string, 
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("agent metrics: HTTP %d", resp.StatusCode)
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	const metricsLimit = 4 << 20
+	b, err := io.ReadAll(io.LimitReader(resp.Body, metricsLimit))
 	if err != nil {
 		return "", err
+	}
+	// 读满上限后还有剩余字节 = 超限：报错而不是静默截断（截断会把半个
+	// 样本行交给解析器）。恰好等于上限的体不在此列
+	if len(b) == metricsLimit {
+		if n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, 1)); n > 0 {
+			return "", fmt.Errorf("agent metrics: %w", errMetricsTooLarge)
+		}
 	}
 	return string(b), nil
 }

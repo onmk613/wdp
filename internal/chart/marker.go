@@ -106,7 +106,8 @@ func (c *Chart) StripSensitive(values map[string]any) map[string]any {
 }
 
 // redactSensitive 返回 sensitive_values 点路径替换为 "<redacted>" 的
-// values 深拷贝（marker 落盘内容；路径不存在时无操作）。
+// values 深拷贝（marker 落盘内容）。路径为空时返回原引用而非拷贝——
+// 调用方只读；需独立副本走 RedactValues。
 func (c *Chart) redactSensitive(values map[string]any) map[string]any {
 	if len(c.Meta.SensitiveValues) == 0 {
 		return values
@@ -131,8 +132,10 @@ func RedactValues(paths []string, values map[string]any) map[string]any {
 
 // MarkerContent 构造 marker JSON 内容（phase 为产生本次 release 的相位，
 // 空串按 deploy）。v2：记录 resolved values（敏感键脱敏），摘要按脱敏前
-// 剔除敏感键的口径计算。
-func (c *Chart) MarkerContent(wdpVersion string, values map[string]any, phase string) []byte {
+// 剔除敏感键的口径计算。编码失败（values 含 YAML .nan/.inf 解析出的
+// NaN/Inf 等不可 JSON 序列化值）必须上抛：吞错落盘空文件会让
+// ParseMarker 失败、uninstall/status/drift 全部失效且 marker 已损坏。
+func (c *Chart) MarkerContent(wdpVersion string, values map[string]any, phase string) ([]byte, error) {
 	if phase == "" {
 		phase = "deploy"
 	}
@@ -150,8 +153,10 @@ func (c *Chart) MarkerContent(wdpVersion string, values map[string]any, phase st
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false) // "<redacted>" 落盘为字面占位而非 \u003c 转义
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(m)
-	return buf.Bytes()
+	if err := enc.Encode(m); err != nil {
+		return nil, fmt.Errorf("encode marker: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 // ErrNoMarkerValues 是 v1 marker 无法提供 resolved values 的哨兵错误

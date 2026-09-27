@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"wdp/internal/model"
 	"wdp/internal/plan"
 )
 
@@ -168,6 +169,77 @@ func TestJournalAppendAndReplay(t *testing.T) {
 	}
 	if !done["h1"][1] || !done["h1"][2] || done["h1"][3] || done["h1"][4] {
 		t.Fatalf("重放结果异常: %+v", done)
+	}
+}
+
+// TestRecapAccumulatesAcrossPlays 多 play plan 的统计必须跨 play 累计：
+// Recap 每 play 收尾一次、传入该 play 的统计 map，直接保存引用会让
+// run.stats 只剩最后一个 play（控制端 /plan/status 拿到残缺统计）。
+func TestRecapAccumulatesAcrossPlays(t *testing.T) {
+	run := &planRun{runID: "r", state: "running"}
+	jr := &journalReporter{run: run}
+	jr.Recap("play-1", map[string]*model.Stats{
+		"h1": {Ok: 1, Changed: 2},
+		"h2": {Ok: 1},
+	})
+	jr.Recap("play-2", map[string]*model.Stats{
+		"h1": {Ok: 3, Failed: 1},
+	})
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if len(run.stats) != 2 {
+		t.Fatalf("主机集应取并集: %+v", run.stats)
+	}
+	if h1 := run.stats["h1"]; h1.Ok != 4 || h1.Changed != 2 || h1.Failed != 1 {
+		t.Fatalf("h1 计数应跨 play 叠加: %+v", h1)
+	}
+	if h2 := run.stats["h2"]; h2.Ok != 1 {
+		t.Fatalf("h2 统计应保留: %+v", h2)
+	}
+}
+
+// TestReapZombieRunsAtStartup 崩溃窗口回归：磁盘上预置 running 状态文件
+// （上一进程在 WriteStateFile("running") 后、执行 goroutine 落终态前死亡）
+// → 启动扫描后改判 failed，journal 追注原因；已终态的 run 不被动。
+func TestReapZombieRunsAtStartup(t *testing.T) {
+	s := New("")
+	root := t.TempDir()
+	s.SetRunsDir(root)
+
+	mkRun := func(id, state string) string {
+		dir := filepath.Join(root, id)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteStateFile(dir, state); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+	zombie := mkRun("run-zombie", "running")
+	done := mkRun("run-done", "done")
+
+	s.reapZombieRuns()
+
+	if got := ReadStateFile(zombie); got != "failed" {
+		t.Fatalf("无进程支撑的 running 应改判 failed，实际 %q", got)
+	}
+	if got := ReadStateFile(done); got != "done" {
+		t.Fatalf("已终态 run 不应被动，实际 %q", got)
+	}
+	// journal 追注了改判原因（对控制端 /plan/status 可见）
+	entries, err := ReadJournal(filepath.Join(zombie, "journal.ndjson"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.State == "failed" && strings.Contains(e.Msg, "agent restarted during run") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("journal 应含改判原因: %+v", entries)
 	}
 }
 

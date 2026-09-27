@@ -38,15 +38,12 @@ type Reporter interface {
 
 // Console 是带颜色的控制台输出实现。
 type Console struct {
-	Out    io.Writer
-	UseTTY bool
-	Level  int // -1 quiet / 0 聚合 / 1 逐主机 / 2 全量 / 3 调试
+	Level int // -1 quiet / 0 聚合 / 1 逐主机 / 2 全量 / 3 调试
 
 	mu sync.Mutex
 	p  *fmtutil.Printer
 
 	// 当前任务的聚合计数与结果行缓冲
-	curTask  string
 	curStats *model.Stats
 	curHosts int
 	curRows  []taskRow
@@ -58,7 +55,7 @@ func NewConsole(out io.Writer, tty bool, level int) *Console {
 	p := fmtutil.New()
 	p.SetWriter(out)
 	p.SetColor(tty)
-	return &Console{Out: out, UseTTY: tty, Level: level, p: p}
+	return &Console{Level: level, p: p}
 }
 
 func (c *Console) printf(format string, a ...any) {

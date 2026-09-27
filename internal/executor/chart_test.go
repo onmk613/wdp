@@ -168,6 +168,37 @@ func TestChartTaskScoping(t *testing.T) {
 	}
 }
 
+// TestChartLoopRegisterHasResults chart 引用 + loop + register 组合：
+// register 数据必须带 results 键（与 registerResult/registerData 同口径），
+// 否则下游 `len .r.results` 在该路径直接模板报错、主机被误标死。
+func TestChartLoopRegisterHasResults(t *testing.T) {
+	ex, rep, getScripts := setupChartWith(t, func(dir string) {
+		deploy := `- name: 主部署
+  hosts: webservers
+  tasks:
+    - name: 逐项引用子 chart
+      chart: {name: jdk}
+      vars:
+        extra_opt: -Xmx2g
+      loop: ["a", "b"]
+      register: r
+    - name: 引用 results
+      shell: 'echo n={{ len .r.results }}'
+`
+		if err := os.WriteFile(filepath.Join(dir, "deploy.yaml"), []byte(deploy), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}, nil, nil)
+	if ex.Run(context.Background(), ex.Opts.Chart.Deploy) {
+		t.Fatalf("chart+loop+register 不应失败:\n%s", rep.joined())
+	}
+	scripts := strings.Join(getScripts(), "\n---\n")
+	// chart 的逐 item 结果聚合进顶层 res、不逐项展开：results 为空列表
+	if !strings.Contains(scripts, "echo n=0") {
+		t.Fatalf("下游 len .r.results 应可渲染（空列表 0）:\n%s", scripts)
+	}
+}
+
 func TestChartScopeIsolation(t *testing.T) {
 	// 子 chart 引用父作用域的兄弟键（app.port）应渲染失败 —— 作用域隔离
 	dir := writeTestChart(t)

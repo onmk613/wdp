@@ -8,7 +8,7 @@ func TestPutFileOwnerOnlyNoDrift(t *testing.T) {
 	rc, _ := ownerFake(t, "app app") // 远端 owner=app、group=主组 app
 	rc.Become = true
 	rc.CheckMode = true
-	changed, res := putFile(rc, []byte("k=v\n"), "/etc/app.conf", 0o644, false, true, "app", "")
+	changed, res := putFile(rc, putFileOpts{data: []byte("k=v\n"), dest: "/etc/app.conf", mode: modePtr(0o644), owner: "app"})
 	if res != nil && res.Failed {
 		t.Fatalf("owner-only 不应失败: %+v", res)
 	}
@@ -22,7 +22,7 @@ func TestPutFileOwnerOnlyStillDetectsDrift(t *testing.T) {
 	rc, _ := ownerFake(t, "root app")
 	rc.Become = true
 	rc.CheckMode = true
-	changed, _ := putFile(rc, []byte("k=v\n"), "/etc/app.conf", 0o644, false, true, "app", "")
+	changed, _ := putFile(rc, putFileOpts{data: []byte("k=v\n"), dest: "/etc/app.conf", mode: modePtr(0o644), owner: "app"})
 	if !changed {
 		t.Fatal("owner 漂移（root≠app）应预估变更")
 	}

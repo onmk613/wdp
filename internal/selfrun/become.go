@@ -6,20 +6,23 @@ package selfrun
 
 import (
 	"bytes"
+	"context"
 	"fmt"
-	"regexp"
-
-	"wdp/internal/shellquote"
+	"os"
+	"os/exec"
+	"os/user"
+	"strconv"
+	"strings"
+	"time"
 )
-
-// envKeyRe 是允许注入的环境变量键白名单（与 sshc 一致）。
-var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9]*$`)
 
 // maxExecOutputBytes 是单条 exec 每个输出流的缓冲上限（与控制端
 // "单任务输出超 1MB 截断"对齐）。
 const maxExecOutputBytes = 1 << 20
 
 // capWriter 是带上限的缓冲 writer：保留前 limit 字节，超出部分丢弃并标记。
+// 始终返回原始写入长度——io.Writer 契约禁止 n < len(p) 且 err == nil
+// （os/exec 的输出拷贝走 io.Copy，短写会被判 ErrShortWrite 并中断收集）。
 type capWriter struct {
 	buf       bytes.Buffer
 	limit     int
@@ -31,31 +34,65 @@ func (w *capWriter) Write(p []byte) (int, error) {
 		w.limit = maxExecOutputBytes
 	}
 	room := w.limit - w.buf.Len()
-	if room <= 0 {
+	switch {
+	case room <= 0:
 		w.truncated = true
-		return len(p), nil
-	}
-	if len(p) > room {
-		p = p[:room]
+	case len(p) > room:
+		w.buf.Write(p[:room])
 		w.truncated = true
+	default:
+		w.buf.Write(p)
 	}
-	w.buf.Write(p)
 	return len(p), nil
 }
 
 func (w *capWriter) String() string { return w.buf.String() }
 
-// becomeScript 生成提权执行脚本与最终 stdin 内容。
-// 密码经 stdin 传递（sudo -S 读首行，余下内容供 sudo 内命令继续读取），
-// 不出现在脚本或命令行 argv 中，防同机用户 ps 窥探；req.Stdin 拼接在密码行之后。
-func BecomeScript(script, user, password, stdin string) (finalScript, finalStdin string) {
-	if user == "" {
-		return script, stdin
-	}
-	u := shellquote.Quote(user)
+// becomeCmd 构造提权执行的 argv 与 stdin 布局。
+// 脚本体不进 argv（本机 ps、/proc/<pid>/cmdline 对同机任意用户可见，脚本
+// 内嵌的 export TOKEN=…/口令会广播出去——与 sshc 的 WrapScript 同一威胁
+// 模型）：脚本已落盘为 0700 临时文件 path，argv 只引用文件路径。
+// 密码经 stdin 首行传递（sudo -S 读首行，余下内容供脚本继续读取），
+// 同样不进 argv；req.Stdin 拼接在密码行之后。
+// user 直接送入 argv（不经 shell，无注入面），由 sudo 自行解析校验。
+func becomeCmd(path, user, password, stdin string) (argv []string, finalStdin string) {
 	if password != "" {
-		return fmt.Sprintf("sudo -S -p '' -u %s -- /bin/sh -c %s", u, shellquote.Quote(script)),
+		return []string{"sudo", "-S", "-p", "", "-u", user, "--", "/bin/sh", path},
 			password + "\n" + stdin
 	}
-	return fmt.Sprintf("sudo -n -u %s -- /bin/sh -c %s", u, shellquote.Quote(script)), stdin
+	return []string{"sudo", "-n", "-u", user, "--", "/bin/sh", path}, stdin
+}
+
+// handOverTo 把脚本文件归属收敛到 become 目标用户：0700 文件只有属主可读，
+// 不收敛属主则目标用户读不了脚本。agent 以 root 常驻时直接 chown 即可；
+// 无特权时借 sudo chown（密码经 stdin，不进 argv）；两者都不可用即失败——
+// 不静默降级（放宽文件权限会把脚本内嵌的敏感 env 暴露给同机所有用户）。
+// sudo 子进程带独立短超时：PAM 提示/LDAP 挂起时父 ctx 可能无 deadline
+// （TimeoutMs=0），裸 CombinedOutput 会把整个 RunScript 永久挂住。
+func handOverTo(ctx context.Context, path, userName, password string) error {
+	u, err := user.Lookup(userName)
+	if err != nil {
+		return fmt.Errorf("lookup become user %q: %w", userName, err)
+	}
+	uid, err := strconv.Atoi(u.Uid)
+	if err != nil {
+		return fmt.Errorf("become user %q has non-numeric uid %q: %w", userName, u.Uid, err)
+	}
+	if os.Getuid() == uid {
+		return nil // 目标就是当前用户：无需换属主
+	}
+	if err := os.Chown(path, uid, -1); err == nil {
+		return nil
+	}
+	chownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(chownCtx, "sudo", "-n", "-p", "", "--", "chown", u.Uid, path)
+	if password != "" {
+		cmd = exec.CommandContext(chownCtx, "sudo", "-S", "-p", "", "--", "chown", u.Uid, path)
+		cmd.Stdin = strings.NewReader(password + "\n")
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("cannot hand the script to %s (chown requires root or sudo): %v: %s", userName, err, bytes.TrimSpace(out))
+	}
+	return nil
 }

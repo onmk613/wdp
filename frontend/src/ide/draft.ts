@@ -26,7 +26,7 @@ export class DraftStore {
     }
   }
 
-  // load 取最新草稿（服务端与本地比时间戳）；无草稿返回 null
+  // 本地 saved_at 与服务端 updated_at 按 ISO 字典序比较，取新者；无草稿返回 null
   async load(): Promise<{ payload: DraftPayload; updated_at: string; source: 'server' | 'local' } | null> {
     const local = this.readLocal()
     let server: DraftResp | null = null

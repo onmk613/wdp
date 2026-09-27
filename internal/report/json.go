@@ -27,12 +27,13 @@ type JSONPlay struct {
 // JSONReporter 输出机器可读的完整执行记录（--output json，适配 CI/CD）。
 // stdout 只输出最终 JSON（进度信息不打印），错误仍走 stderr。
 type JSONReporter struct {
-	mu      sync.Mutex
-	out     io.Writer
-	plays   []*JSONPlay
-	curPlay *JSONPlay
-	curTask *JSONTask
-	extra   map[string]any // 命令自定义的顶层字段（如 drift 的分类行）
+	mu       sync.Mutex
+	out      io.Writer
+	plays    []*JSONPlay
+	curPlay  *JSONPlay
+	curTask  *JSONTask
+	extra    map[string]any // 命令自定义的顶层字段（如 drift 的分类行）
+	writeErr error          // Finish 输出期间的写错误（见 Err）
 }
 
 // NewJSONReporter 创建 JSON reporter。
@@ -131,6 +132,8 @@ func (r *JSONReporter) SetExtra(key string, v any) {
 }
 
 // Finish 输出最终 JSON 文档（整个 run 结束时调用一次）。
+// 签名保持无返回值（Reporter 接口被 web/agent 侧实现共用，改签名是破坏性
+// 变更）；写失败记录到 Err() 供调用方在 Finish 之后取走并转为命令失败。
 func (r *JSONReporter) Finish() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -143,5 +146,15 @@ func (r *JSONReporter) Finish() {
 	}
 	enc := json.NewEncoder(r.out)
 	enc.SetIndent("", "  ")
-	_ = enc.Encode(doc)
+	// 破管道（如 `wdp run --output json | head`）时 stdout 写失败：吞错会让
+	// CI 拿到 0 字节文档且退出码 0——必须经 Err() 上报
+	r.writeErr = enc.Encode(doc)
+}
+
+// Err 返回 Finish 一次输出期间的写错误（未输出过或成功为 nil）。
+// 与 Finish 同锁：无锁读 writeErr 对并发 Finish 是数据竞争。
+func (r *JSONReporter) Err() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.writeErr
 }

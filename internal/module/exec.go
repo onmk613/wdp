@@ -14,10 +14,8 @@ func init() {
 // ShellModule 以 /bin/sh 执行命令（支持管道与变量展开）。
 type ShellModule struct{}
 
-// Name 模块名。
 func (m *ShellModule) Name() string { return "shell" }
 
-// Desc 模块说明。
 func (m *ShellModule) Desc() string {
 	return "run commands on remote hosts via sh"
 }
@@ -30,10 +28,8 @@ func (m *ShellModule) Run(rc *RunContext, args map[string]any, free string) *Res
 // CommandModule 直接执行命令（与 shell 行为一致：远端统一经 /bin/sh）。
 type CommandModule struct{}
 
-// Name 模块名。
 func (m *CommandModule) Name() string { return "command" }
 
-// Desc 模块说明。
 func (m *CommandModule) Desc() string {
 	return "run commands on remote hosts (same as shell; both go through /bin/sh)"
 
@@ -52,7 +48,7 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 		}
 	}
 	if script == "" {
-		return Fail("%s", "shell/command requires command content, e.g. `shell: uptime`")
+		return Fail("shell/command requires command content, e.g. `shell: uptime`")
 	}
 	// creates: 文件已存在则跳过（幂等保护）
 	if creates, ok := argStr(args, "creates"); ok && creates != "" {
@@ -81,14 +77,14 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 		return &Result{Changed: true, Msg: "[check] will execute: " + firstLine(script)}
 	}
 	out, bad := rc.exec(script)
+	if bad != nil {
+		return bad
+	}
 	res := &Result{
 		Stdout:  out.Stdout,
 		Stderr:  out.Stderr,
 		Rc:      out.Code,
 		Changed: true,
-	}
-	if bad != nil {
-		return bad
 	}
 	if out.Code != 0 {
 		res.Failed = true
@@ -97,7 +93,6 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 	return res
 }
 
-// Params 参数文档。
 func (m *ShellModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "(free-form)", Type: "string", Desc: "command to run (shell and command are identical: both run via /bin/sh)"},
@@ -108,7 +103,6 @@ func (m *ShellModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *ShellModule) Example() string {
 	return `- name: wait for the service to be ready
   shell: 'curl -sf http://localhost:{{ .app.port }}/health'
@@ -121,7 +115,6 @@ func (m *ShellModule) Example() string {
 // Params 参数文档（command 与 shell 同构）。
 func (m *CommandModule) Params() []ParamDoc { return (&ShellModule{}).Params() }
 
-// Example 示例任务。
 func (m *CommandModule) Example() string {
 	return `- name: idempotent run (skipped once the artifact exists)
   command: ./migrate.sh

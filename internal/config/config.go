@@ -11,7 +11,8 @@ import (
 // DefaultPath 是默认配置文件路径
 const DefaultPath = "wdp.cfg"
 
-// current 声明一个配置存储器
+// current 是包级配置存储器（可变全局）。仅启动期 Load 写入、运行期只读
+// （Current 被各处并发调用）；无锁保护——启动后再并发 Load 即 data race。
 var current = Config{}
 
 // Current 返回当前生效的配置

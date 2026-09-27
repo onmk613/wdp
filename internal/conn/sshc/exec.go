@@ -1,10 +1,10 @@
 package sshc
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 	"time"
@@ -43,7 +43,7 @@ func (c *Conn) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult,
 
 	// 脚本体 + 任务 stdin 一起经会话 stdin 投递（不进 argv，见 WrapScript）
 	sess.Stdin = strings.NewReader(WrapStdin(req, sudoPW))
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr capBuffer // 输出上限见 capout.go：防高输出命令打爆控制端
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
 
@@ -59,11 +59,44 @@ func (c *Conn) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult,
 				code = ee.ExitStatus()
 			}
 		}
-		return conn.ExecResult{Code: code, Stdout: stdout.String(), Stderr: stderr.String()}, nil
+		return conn.ExecResult{Code: code, Stdout: stdout.string(), Stderr: stderr.string()}, nil
 	case <-ctx.Done():
 		_ = sess.Close()
 		<-done
-		return conn.ExecResult{Stdout: stdout.String(), Stderr: stderr.String()}, ctx.Err()
+		return conn.ExecResult{Stdout: stdout.string(), Stderr: stderr.string()}, ctx.Err()
+	}
+}
+
+// execTo 在远端执行脚本并把 stdout 流式写入 w：不经输出上限缓冲——
+// DownloadFile 的 cat 降级路径内容是文件本体而非任务输出，缓冲（OOM）
+// 与截断（静默损坏文件、破坏校验和语义）都不可接受，必须直落目标。
+func (c *Conn) execTo(ctx context.Context, script string, w io.Writer) error {
+	if err := c.ensureClient(); err != nil {
+		return err
+	}
+	sess, err := c.client.NewSession()
+	if err != nil {
+		return fmt.Errorf("failed to create session: %w", err)
+	}
+	defer sess.Close()
+	sess.Stdout = w
+	var stderr capBuffer
+	sess.Stderr = &stderr
+	done := make(chan error, 1)
+	go func() { done <- sess.Run(script) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			if ee, ok := err.(*ssh.ExitError); ok {
+				return fmt.Errorf("remote exit %d: %s", ee.ExitStatus(), stderr.string())
+			}
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		_ = sess.Close()
+		<-done
+		return ctx.Err()
 	}
 }
 

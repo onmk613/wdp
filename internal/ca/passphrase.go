@@ -12,13 +12,15 @@ package ca
 // 后果方向一致但多了暴力破解成本，属纵深防御而非访问控制。
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
 	"os"
-	"path/filepath"
+
+	"wdp/internal/fsatomic"
 )
 
 // PassEnv 是根 CA 私钥口令的环境变量名。
@@ -43,33 +45,16 @@ func writeKeyEncrypted(path string, key crypto.Signer, pass []byte) error {
 	return writePEMBlock(path, blk, 0o600)
 }
 
-// writePEMBlock 落盘预构建的 PEM 块（与 writePEM 同一套原子写语义，
-// 供加密块使用——加密在块构造阶段完成，这里只负责落盘）。
+// writePEMBlock 落盘预构建的 PEM 块（与 writePEM 同一套原子写语义——
+// fsatomic；供加密块使用——加密在块构造阶段完成，这里只负责落盘。
+// 不能走 writePEM(der) 路线：加密块的口令头（Proc-Type/DEK-Info）在
+// 块头部，重新按 der 编码会丢掉）。
 func writePEMBlock(path string, blk *pem.Block, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".wdp-ca-*")
-	if err != nil {
+	var buf bytes.Buffer
+	if err := pem.Encode(&buf, blk); err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	abort := func(e error) error {
-		_ = tmp.Close()
-		_ = os.Remove(tmpName)
-		return e
-	}
-	if err := pem.Encode(tmp, blk); err != nil {
-		return abort(err)
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		return abort(err)
-	}
-	if err := tmp.Sync(); err != nil {
-		return abort(err)
-	}
-	if err := tmp.Close(); err != nil {
-		_ = os.Remove(tmpName)
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return fsatomic.WriteFile(path, &buf, mode)
 }
 
 // decryptKeyBlock 解密口令保护的私钥 PEM 块（未加密块原样返回 DER）。

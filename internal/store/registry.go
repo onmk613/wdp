@@ -10,7 +10,7 @@ import (
 
 // ---- 池 / 组 / 标签注册表 ----
 
-// Pool 是主机池（一台主机至多属一个池，按名引用）。
+// Pool 是主机池（按名引用，一台主机可属多个池）。
 type Pool struct {
 	ID        int64
 	Name      string
@@ -19,7 +19,7 @@ type Pool struct {
 	CreatedAt string
 }
 
-// GroupEntry 是组注册表项（hosts.group_name 按名引用）。
+// GroupEntry 是组注册表项（成员关系在 host_group_map 映射表，按名引用）。
 type GroupEntry struct {
 	ID        int64
 	Name      string
@@ -51,6 +51,16 @@ func (s *Store) CreatePool(name, note string, hostIDs []int64) (int64, error) {
 			return err
 		}
 		for _, hid := range hostIDs {
+			// host_pools 无外键约束，INSERT OR IGNORE 对不存在的 hostID
+			// 会落孤儿成员行（口径同 CreateLabel：先 SELECT 校验，事务内
+			// 整体回滚）
+			var n int
+			if err := q.QueryRow(`SELECT COUNT(*) FROM hosts WHERE id = ?`, hid).Scan(&n); err != nil {
+				return err
+			}
+			if n == 0 {
+				return ErrNotFound
+			}
 			if _, err := q.Exec(`INSERT OR IGNORE INTO host_pools (host_id, pool) VALUES (?, ?)`, hid, name); err != nil {
 				return err
 			}
@@ -85,22 +95,30 @@ func (s *Store) ListPools() ([]*Pool, error) {
 	return out, rows.Err()
 }
 
-// DeletePool 删除池并解除成员归属（主机保留，pool 置空）。
+// DeletePool 删除池并解除成员映射（主机保留）。
+// 注册行与成员归属同事务：只删一半会出现成员仍归属已删池的孤儿行；
+// 池名读取也收进事务——预读在外时，窗口内同名池被删后重建，按陈旧
+// 名删映射会误删新池成员（事务内查询一律走 q，见 tx 注释）。
 func (s *Store) DeletePool(id int64) error {
-	var name string
-	if err := s.db.QueryRow(`SELECT name FROM pools WHERE id = ?`, id).Scan(&name); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		return err
-	}
-	// 注册行与成员归属同事务：只删一半会出现成员仍归属已删池的孤儿行
 	return s.tx(func(q execer) error {
+		var name string
+		if err := q.QueryRow(`SELECT name FROM pools WHERE id = ?`, id).Scan(&name); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
 		if _, err := q.Exec(`DELETE FROM host_pools WHERE pool = ?`, name); err != nil {
 			return err
 		}
-		_, err := q.Exec(`DELETE FROM pools WHERE id = ?`, id)
-		return err
+		res, err := q.Exec(`DELETE FROM pools WHERE id = ?`, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
 	})
 }
 
@@ -120,6 +138,15 @@ func (s *Store) CreateGroup(name, note string, hostIDs []int64) (int64, error) {
 			return err
 		}
 		for _, hid := range hostIDs {
+			// host_group_map 同样无外键约束，校验口径同 CreatePool
+			// （对齐 CreateLabel：缺失 hostID → ErrNotFound 整体回滚）
+			var n int
+			if err := q.QueryRow(`SELECT COUNT(*) FROM hosts WHERE id = ?`, hid).Scan(&n); err != nil {
+				return err
+			}
+			if n == 0 {
+				return ErrNotFound
+			}
 			if _, err := q.Exec(`INSERT OR IGNORE INTO host_group_map (host_id, group_name) VALUES (?, ?)`, hid, name); err != nil {
 				return err
 			}
@@ -154,52 +181,40 @@ func (s *Store) ListGroups() ([]*GroupEntry, error) {
 }
 
 // DeleteGroup 删除组并解除成员归属。
+// 与 DeletePool 同理：注册行与成员归属同事务，组名读取也收进事务
+// （预读在外时窗口内同名组删后重建会误删新组成员）。
 func (s *Store) DeleteGroup(id int64) error {
-	var name string
-	if err := s.db.QueryRow(`SELECT name FROM host_groups WHERE id = ?`, id).Scan(&name); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
-		}
-		return err
-	}
-	// 与 DeletePool 同理：注册行与成员归属同事务
 	return s.tx(func(q execer) error {
+		var name string
+		if err := q.QueryRow(`SELECT name FROM host_groups WHERE id = ?`, id).Scan(&name); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
 		if _, err := q.Exec(`DELETE FROM host_group_map WHERE group_name = ?`, name); err != nil {
 			return err
 		}
-		_, err := q.Exec(`DELETE FROM host_groups WHERE id = ?`, id)
-		return err
+		res, err := q.Exec(`DELETE FROM host_groups WHERE id = ?`, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
 	})
 }
 
 // CreateLabel 新建标签键并可附加到已有主机（value 追加进 hosts.labels）。
+// 主机 labels 的读取与全部写入同事务：预读在外时，窗口内并发的
+// BatchAssign/UpdateHost 改 labels 会被本事务按陈旧值整体覆盖（丢更新）。
+// 事务内查询一律走 q（见 tx 注释）。
 func (s *Store) CreateLabel(key, note string, hostIDs []int64, value string) (int64, error) {
 	if err := validScopeName("label key", key); err != nil {
 		return 0, err
 	}
-	// 各主机的 labels 须在事务外预读（单连接下事务内嵌套查询会死锁）
-	type target struct {
-		id     int64
-		labels string
-	}
-	targets := make([]target, 0, len(hostIDs))
-	for _, hid := range hostIDs {
-		h, err := s.GetHost(hid)
-		if err != nil {
-			return 0, err
-		}
-		m := map[string]string{}
-		// 写入时 validLabels 已保证是 JSON 对象，解码失败按空对象处理
-		_ = json.Unmarshal([]byte(h.Labels), &m)
-		m[key] = value
-		b, err := json.Marshal(m)
-		if err != nil {
-			return 0, err
-		}
-		targets = append(targets, target{hid, string(b)})
-	}
 	var id int64
-	// 注册行与各主机 labels 更新同事务：不留"标签键建了但主机没打上"的半状态
 	err := s.tx(func(q execer) error {
 		res, err := q.Exec(`INSERT INTO label_defs (key, note, created_at) VALUES (?, ?, ?)`, key, note, nowUTC())
 		if err != nil {
@@ -208,8 +223,23 @@ func (s *Store) CreateLabel(key, note string, hostIDs []int64, value string) (in
 		if id, err = res.LastInsertId(); err != nil {
 			return err
 		}
-		for _, t := range targets {
-			if _, err := q.Exec(`UPDATE hosts SET labels = ?, updated_at = ? WHERE id = ?`, t.labels, nowUTC(), t.id); err != nil {
+		for _, hid := range hostIDs {
+			var labels string
+			if err := q.QueryRow(`SELECT labels FROM hosts WHERE id = ?`, hid).Scan(&labels); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return ErrNotFound
+				}
+				return err
+			}
+			m := map[string]string{}
+			// 写入时 validLabels 已保证是 JSON 对象，解码失败按空对象处理
+			_ = json.Unmarshal([]byte(labels), &m)
+			m[key] = value
+			b, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			if _, err := q.Exec(`UPDATE hosts SET labels = ?, updated_at = ? WHERE id = ?`, string(b), nowUTC(), hid); err != nil {
 				return err
 			}
 		}
@@ -239,28 +269,60 @@ func (s *Store) ListLabels() ([]*LabelDef, error) {
 	return out, rows.Err()
 }
 
+// labelUpdate 是一次主机 labels 的整值替换（删除标签键路径的中间形态）。
+type labelUpdate struct {
+	id     int64
+	labels string
+}
+
 // DeleteLabel 删除标签键并从全部主机的 labels 中移除该键。
+// 键名读取与各主机 labels 的读取/写入同事务：预读在外时窗口内并发的
+// labels 修改会被陈旧值覆盖（丢更新）。事务内查询一律走 q（见 tx 注释）；
+// 各主机 labels 更新与注册行删除同事务：半途失败会出现部分主机仍带
+// 已删键的不一致，故错误必须传播。
 func (s *Store) DeleteLabel(id int64) error {
-	var key string
-	if err := s.db.QueryRow(`SELECT key FROM label_defs WHERE id = ?`, id).Scan(&key); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
+	return s.tx(func(q execer) error {
+		var key string
+		if err := q.QueryRow(`SELECT key FROM label_defs WHERE id = ?`, id).Scan(&key); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
 		}
+		rows, err := q.Query(`SELECT id, labels FROM hosts`)
+		if err != nil {
+			return err
+		}
+		updates, err := collectLabelDrops(rows, key)
+		if cerr := rows.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return err
+		}
+		for _, u := range updates {
+			if _, err := q.Exec(`UPDATE hosts SET labels = ?, updated_at = ? WHERE id = ?`, u.labels, nowUTC(), u.id); err != nil {
+				return err
+			}
+		}
+		_, err = q.Exec(`DELETE FROM label_defs WHERE id = ?`, id)
 		return err
-	}
-	// 各主机的新 labels 在事务外预读预计算（单连接下事务内嵌套查询会死锁）
-	hosts, err := s.ListHosts("")
-	if err != nil {
-		return err
-	}
-	type updated struct {
-		id     int64
-		labels string
-	}
-	var updates []updated
-	for _, h := range hosts {
+	})
+}
+
+// collectLabelDrops 从主机清单行挑出携带 key 的主机并给出移除后的 labels
+// JSON。rows 迭代完毕由调用方显式 Close 后再 Exec——同连接上未关的 rows
+// 与写语句不混用（CreateRunsExclusive 的同款口径）。
+func collectLabelDrops(rows *sql.Rows, key string) ([]labelUpdate, error) {
+	var updates []labelUpdate
+	for rows.Next() {
+		var hid int64
+		var labels string
+		if err := rows.Scan(&hid, &labels); err != nil {
+			return nil, err
+		}
 		var m map[string]string
-		if err := json.Unmarshal([]byte(h.Labels), &m); err != nil || m == nil {
+		if err := json.Unmarshal([]byte(labels), &m); err != nil || m == nil {
 			continue
 		}
 		if _, ok := m[key]; !ok {
@@ -269,19 +331,9 @@ func (s *Store) DeleteLabel(id int64) error {
 		delete(m, key)
 		b, err := json.Marshal(m)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		updates = append(updates, updated{h.ID, string(b)})
+		updates = append(updates, labelUpdate{hid, string(b)})
 	}
-	// 各主机 labels 更新与注册行删除同事务：半途失败会出现部分主机仍带
-	// 已删键的不一致，故错误必须传播
-	return s.tx(func(q execer) error {
-		for _, u := range updates {
-			if _, err := q.Exec(`UPDATE hosts SET labels = ?, updated_at = ? WHERE id = ?`, u.labels, nowUTC(), u.id); err != nil {
-				return err
-			}
-		}
-		_, err := q.Exec(`DELETE FROM label_defs WHERE id = ?`, id)
-		return err
-	})
+	return updates, rows.Err()
 }

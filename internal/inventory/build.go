@@ -27,8 +27,37 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 		maps.Copy(inv.AllVars, all.Vars)
 	}
 
-	// 按组名排序遍历（all 最先），保证同一主机在多个组定义时
-	// 参数合并结果确定：后处理的组（字典序）覆盖先处理的组
+	hostRaw := buildGroups(raw, inv)
+	if err := buildHostObjects(inv, hostRaw, cfg); err != nil {
+		return nil, err
+	}
+	if err := validateGroupChildren(inv); err != nil {
+		return nil, err
+	}
+
+	// 约定变量目录（按传入顺序，后者覆盖）：group_vars/<组>.yaml、host_vars/<主机>.yaml
+	for _, dir := range varDirs {
+		if err := inv.loadVarDirs(dir); err != nil {
+			return nil, err
+		}
+	}
+
+	slices.SortFunc(inv.Hosts, func(a, b *model.Host) int { return strings.Compare(a.Name, b.Name) })
+	inv.applyVars()
+	inv.precomputeTopology()
+
+	// via 中继声明校验：目标必须存在、链不得成环（加载期拦截，防提交端
+	// 选择中继时死循环或静默漏段）
+	if err := inv.ValidateVia(); err != nil {
+		return nil, err
+	}
+	return inv, nil
+}
+
+// buildGroups 建组并合并主机条目参数，返回 主机名 → 合并后原始参数 的累积表。
+// 按组名排序遍历（all 最先），保证同一主机在多个组定义时
+// 参数合并结果确定：后处理的组（字典序）覆盖先处理的组
+func buildGroups(raw rawInventory, inv *Inventory) map[string]map[string]any {
 	groupNames := make([]string, 0, len(raw))
 	for gname := range raw {
 		groupNames = append(groupNames, gname)
@@ -36,7 +65,6 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 	slices.Sort(groupNames)
 
 	hostRaw := map[string]map[string]any{} // 主机名 → 合并后的原始参数
-	hostIndex := map[string]*model.Host{}
 	for _, gname := range groupNames {
 		g := raw[gname]
 		if gname == "all" {
@@ -57,11 +85,16 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 		}
 		inv.Groups[gname] = grp
 	}
-	// 组级连接参数键：按变量域同序合并（all < 父组 < 子组），供 buildHost
-	// 在主机条目之下、wdp.cfg 默认值之上取值（组级 conn/user 等由此生效）
+	return hostRaw
+}
+
+// buildHostObjects 构建主机对象并回填组成员。
+// 组级连接参数键：按变量域同序合并（all < 父组 < 子组），供 buildHost
+// 在主机条目之下、wdp.cfg 默认值之上取值（组级 conn/user 等由此生效）
+func buildHostObjects(inv *Inventory, hostRaw map[string]map[string]any, cfg *config.Config) error {
 	membership := inv.groupMembership()
-	// 构建主机对象并回填组成员
 	inv.Hosts = make([]*model.Host, 0, len(hostRaw))
+	hostIndex := map[string]*model.Host{}
 	for hname, hvars := range hostRaw {
 		groupVars := map[string]any{}
 		maps.Copy(groupVars, inv.AllVars)
@@ -70,7 +103,7 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 		}
 		h, err := buildHost(hname, hvars, groupVars, cfg)
 		if err != nil {
-			return nil, fmt.Errorf("host %s: %w", hname, err)
+			return fmt.Errorf("host %s: %w", hname, err)
 		}
 		hostIndex[hname] = h
 		inv.Hosts = append(inv.Hosts, h)
@@ -80,33 +113,19 @@ func build(raw rawInventory, varDirs []string, cfg *config.Config) (*Inventory, 
 			grp.Hosts = append(grp.Hosts, hostIndex[hname])
 		}
 	}
+	return nil
+}
 
-	// 校验 children 引用
+// validateGroupChildren 校验组 children 引用存在。
+func validateGroupChildren(inv *Inventory) error {
 	for _, grp := range inv.Groups {
 		for _, c := range grp.Children {
 			if _, ok := inv.Groups[c]; !ok {
-				return nil, fmt.Errorf("group %s references nonexistent child group %s", grp.Name, c)
+				return fmt.Errorf("group %s references nonexistent child group %s", grp.Name, c)
 			}
 		}
 	}
-
-	// 约定变量目录（按传入顺序，后者覆盖）：group_vars/<组>.yaml、host_vars/<主机>.yaml
-	for _, dir := range varDirs {
-		if err := inv.loadVarDirs(dir); err != nil {
-			return nil, err
-		}
-	}
-
-	slices.SortFunc(inv.Hosts, func(a, b *model.Host) int { return strings.Compare(a.Name, b.Name) })
-	inv.applyVars()
-	inv.precomputeTopology()
-
-	// via 中继声明校验：目标必须存在、链不得成环（加载期拦截，防提交端
-	// 选择中继时死循环或静默漏段）
-	if err := inv.ValidateVia(); err != nil {
-		return nil, err
-	}
-	return inv, nil
+	return nil
 }
 
 // loadVarDirs 加载目录约定变量。

@@ -2,6 +2,7 @@ package chart
 
 import (
 	"encoding/json"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,10 @@ func TestMarkerV2ContainsValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	values := map[string]any{"app": map[string]any{"port": 8080}, "data_dir": "/srv/app"}
-	b := c.MarkerContent("0.4.0", values, "deploy")
+	b, err := c.MarkerContent("0.4.0", values, "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
 	mk, err := ParseMarker(b)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +72,11 @@ sensitive_values: [db.password]
 	values := map[string]any{
 		"db": map[string]any{"host": "10.0.0.1", "password": "s3cret"},
 	}
-	b := string(c.MarkerContent("0.4.0", values, "deploy"))
+	braw, err := c.MarkerContent("0.4.0", values, "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := string(braw)
 	if strings.Contains(b, "s3cret") {
 		t.Fatalf("敏感值泄漏进 marker: %s", b)
 	}
@@ -108,6 +116,27 @@ sensitive_values: [db.password]
 	}
 }
 
+// TestMarkerContentEncodeError values 含不可 JSON 序列化值（YAML .nan/.inf
+// 解析出的 NaN/Inf）时 MarkerContent 必须报错而非返回空串——空 marker
+// 落盘会让 ParseMarker 失败、uninstall/status/drift 全部失效且已损坏。
+func TestMarkerContentEncodeError(t *testing.T) {
+	c, err := Load(writeLifecycleChart(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := c.MarkerContent("1.0.0", map[string]any{"bad": math.NaN()}, "deploy")
+	if err == nil {
+		t.Fatalf("NaN values 应报编码错误, got %q", b)
+	}
+	if len(b) != 0 {
+		t.Fatalf("失败时不应返回半截内容: %q", b)
+	}
+	// 正常 values 不受影响
+	if b, err = c.MarkerContent("1.0.0", map[string]any{"a": 1}, "deploy"); err != nil || len(b) == 0 {
+		t.Fatalf("正常 values 应成功: %q %v", b, err)
+	}
+}
+
 // TestMarkerRoundTrip：MarkerContent → ParseMarker 往返字段一致。
 func TestMarkerRoundTrip(t *testing.T) {
 	c, err := Load(writeLifecycleChart(t))
@@ -115,7 +144,11 @@ func TestMarkerRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	values := map[string]any{"k": "v"}
-	mk, err := ParseMarker(c.MarkerContent("1.2.3", values, "update"))
+	mcb, err := c.MarkerContent("1.2.3", values, "update")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := ParseMarker(mcb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +156,7 @@ func TestMarkerRoundTrip(t *testing.T) {
 		t.Fatalf("roundtrip: %+v", mk)
 	}
 	var raw map[string]any
-	if err := json.Unmarshal(c.MarkerContent("1.2.3", values, "update"), &raw); err != nil {
+	if err := json.Unmarshal(mcb, &raw); err != nil {
 		t.Fatal(err)
 	}
 	if raw["marker_schema"].(float64) != 2 {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strings"
 
@@ -23,6 +24,31 @@ func newReleaseCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newReleaseListCmd(), newReleaseShowCmd(), newReleaseDiffCmd(), newReleaseDelCmd())
 	return cmd
+}
+
+// finishPlay 执行收尾错误归一（run/apply 共用）：报告写错误（JSON 模式
+// 破管道等）优先于失败退出码呈现，两者都在时先暴露报告侧错误。
+func finishPlay(werr error, failed bool) error {
+	if werr != nil {
+		return werr
+	}
+	if failed {
+		return errPlayFailed
+	}
+	return nil
+}
+
+// saveReleaseRecord 落部署记录并归一收尾错误（run/apply 共用同一落盘与
+// 告警口径）：审计记录写失败（磁盘满/权限不足）不改变执行结论，但也不
+// 能无声——否则"部署成功但无记录"静默发生，回看与回滚依据随之缺失，
+// 至少留一条告警供事后核对。
+func saveReleaseRecord(rec *release.Record, werr error, failed bool) error {
+	if id, serr := release.Save(rec); serr == nil {
+		fmt.Fprintf(os.Stderr, "[release] %s\n", id)
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: failed to write the deployment record: %v\n", serr)
+	}
+	return finishPlay(werr, failed)
 }
 
 // newReleaseListCmd 构造 `wdp release list`。

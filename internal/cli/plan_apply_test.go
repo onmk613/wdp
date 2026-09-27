@@ -21,18 +21,6 @@ func planApplyEnv(t *testing.T) (chartDir, realDir string, restore func()) {
 	return chartDir, realDir, restoreInv
 }
 
-// withPlanOpts 临时设置 plan 编译参数。
-func withPlanOpts(t *testing.T, phase string, sets []string) {
-	t.Helper()
-	old := planOpts
-	planOpts.limit = ""
-	planOpts.phase = phase
-	planOpts.factCache = ""
-	planOpts.valuesFiles = nil
-	planOpts.setArgs = sets
-	t.Cleanup(func() { planOpts = old })
-}
-
 // TestPlanApplyEqualsRun deploy 相位：run 与 plan+apply 产生相同的落盘效果
 // 与 marker 内容。
 func TestPlanApplyEqualsRun(t *testing.T) {
@@ -65,10 +53,8 @@ func TestPlanApplyEqualsRun(t *testing.T) {
 
 	// --- 路径 B：wdp plan → wdp apply ---
 	planPath := filepath.Join(t.TempDir(), "plan.json")
-	withPlanOpts(t, "deploy", []string{"data_dir=" + realDir})
-	planOut = planPath
-	defer func() { planOut = "" }()
-	if err := runPlanCompile(ctx, chartDir); err != nil {
+	if err := runPlanCompile(ctx, chartDir, planPath, planCompileOptions{
+		phase: "deploy", setArgs: []string{"data_dir=" + realDir}}); err != nil {
 		t.Fatalf("plan 编译失败: %v", err)
 	}
 	if _, err := os.Stat(planPath); err != nil {
@@ -113,11 +99,8 @@ func TestPlanApplyUninstallFromMarker(t *testing.T) {
 		t.Fatalf("deploy 失败: %v", err)
 	}
 	planPath := filepath.Join(t.TempDir(), "uninstall-plan.json")
-	withPlanOpts(t, "uninstall", nil)
-	planOut = planPath
-	defer func() { planOut = "" }()
 	// 不带 --set 编译 uninstall 计划：values 从 marker 还原（需读取主机 marker）
-	if err := runPlanCompile(ctx, chartDir); err != nil {
+	if err := runPlanCompile(ctx, chartDir, planPath, planCompileOptions{phase: "uninstall"}); err != nil {
 		t.Fatalf("uninstall plan 编译失败: %v", err)
 	}
 	if err := runApply(ctx, planPath, applyOptions{yes: true}); err != nil {
@@ -145,10 +128,7 @@ func TestPlanCompileOfflineCLI(t *testing.T) {
 	defer func() { gInventories, gInventoryExplicit = old, oldExplicit }()
 
 	planPath := filepath.Join(invDir, "plan.json")
-	withPlanOpts(t, "deploy", nil)
-	planOut = planPath
-	defer func() { planOut = "" }()
-	if err := runPlanCompile(ctx, chartDir); err != nil {
+	if err := runPlanCompile(ctx, chartDir, planPath, planCompileOptions{phase: "deploy"}); err != nil {
 		t.Fatalf("离线编译失败: %v", err)
 	}
 	if _, err := os.Stat(planPath); err != nil {
@@ -157,8 +137,7 @@ func TestPlanCompileOfflineCLI(t *testing.T) {
 
 	// 同参数再编译一次：逐字节相同
 	planPath2 := filepath.Join(invDir, "plan2.json")
-	planOut = planPath2
-	if err := runPlanCompile(ctx, chartDir); err != nil {
+	if err := runPlanCompile(ctx, chartDir, planPath2, planCompileOptions{phase: "deploy"}); err != nil {
 		t.Fatal(err)
 	}
 	a, _ := os.ReadFile(planPath)

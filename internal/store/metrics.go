@@ -5,17 +5,8 @@ import (
 )
 
 // ---- 监控指标（5 分钟聚合）与主机健康告警 ----
-
-// UpsertMetric5m 把一个瞬时样本并入 5 分钟桶（n/vsum/vmax 增量更新，
-// avg = vsum/n）。scrapeLoop 每分钟调用。
-func (s *Store) UpsertMetric5m(hostID int64, metric, labels string, bucket int64, v float64) error {
-	_, err := s.db.Exec(`INSERT INTO metrics_5m (host_id, metric, labels, bucket, n, vsum, vmax)
-		VALUES (?, ?, ?, ?, 1, ?, ?)
-		ON CONFLICT(host_id, metric, labels, bucket)
-		DO UPDATE SET n = n + 1, vsum = vsum + excluded.vsum, vmax = max(vmax, excluded.vmax)`,
-		hostID, metric, labels, bucket, v, v)
-	return err
-}
+// 单样本写入统一走 BatchUpsertMetric5m（单事务批量）；逐条自提交的
+// UpsertMetric5m 无任何调用方，已删除。
 
 // MetricPoint 是一批同主机同桶的样本（批量写用）。
 type MetricPoint struct {

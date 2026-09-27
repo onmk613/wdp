@@ -9,6 +9,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Plus, Refresh } from '@element-plus/icons-vue'
 import { api, type App, type GroupEntry, type Host, type LabelDef, type Pool } from '../api'
+import { parseLabels } from '../lib/format'
 
 const props = defineProps<{ kind: 'pool' | 'group' | 'label' }>()
 const router = useRouter()
@@ -35,16 +36,8 @@ interface Entry {
   apps: App[]
 }
 
-function labelsOf(raw: string): Record<string, string> {
-  try {
-    return JSON.parse(raw || '{}')
-  } catch {
-    return {}
-  }
-}
-
-function memberOf(kind: 'pool' | 'group' | 'label', name: string, list: string[] | null, labels: string): boolean {
-  if (kind === 'label') return Object.prototype.hasOwnProperty.call(labelsOf(labels), name)
+function memberOf(kind: 'pool' | 'group' | 'label', name: string, list: string[] | null, labels: Record<string, string>): boolean {
+  if (kind === 'label') return Object.prototype.hasOwnProperty.call(labels, name)
   return (list || []).includes(name)
 }
 
@@ -56,17 +49,21 @@ const entries = computed<Entry[]>(() => {
       : props.kind === 'group'
         ? groups.value.map((g) => ({ id: g.ID, name: g.Name, note: g.Note }))
         : labelDefs.value.map((l) => ({ id: l.ID, name: l.Key, note: l.Note }))
+  // 标签 JSON 每台主机/每个应用只解析一次：成员判定对每个 (条目 × 主机)
+  // 都要读标签，循环内反复 parse 是纯浪费
+  const hostsParsed = hosts.value.map((h) => ({ h, labels: parseLabels(h.Labels) }))
+  const appsParsed = apps.value.map((a) => ({ a, labels: parseLabels(a.Labels) }))
   const used = new Set<string>()
-  for (const h of hosts.value) {
+  for (const { h, labels } of hostsParsed) {
     if (props.kind === 'label') {
-      Object.keys(labelsOf(h.Labels)).forEach((k) => used.add(k))
+      Object.keys(labels).forEach((k) => used.add(k))
     } else {
       ;((props.kind === 'pool' ? h.Pools : h.Groups) || []).forEach((n) => used.add(n))
     }
   }
-  for (const a of apps.value) {
+  for (const { a, labels } of appsParsed) {
     if (props.kind === 'label') {
-      Object.keys(labelsOf(a.Labels)).forEach((k) => used.add(k))
+      Object.keys(labels).forEach((k) => used.add(k))
     } else {
       ;((props.kind === 'pool' ? a.Pools : a.Groups) || []).forEach((n) => used.add(n))
     }
@@ -78,10 +75,10 @@ const entries = computed<Entry[]>(() => {
   all.sort((x, y) => (x.id === 0 ? 1 : 0) - (y.id === 0 ? 1 : 0) || x.name.localeCompare(y.name))
   return all.map((r) => ({
     ...r,
-    hosts: hosts.value
-      .filter((h) => memberOf(props.kind, r.name, props.kind === 'pool' ? h.Pools : h.Groups, h.Labels))
-      .map((h) => ({ name: h.Name, value: labelsOf(h.Labels)[r.name] ?? '' })),
-    apps: apps.value.filter((a) => memberOf(props.kind, r.name, props.kind === 'pool' ? a.Pools : a.Groups, a.Labels)),
+    hosts: hostsParsed
+      .filter(({ h, labels }) => memberOf(props.kind, r.name, props.kind === 'pool' ? h.Pools : h.Groups, labels))
+      .map(({ h, labels }) => ({ name: h.Name, value: labels[r.name] ?? '' })),
+    apps: appsParsed.filter(({ a, labels }) => memberOf(props.kind, r.name, props.kind === 'pool' ? a.Pools : a.Groups, labels)).map(({ a }) => a),
   }))
 })
 

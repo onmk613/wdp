@@ -10,9 +10,11 @@
 //	DRIFTED      values 已变（改配置未部署，或有人手改过现场）
 //	OUTDATED     部署的是旧 chart 版本（values 摘要一致）
 //	NOT-DEPLOYED 无 marker（未部署过或已卸载）
+//	FAILED       marker 读取任务失败（如 become 被拒——连接是通的，
+//	             任务本身失败）
 //	UNREACHABLE  连接失败
 //
-// 判失败口径：DRIFTED / UNREACHABLE（可直接进 CI）；NOT-DEPLOYED /
+// 判失败口径：DRIFTED / FAILED / UNREACHABLE（可直接进 CI）；NOT-DEPLOYED /
 // OUTDATED 只列出不判失败（扩容中主机与待升级是常态，不是漂移）。
 package drift
 
@@ -24,6 +26,7 @@ import (
 	"sync"
 
 	"wdp/internal/chart"
+	"wdp/internal/fmtutil"
 	"wdp/internal/model"
 	"wdp/internal/report"
 	"wdp/internal/shellquote"
@@ -94,8 +97,8 @@ func ReadMarkerPlay(chartName, markerPath, pattern string) *model.Play {
 }
 
 // Classify 逐主机比对 marker 读取结果与期望摘要，产出结论行，并返回需判
-// 失败的主机数（DRIFTED / UNREACHABLE）。wantValues 非空且 marker 为 v2
-// （含 resolved values）时，DRIFTED 的 Detail 升级为字段级 diff。
+// 失败的主机数（DRIFTED / FAILED / UNREACHABLE）。wantValues 非空且 marker
+// 为 v2（含 resolved values）时，DRIFTED 的 Detail 升级为字段级 diff。
 func Classify(hosts []*model.Host, results map[string]*model.TaskResult, chartVersion, wantSHA string, wantValues map[string]any) (rows []Row, failed int) {
 	for _, h := range hosts {
 		r := results[h.Name]
@@ -104,8 +107,10 @@ func Classify(hosts []*model.Host, results map[string]*model.TaskResult, chartVe
 			failed++
 			continue
 		}
+		// 任务失败（如 become 被拒）与连接失败分开归类：连接是通的，
+		// 混进 UNREACHABLE 会误导排障方向（去查网络而非权限）
 		if r.Failed {
-			rows = append(rows, Row{h.Name, "UNREACHABLE", firstLineOr(r.Msg, "read failed")})
+			rows = append(rows, Row{h.Name, "FAILED", fmtutil.FirstLineOr(r.Msg, "read failed")})
 			failed++
 			continue
 		}
@@ -116,7 +121,7 @@ func Classify(hosts []*model.Host, results map[string]*model.TaskResult, chartVe
 		}
 		mk, err := chart.ParseMarker([]byte(stdout))
 		if err != nil {
-			rows = append(rows, Row{h.Name, "DRIFTED", "marker unreadable: " + firstLineOr(err.Error(), "bad json")})
+			rows = append(rows, Row{h.Name, "DRIFTED", "marker unreadable: " + fmtutil.FirstLineOr(err.Error(), "bad json")})
 			failed++
 			continue
 		}
@@ -215,22 +220,12 @@ func orDash(r *model.TaskResult) string {
 	if r == nil || r.Msg == "" {
 		return "unreachable"
 	}
-	return firstLineOr(r.Msg, "unreachable")
+	return fmtutil.FirstLineOr(r.Msg, "unreachable")
 }
 
 func orNA(s string) string {
 	if s == "" {
 		return "n/a"
-	}
-	return s
-}
-
-func firstLineOr(s, def string) string {
-	if s == "" {
-		return def
-	}
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
 	}
 	return s
 }

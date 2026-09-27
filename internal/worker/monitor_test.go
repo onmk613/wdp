@@ -4,6 +4,8 @@ package worker
 // 阈值告警评估（写/清）→ 计数器回绕防御。
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -190,6 +192,116 @@ func TestCounterWraparound(t *testing.T) {
 	if len(pts) == 0 || pts[0].Avg != 0 {
 		t.Fatalf("CPU 回绕形态（idle 差>total 差）应钳制为 0: %+v", pts)
 	}
+}
+
+// TestDiskBusyPerDevice disk_busy_pct 逐设备入库（device 标签）：
+// io_time 跨设备求和会让 N 块盘的忙碌度叠成 N×100%，破坏 busy% 的
+// 单设备定义——与 fs 指标逐 mount 同款，按 device 分别成系列。
+func TestDiskBusyPerDevice(t *testing.T) {
+	m, st := newMonitor(t)
+	id, err := st.CreateHost(&store.Host{Name: "disk-host", Address: "127.0.0.1", AgentPort: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := `node_disk_io_time_seconds_total{device="sda"} 100
+node_disk_io_time_seconds_total{device="sdb"} 200
+`
+	m.IngestSamples(id, ParsePromText(base)) // 建基线
+	ss := ParsePromText(base)
+	for i := range ss {
+		ss[i].Value += 10 * float64(i+1) // sda +10s、sdb +20s：忙碌度比例 1:2
+	}
+	m.IngestSamples(id, ss)
+
+	// 各自成系列；不再有主机级求和系列（labels=""）
+	for _, dev := range []string{"sda", "sdb"} {
+		pts, err := st.QuerySeries(id, "disk_busy_pct", "device="+dev, 0)
+		if err != nil || len(pts) != 1 {
+			t.Fatalf("device=%s 应有独立系列: %v %v", dev, pts, err)
+		}
+	}
+	if pts, _ := st.QuerySeries(id, "disk_busy_pct", "", 0); len(pts) != 0 {
+		t.Fatalf("不应写主机级求和系列: %v", pts)
+	}
+	// 两设备同一轮差分共用同一 dt：忙碌度比应等于 io_time 增量比 1:2
+	a, _ := st.QuerySeries(id, "disk_busy_pct", "device=sda", 0)
+	b, _ := st.QuerySeries(id, "disk_busy_pct", "device=sdb", 0)
+	if r := b[0].Avg / a[0].Avg; r < 1.99 || r > 2.01 {
+		t.Fatalf("sdb/sda 忙碌度比应 ≈2: %v vs %v", b[0].Avg, a[0].Avg)
+	}
+}
+
+// TestParsePromTextLabelUnescape label 值转义还原：\\、\"、\n 三个
+// PromText 转义都要还原，`\\n` 不得被过度还原成换行（先 \\ 后 n 的
+// 顺序语义），未知转义原样保留。
+func TestParsePromTextLabelUnescape(t *testing.T) {
+	body := `node_filesystem_size_bytes{mount="\\srv\\share"} 100
+node_filesystem_size_bytes{mount="line1\nline2"} 200
+node_filesystem_size_bytes{mount="quo\"te"} 300
+node_filesystem_size_bytes{mount="back\\nslash"} 400
+node_filesystem_size_bytes{mount="unk\\twn"} 500
+`
+	ss := ParsePromText(body)
+	got := map[string]string{}
+	for _, s := range ss {
+		got[s.Labels["mount"]] = "hit"
+	}
+	for _, want := range []string{`\srv\share`, "line1\nline2", `quo"te`, `back\nslash`, `unk\twn`} {
+		if _, ok := got[want]; !ok {
+			t.Fatalf("label 值 %q 未按转义语义还原: %+v", want, ss)
+		}
+	}
+}
+
+// TestScrapeOnceCancelledCtxNoOfflineAlert 关停瞬间伪 offline 回归：
+// ctx 取消后已派发 goroutine 的抓取以失败收场，不得据此写 offline
+// crit 告警——server 关停不应把全网打成不可达。对照组：ctx 存活时同一
+// 抓取失败照常告警（证明失败路径可达，测试非空洞）。
+func TestScrapeOnceCancelledCtxNoOfflineAlert(t *testing.T) {
+	m, st := newMonitor(t)
+	if _, err := st.CreateHost(&store.Host{Name: "down-host", Address: "127.0.0.1", AgentPort: 1}); err != nil {
+		t.Fatal(err)
+	}
+	m.Fetch = func(context.Context, *store.Host) (string, error) {
+		return "", errors.New("connection refused")
+	}
+
+	// 对照组：ctx 存活 → offline 告警照常写入
+	m.scrapeOnce(context.Background())
+	alerts, err := st.ListHostAlerts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) == 0 || alerts[0].Kind != "offline" || alerts[0].Level != "crit" {
+		t.Fatalf("ctx 存活时抓取失败应写 offline crit: %+v", alerts)
+	}
+
+	// 清空后重放：ctx 已取消 → 不写（且不清既有告警，避免半程状态）
+	if err := st.ClearHostAlert(mustFirstHostID(t, st), "offline"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	m.scrapeOnce(ctx)
+	alerts, err = st.ListHostAlerts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range alerts {
+		if a.Kind == "offline" {
+			t.Fatalf("ctx 取消后的抓取失败不应写 offline 告警: %+v", a)
+		}
+	}
+}
+
+// mustFirstHostID 取库中首个主机 id（测试装配辅助）。
+func mustFirstHostID(t *testing.T, st *store.Store) int64 {
+	t.Helper()
+	ids, err := st.HostIDs()
+	if err != nil || len(ids) == 0 {
+		t.Fatalf("测试主机应存在: %v %v", ids, err)
+	}
+	return ids[0]
 }
 
 // TestForgetHostState 主机删除清差分快照：同 ID 重建主机不得拿到旧计数器。

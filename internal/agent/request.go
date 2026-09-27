@@ -16,7 +16,7 @@ import (
 // 总长 1..64。句点允许但由 filepath.Join + 后续路径校验共同约束。
 var runIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
-// validateRunID 校验 run_id 合法性（不合法即拒绝，不做任何"清洗"）。
+// 不合法直接拒绝，不做任何"清洗"。
 func validateRunID(id string) error {
 	if !runIDRe.MatchString(id) {
 		return fmt.Errorf("run_id %q is invalid (allowed: 1-64 chars, letters/digits/'.'/'_'/'-', must start alphanumeric)", id)

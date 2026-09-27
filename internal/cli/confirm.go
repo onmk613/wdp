@@ -55,7 +55,7 @@ func confirmReversibility(ch *chart.Chart, phase string, yes bool) error {
 				rep.Irreversible)
 			return nil
 		}
-		return fmt.Errorf("irreversible operations detected in a non-interactive environment (stderr is not a terminal); "+
+		return fmt.Errorf("irreversible operations detected in a non-interactive environment (stderr is not a terminal); " +
 			"rerun with --yes to proceed explicitly, or set WDP_AUTO_CONFIRM_IRREVERSIBLE=1 for unattended pipelines")
 	}
 	p.Printf(fmtutil.None, "==> %s, continue? [Y/n] ",

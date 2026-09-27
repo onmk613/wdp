@@ -22,6 +22,15 @@ import (
 // errPlayFailed 标记存在失败主机（退出码 1，不打印重复错误）。
 var errPlayFailed = fmt.Errorf("execution finished with failed hosts")
 
+// normalizeDiffFlag 归一 --diff/--check 组合：--diff 基于 check 的只读
+// 对比，未显式给 --check 时自动启用预演（run/apply/adhoc 三处同一口径）。
+func normalizeDiffFlag(diff, check bool) bool {
+	if diff && !check {
+		return true // --diff 基于 check 只读对比，自动启用预演
+	}
+	return check
+}
+
 // chartValueFlags 声明 chart 公共 flag（-f/--values/--set）。
 func chartValueFlags(cmd *cobra.Command, valuesFiles, setArgs *[]string) {
 	cmd.Flags().StringArrayVarP(valuesFiles, "values-file", "f", nil,

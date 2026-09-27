@@ -88,7 +88,13 @@ func (a *hostKeyApplier) apply(k string, v any) error {
 	case "known_hosts":
 		h.KnownHosts = fmt.Sprint(v)
 	case "connect_timeout":
-		h.ConnectTimeoutSec = toInt(v, 10)
+		// 严格解析（与 port 同纪律）：宽松解析会把 "10x" 部分解析成 10，
+		// 拼错的超时直到连接期才暴露
+		n, err := strictInt(v)
+		if err != nil {
+			return fmt.Errorf("connect_timeout: %w", err)
+		}
+		h.ConnectTimeoutSec = n
 	case "agent_url":
 		h.AgentURL = fmt.Sprint(v)
 	case "agent_port":
@@ -178,26 +184,34 @@ func buildHost(name string, vars, groupVars map[string]any, cfg *config.Config) 
 	return h, nil
 }
 
-// strictPort 严格解析整数端口：类型不符/部分解析（"80x"）显式报错，
-// 范围校验 0..65535（agent_port 0=未设置）。
-func strictPort(v any, def, min int) (int, error) {
-	var n int
+// strictInt 严格解析整数：类型不符/部分解析（"80x"）显式报错，不做
+// 宽松截断（范围校验由调用方按字段语义追加）。
+func strictInt(v any) (int, error) {
 	switch x := v.(type) {
 	case int:
-		n = x
+		return x, nil
 	case float64:
 		if x != float64(int(x)) {
 			return 0, fmt.Errorf("expected an integer, got %v", x)
 		}
-		n = int(x)
+		return int(x), nil
 	case string:
 		parsed, err := strconv.Atoi(strings.TrimSpace(x))
 		if err != nil {
 			return 0, fmt.Errorf("expected an integer, got %q", x)
 		}
-		n = parsed
+		return parsed, nil
 	default:
 		return 0, fmt.Errorf("expected an integer, got %T", v)
+	}
+}
+
+// strictPort 严格解析整数端口：类型不符/部分解析（"80x"）显式报错，
+// 范围校验 0..65535（agent_port 0=未设置）。
+func strictPort(v any, def, min int) (int, error) {
+	n, err := strictInt(v)
+	if err != nil {
+		return 0, err
 	}
 	if n == 0 && def != 0 {
 		return def, nil // 未设置语义交给调用方默认值
@@ -206,19 +220,4 @@ func strictPort(v any, def, min int) (int, error) {
 		return 0, fmt.Errorf("%d is out of range %d..65535", n, min)
 	}
 	return n, nil
-}
-
-func toInt(v any, def int) int {
-	switch x := v.(type) {
-	case int:
-		return x
-	case float64:
-		return int(x)
-	case string:
-		var n int
-		if _, err := fmt.Sscanf(x, "%d", &n); err == nil {
-			return n
-		}
-	}
-	return def
 }

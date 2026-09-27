@@ -10,7 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 
@@ -79,52 +79,29 @@ func (l *Local) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult
 	return conn.ExecResult{Code: code, Stdout: stdout.String(), Stderr: stderr.String()}, nil
 }
 
-// UploadFile 写本地文件（临时文件 + 原子改名）。
+// UploadFile 写本地文件（conn.WriteLocalFile 共享实现：建父目录 +
+// fsatomic 原子落盘，与 selfexec 同口径）。
 func (l *Local) UploadFile(_ context.Context, dst string, r io.Reader, mode fs.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".wdp-upload-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }()
-
-	if _, err := io.Copy(tmp, r); err != nil {
-		tmp.Close()
-		return err
-	}
-	if mode == 0 {
-		mode = 0o644
-	}
-	if err := tmp.Chmod(mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, dst); err != nil {
-		return fmt.Errorf("failed to write %s to disk: %w", dst, err)
-	}
-	return nil
+	return conn.WriteLocalFile(dst, r, mode)
 }
 
-// DownloadFile 读本地文件。
+// DownloadFile 读本地文件（conn.ReadLocalFile 共享实现）。
 func (l *Local) DownloadFile(_ context.Context, src string, w io.Writer) error {
-	f, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	_, err = io.Copy(w, f)
-	return err
+	return conn.ReadLocalFile(src, w)
 }
+
+// envKeyRe 是允许注入的环境变量键白名单（与 sshc.WrapStdin、
+// selfrun.RunScript 同一纪律：env 键经网络/plan 下发，拼进进程环境前
+// 必须限定字符集，防 LF/空格等利用 K=V 形态的注入）。正则取 sshc 的
+// 形态（允许下划线续位，FOO_BAR 是合法环境变量名）。
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func envList(env map[string]string) []string {
 	out := make([]string, 0, len(env))
 	for k, v := range env {
+		if !envKeyRe.MatchString(k) {
+			continue // 越白名单的键静默丢弃（与 sshc/selfrun 一致）
+		}
 		out = append(out, k+"="+v)
 	}
 	return out

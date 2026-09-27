@@ -5,7 +5,6 @@ package chart
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -13,12 +12,19 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// maxSetListIndex 是 --set 点路径列表下标的上限：下标会预填 nil 撑长
+// 列表（预分配内存），无上限的巨大下标（多半是手滑多打了几个零）会被
+// 用来直接耗尽内存，必须在解析期拒绝。
+const maxSetListIndex = 4096
+
 // Merge 按 Helm 语义深合并：override 写入 base 之上。
 // map 递归合并；标量与列表整体替换；显式 null 删除 base 中的键。
-// 返回新 map，不修改入参。
+// 返回新 map，不修改入参，也不与入参共享可变子结构（嵌套 map/列表深
+// 拷贝）：调用方（executor 的 --set 点路径原地写、SubScope 作用域叠加）
+// 改结果的子 map 不得反过来污染 base/override 源——此类共享污染在
+// deepCopyValues 的历史上真实发生过。
 func Merge(base, override map[string]any) map[string]any {
-	out := make(map[string]any, len(base)+len(override))
-	maps.Copy(out, base)
+	out := deepCopyValues(base)
 	for k, v := range override {
 		if v == nil {
 			delete(out, k)
@@ -30,7 +36,9 @@ func Merge(base, override map[string]any) map[string]any {
 				continue
 			}
 		}
-		out[k] = v
+		// 整体替换的值同样深拷贝后放入：直接搬 v 的引用会让结果与
+		// override 共享嵌套 map/列表。
+		out[k] = deepCopyAny(v)
 	}
 	return out
 }
@@ -109,6 +117,8 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 				cur[s.key] = value
 				return root, nil
 			}
+			// 非末段 map 段：现值缺失/为 nil 时自动建空 map 下钻；
+			// 已是标量/列表则报错（不静默覆盖用户已写的值）
 			next, ok := cur[s.key].(map[string]any)
 			if !ok {
 				if v, exists := cur[s.key]; exists && v != nil {
@@ -127,13 +137,16 @@ func SetPath(root map[string]any, path string, value any) (map[string]any, error
 		} else if v, exists := cur[s.key]; exists && v != nil {
 			return nil, fmt.Errorf("--set %q: %q is already a non-list value (%T)", path, s.key, cur[s.key])
 		}
-		if s.idx > 4096 {
-			return nil, fmt.Errorf("--set %q: list index %d exceeds the 4096 cap (typo? indices pre-allocate memory)", path, s.idx)
+		if s.idx > maxSetListIndex {
+			return nil, fmt.Errorf("--set %q: list index %d exceeds the %d cap (typo? indices pre-allocate memory)", path, s.idx, maxSetListIndex)
 		}
+		// 预填 nil 把列表撑到目标下标（中间空洞为 nil 占位）
 		for len(list) <= s.idx {
 			list = append(list, nil)
 		}
 		if last {
+			// 末段写 nil 是占位而非删除——列表 delete 会移动后续
+			// 下标，与 map 段的点路径 delete 语义刻意不同
 			list[s.idx] = value
 			cur[s.key] = list
 			return root, nil
@@ -222,6 +235,10 @@ func ApplySet(values map[string]any, pair string) (map[string]any, error) {
 }
 
 // inferType 推断字符串字面量类型。
+// 整数/浮点/true/false/null 按字面量，其余保持字符串；纯数字且带前导零
+// （长度>1）同样保持字符串——"0755" 的八进制写法是用户意图（如
+// --set mode=0755），ParseInt 会推成十进制 755 而 argMode 侧按字符串
+// "0…" 前缀解析为八进制，转数字即丢掉八进制语义。
 func inferType(s string) any {
 	switch s {
 	case "true":
@@ -234,6 +251,9 @@ func inferType(s string) any {
 		return ""
 	}
 	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if len(s) > 1 && s[0] == '0' {
+			return s
+		}
 		return n
 	}
 	if f, err := strconv.ParseFloat(s, 64); err == nil {

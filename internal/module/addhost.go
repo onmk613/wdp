@@ -27,10 +27,8 @@ func init() {
 // 下一批次/play 的选择期与 groups/hosts/hostvars 内置变量可见。
 type AddHostModule struct{}
 
-// Name 模块名。
 func (m *AddHostModule) Name() string { return "add_host" }
 
-// Desc 模块说明。
 func (m *AddHostModule) Desc() string {
 	return "add or update an inventory host at runtime, optionally joining groups (visible to later plays)"
 }
@@ -39,7 +37,7 @@ func (m *AddHostModule) Desc() string {
 func (m *AddHostModule) Run(_ *RunContext, args map[string]any, _ string) *Result {
 	name, _ := argStr(args, "name")
 	if strings.TrimSpace(name) == "" {
-		return Fail("%s", "add_host requires a host name")
+		return Fail("add_host requires a host name")
 	}
 	h := &model.Host{Name: name}
 	if addr, ok := argStr(args, "address"); ok && addr != "" {
@@ -77,7 +75,6 @@ func groupsSuffix(groups []string) string {
 	return " groups: " + strings.Join(groups, ",")
 }
 
-// Params 参数文档。
 func (m *AddHostModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "name", Type: "string", Desc: "host name (required, used as inventory_hostname)"},
@@ -90,7 +87,6 @@ func (m *AddHostModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *AddHostModule) Example() string {
 	return `- name: register a scaled-out node from a runtime query
   shell: 'cat /etc/mycluster/pending-node'   # e.g. prints 10.8.2.105

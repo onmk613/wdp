@@ -16,6 +16,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 
@@ -93,6 +94,9 @@ func LoadMergeWithConfig(paths []string, cfg *config.Config) (*Inventory, error)
 }
 
 // mergeRaw 合并两份原始 inventory（b 覆盖 a）。
+// 契约：不修改入参——同名组合并时构造全新 group（Hosts 新 map、
+// Children 新切片、Vars 由 mergeVars 深合并返回新 map），a/b 及其内层
+// 结构保持只读；未命中的组按原样共享（本函数不再就地改写，共享安全）。
 func mergeRaw(a, b rawInventory) rawInventory {
 	out := rawInventory{}
 	maps.Copy(out, a)
@@ -102,33 +106,42 @@ func mergeRaw(a, b rawInventory) rawInventory {
 			out[name] = g
 			continue
 		}
-		if cur.Hosts == nil {
-			cur.Hosts = g.Hosts
-		} else if g.Hosts != nil {
+		merged := rawGroup{Vars: mergeVars(cur.Vars, g.Vars)}
+		switch {
+		case cur.Hosts == nil:
+			merged.Hosts = g.Hosts
+		case g.Hosts == nil:
+			merged.Hosts = cur.Hosts
+		default:
+			merged.Hosts = make(map[string]map[string]any, len(cur.Hosts)+len(g.Hosts))
+			maps.Copy(merged.Hosts, cur.Hosts)
 			for hn, hv := range g.Hosts {
-				if old := cur.Hosts[hn]; old != nil {
+				if old := merged.Hosts[hn]; old != nil {
 					mergedHost := map[string]any{}
 					maps.Copy(mergedHost, old)
 					maps.Copy(mergedHost, hv)
-					cur.Hosts[hn] = mergedHost
+					merged.Hosts[hn] = mergedHost
 				} else {
-					cur.Hosts[hn] = hv
+					merged.Hosts[hn] = hv
 				}
 			}
 		}
-		cur.Vars = mergeVars(cur.Vars, g.Vars)
 		if len(g.Children) > 0 {
 			seen := map[string]bool{}
 			for _, c := range cur.Children {
 				seen[c] = true
 			}
+			add := make([]string, 0, len(g.Children))
 			for _, c := range g.Children {
 				if !seen[c] {
-					cur.Children = append(cur.Children, c)
+					add = append(add, c)
 				}
 			}
+			if len(add) > 0 {
+				merged.Children = slices.Concat(cur.Children, add)
+			}
 		}
-		out[name] = cur
+		out[name] = merged
 	}
 	return out
 }

@@ -90,18 +90,21 @@ func runAdhoc(ctx context.Context, pattern string, opts adhocOptions) error {
 		return err
 	}
 	free, margs := parseAdhocArgs(opts.argStr)
-	if opts.diff && !opts.check {
-		opts.check = true // --diff 基于 check 只读对比
-	}
+	opts.check = normalizeDiffFlag(opts.diff, opts.check)
 	play := &model.Play{
 		Hosts: pattern, Become: opts.become,
 		Tasks: []*model.Task{{Module: opts.mod, FreeForm: free, Args: margs, Become: &opts.become}},
+	}
+	// 零主机即失败（与 run 同源同口径）：模式合法但命中空集时，此前会跑完
+	// 空 RECAP 并退出 0，CI 把"什么都没做"当成执行成功。
+	if hosts := inv.SelectPlays([]*model.Play{play}, ""); len(hosts) == 0 {
+		return noHostsError("", pattern)
 	}
 	rep, finish := buildReporter()
 	if opts.format != "" {
 		// --format：逐主机模板化输出（脚本管道友好），静默其余呈现
 		rep = report.NewFormatter(os.Stdout, opts.format)
-		finish = func() {}
+		finish = func() error { return nil }
 	}
 	conns := conn.NewManagerWithDefaults(connDefaults())
 	conns.SetConnectConcurrency(2 * config.Current().Forks())
@@ -117,7 +120,9 @@ func runAdhoc(ctx context.Context, pattern string, opts adhocOptions) error {
 	defer stop()
 	failed := ex.Run(ctx, []*model.Play{play})
 	conns.CloseAll()
-	finish()
+	if werr := finish(); werr != nil {
+		return werr
+	}
 	if failed {
 		return errPlayFailed
 	}

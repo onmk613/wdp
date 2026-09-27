@@ -104,7 +104,9 @@ func ParseBool(v any) (bool, error) {
 	return false, fmt.Errorf("cannot parse as bool: %v", v)
 }
 
-// Clone 深拷贝主机（变量单独一份，供每主机独立变量域使用）。
+// Clone 拷贝主机（Vars 首层 map 独立一份，供每主机独立变量域使用；
+// 嵌套 map/slice 仍与原主机共享，模板函数不得就地改写嵌套值——
+// 共享域的并发安全依赖 render.safeMerge 的约定）。
 func (h *Host) Clone() *Host {
 	nh := *h
 	if h.Vars != nil {

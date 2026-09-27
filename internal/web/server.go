@@ -70,7 +70,7 @@ type Server struct {
 	permMu         sync.RWMutex         // 权限视图缓存
 	permCache      map[string]*userPerms
 	loginMu        sync.Mutex               // 登录失败限速表
-	loginFails     map[string]*loginAttempt // IP+用户名 → 失败计数/锁定截止
+	loginFails     map[string]*loginAttempt // 限速键 → 失败计数/锁定截止；键族含 ip|、user|、basic| 前缀（构造见 authmw.go handleLogin/basicAuthUser）
 	uploadMu       sync.Mutex               // 上传互斥：版本预检→制品归位→入库整体临界区（防 TOCTOU 覆盖/误删）
 	trustedProxies []*net.IPNet             // 可采信 XFF 的对端（含回环；见 Options.TrustedProxies）
 	metrics        httpMetrics              // 请求计数/耗时观测（observability.go）
@@ -231,7 +231,7 @@ func bootstrapAdmin(st *store.Store, opts *Options, logger *slog.Logger) error {
 // Handler 返回对外的完整处理器链（含指标中间件），与 Run 监听的完全一致。
 // 测试必须走这里——曾因测试直连裸 mux、生产包了中间件，导致 SSE 依赖的
 // http.Flusher 在生产被中间件吞掉却全量测试绿灯。
-func (s *Server) Handler() http.Handler { return securityHeaders(s.metricsMiddleware(s.mux)) }
+func (s *Server) Handler() http.Handler { return s.securityHeaders(s.metricsMiddleware(s.mux)) }
 
 // muxOnly 返回未包中间件的裸路由（仅供需要观察原始 ResponseWriter 的
 // 极端用例；业务测试一律用 Handler）。

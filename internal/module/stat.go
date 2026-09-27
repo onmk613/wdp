@@ -16,15 +16,12 @@ func init() {
 // 并入主机变量域 stat 键（register 后可在后续任务引用）。只读，永不产生变更。
 type StatModule struct{}
 
-// Name 模块名。
 func (m *StatModule) Name() string { return "stat" }
 
-// Desc 模块说明。
 func (m *StatModule) Desc() string {
 	return "collect remote file/directory facts into a stat variable"
 }
 
-// Params 参数文档。
 func (m *StatModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "path", Type: "string", Desc: "remote path"},
@@ -33,7 +30,6 @@ func (m *StatModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *StatModule) Example() string {
 	return `- name: gather config file facts (results land in .stat.*, same semantics as setup)
   stat:
@@ -52,7 +48,7 @@ func (m *StatModule) Example() string {
 func (m *StatModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	path, ok := argStr(args, "path")
 	if !ok || path == "" {
-		return Fail("%s", "stat requires a path parameter")
+		return Fail("stat requires a path parameter")
 	}
 	getChecksum := true
 	if b, ok := argBool(args, "get_checksum"); ok {
@@ -128,14 +124,21 @@ func (m *StatModule) Run(rc *RunContext, args map[string]any, _ string) *Result 
 		}
 	}
 
-	msg := fmt.Sprintf("%s exists (%s", path, kind)
-	if s, _ := facts["mode"].(string); s != "" {
-		msg += ", mode " + s
+	// follow 解析后 kind=missing 只可能是 broken symlink（链接在而目标不在；
+	// 原路径缺失已在上方提前返回）——"exists (missing)" 前后矛盾，换如实表述
+	var msg string
+	if kind == "missing" {
+		msg = fmt.Sprintf("%s is a broken symlink (target missing)", path)
+	} else {
+		msg = fmt.Sprintf("%s exists (%s", path, kind)
+		if s, _ := facts["mode"].(string); s != "" {
+			msg += ", mode " + s
+		}
+		if kind == "file" && sizeKnown {
+			msg += fmt.Sprintf(", %d bytes", fileSize)
+		}
+		msg += ")"
 	}
-	if kind == "file" && sizeKnown {
-		msg += fmt.Sprintf(", %d bytes", fileSize)
-	}
-	msg += ")"
 	return &Result{Msg: msg, Facts: map[string]any{"stat": facts}}
 }
 

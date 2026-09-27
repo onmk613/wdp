@@ -19,10 +19,8 @@ var serviceStates = []string{"started", "stopped", "restarted", "reloaded"}
 // ServiceModule systemd 服务状态与自启管理。
 type ServiceModule struct{}
 
-// Name 模块名。
 func (m *ServiceModule) Name() string { return "service" }
 
-// Desc 模块说明。
 func (m *ServiceModule) Desc() string {
 	return "manage systemd service state and boot enablement"
 }
@@ -32,7 +30,7 @@ func (m *ServiceModule) Desc() string {
 func (m *ServiceModule) Run(rc *RunContext, args map[string]any, _ string) *Result {
 	name, ok := argStr(args, "name")
 	if !ok || name == "" {
-		return Fail("%s", "service requires a name parameter")
+		return Fail("service requires a name parameter")
 	}
 	state, hasState := argStr(args, "state")
 	if state != "" && !slices.Contains(serviceStates, state) {
@@ -40,7 +38,7 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, _ string) *Resu
 	}
 	enabled, hasEnabled := argBool(args, "enabled")
 	if !hasState && !hasEnabled {
-		return Fail("%s", "service requires at least one of state or enabled")
+		return Fail("service requires at least one of state or enabled")
 	}
 
 	active, bad := isActive(rc, name)
@@ -52,44 +50,33 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, _ string) *Resu
 		return bad
 	}
 
-	// 动作计划：systemctl 子命令 + 动作描述
-	var verbs, logs []string
-	wouldActive, wouldEnabled := active, enabledNow
-	switch {
-	case state == "started" && !active:
-		verbs, logs = append(verbs, "start"), append(logs, "start")
-		wouldActive = true
-	case state == "stopped" && active:
-		verbs, logs = append(verbs, "stop"), append(logs, "stop")
-		wouldActive = false
-	case state == "restarted":
-		verbs, logs = append(verbs, "restart"), append(logs, "restart")
-		wouldActive = true
-	case state == "reloaded":
-		if active {
-			verbs, logs = append(verbs, "reload"), append(logs, "reload")
-		} else {
-			// 未运行服务 reload 等价 start（收敛到运行态）
-			verbs, logs = append(verbs, "start"), append(logs, "start")
+	// 动作计划：期望态 → systemctl 子命令序列（service/systemd_unit 共用
+	// 内核 svcStatePlan/svcEnablePlan，见 servicecore.go）。state 动作在前、
+	// 自启动作在后；logs 是面向用户的动作描述（自启带 autostart 后缀）。
+	stateVerb, wouldActive := svcStatePlan(state, active)
+	enableVerb := ""
+	wouldEnabled := enabledNow
+	if hasEnabled {
+		if v := svcEnablePlan(enabled, enabledNow); v != "" {
+			enableVerb = v
+			wouldEnabled = enabled
 		}
-		wouldActive = true
 	}
-	switch {
-	case hasEnabled && enabled && !enabledNow:
-		verbs, logs = append(verbs, "enable"), append(logs, "enable autostart")
-		wouldEnabled = true
-	case hasEnabled && !enabled && enabledNow:
-		verbs, logs = append(verbs, "disable"), append(logs, "disable autostart")
-		wouldEnabled = false
+	var verbs, logs []string
+	if stateVerb != "" {
+		verbs, logs = append(verbs, stateVerb), append(logs, stateVerb)
+	}
+	if enableVerb != "" {
+		verbs, logs = append(verbs, enableVerb), append(logs, enableVerb+" autostart")
 	}
 
 	if rc.CheckMode {
 		res := &Result{Changed: len(verbs) > 0}
 		if res.Changed {
 			if hasState {
-				res.Msg = fmt.Sprintf("[check] would %s %s (%s)", verbFor(state), name, joinWords(logs))
+				res.Msg = fmt.Sprintf("[check] would %s %s (%s)", verbFor(state), name, strings.Join(logs, ", "))
 			} else {
-				res.Msg = fmt.Sprintf("[check] %s (%s)", name, joinWords(logs))
+				res.Msg = fmt.Sprintf("[check] %s (%s)", name, strings.Join(logs, ", "))
 			}
 		} else {
 			res.Msg = fmt.Sprintf("[check] %s is already in the target state", name)
@@ -106,7 +93,7 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, _ string) *Resu
 					fmt.Sprintf("- enabled: %s", boolTo(enabledNow, "enabled", "disabled")),
 					fmt.Sprintf("+ enabled: %s", boolTo(wouldEnabled, "enabled", "disabled")))
 			}
-			res.Diff = joinLines(lines)
+			res.Diff = strings.Join(lines, "\n")
 		}
 		return res
 	}
@@ -115,15 +102,11 @@ func (m *ServiceModule) Run(rc *RunContext, args map[string]any, _ string) *Resu
 		return &Result{Msg: fmt.Sprintf("%s is already in the target state", name)}
 	}
 	for _, v := range verbs {
-		out, bad := rc.exec(fmt.Sprintf("systemctl %s %s", v, shellquote.Quote(name)))
-		if bad != nil {
+		if bad := svcExec(rc, name, v); bad != nil {
 			return bad
 		}
-		if out.Code != 0 {
-			return Fail("systemctl %s %s failed: %s", v, name, firstLine(out.Stderr))
-		}
 	}
-	return &Result{Changed: true, Msg: fmt.Sprintf("%s %s", name, joinWords(logs))}
+	return &Result{Changed: true, Msg: fmt.Sprintf("%s %s", name, strings.Join(logs, ", "))}
 }
 
 func isActive(rc *RunContext, name string) (bool, *Result) {
@@ -177,30 +160,6 @@ func wantState(state string) string {
 	return state
 }
 
-func joinLines(items []string) string {
-	var s strings.Builder
-	for i, it := range items {
-		if i > 0 {
-			s.WriteString("\n")
-		}
-		s.WriteString(it)
-	}
-	return s.String()
-}
-
-func joinWords(items []string) string {
-	sep := ", "
-	var s strings.Builder
-	for i, it := range items {
-		if i > 0 {
-			s.WriteString(sep)
-		}
-		s.WriteString(it)
-	}
-	return s.String()
-}
-
-// Params 参数文档。
 func (m *ServiceModule) Params() []ParamDoc {
 	return []ParamDoc{
 		{Name: "name", Type: "string", Desc: "systemd unit name (required)"},
@@ -209,7 +168,6 @@ func (m *ServiceModule) Params() []ParamDoc {
 	}
 }
 
-// Example 示例任务。
 func (m *ServiceModule) Example() string {
 	return `- name: start and enable on boot
   service:

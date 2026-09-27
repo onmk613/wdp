@@ -40,7 +40,7 @@ export function buildVarDomain(files: Map<string, string>, meta: SchemaMeta): Va
             roots[k] = { name: k, detail: 'values.yaml', children: objToChildren(val, 1) }
           }
         }
-      } catch { /* 语法错误时保留上一份域（调用方传入的就是上次成功解析的？不——直接跳过） */ }
+      } catch { /* values.yaml 语法错误：跳过，域保持其他来源 */ }
     }
     if (path.endsWith('.tpl')) {
       for (const m of content.matchAll(/\{\{-?\s*define\s+"([^"]+)"/g)) helpers.push(m[1])

@@ -120,10 +120,10 @@ func TestGetURLHTTPStatusAndArgs(t *testing.T) {
 }
 
 // TestGetURLDownloadSizeLimit 回归：下载响应体曾无大小上限，异常/恶意 URL
-// 可在超时窗口内累积数 GB 内存。现在超过 maxDownloadBytes 必须 fail-loud。
+// 可在超时窗口内累积数 GB 内存。现在超过内置下载上限必须 fail-loud。
 func TestGetURLDownloadSizeLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", strconv.FormatInt(maxDownloadBytes+1, 10))
+		w.Header().Set("Content-Length", strconv.FormatInt(defaultTransferLimit+1, 10))
 		w.WriteHeader(http.StatusOK)
 		// 不真正写 2GiB：客户端读到超限 Content-Length 即拒绝
 	}))
