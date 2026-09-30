@@ -56,12 +56,12 @@ type collectReporter struct {
 	results []*model.TaskResult
 }
 
-func (c *collectReporter) PlayStart(string, []string)            {}
-func (c *collectReporter) TaskStart(string, string)              {}
-func (c *collectReporter) TaskDone()                             {}
-func (c *collectReporter) PlayMsg(string, ...any)                {}
-func (c *collectReporter) Recap(string, map[string]*model.Stats) {}
-func (c *collectReporter) Finish()                               {}
+func (c *collectReporter) PlayStart(string, []string)                   {}
+func (c *collectReporter) TaskStart(string, string)                     {}
+func (c *collectReporter) TaskDone()                                    {}
+func (c *collectReporter) PlayMsg(string, ...any)                       {}
+func (c *collectReporter) Recap(string, map[string]*model.Stats, int64) {}
+func (c *collectReporter) Finish()                                      {}
 
 func (c *collectReporter) HostResult(host string, r *model.TaskResult) {
 	c.results = append(c.results, r)

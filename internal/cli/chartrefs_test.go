@@ -48,7 +48,7 @@ func TestPreloadChartRefs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refs, eng, err := preloadChartRefs(dir, plays)
+	refs, eng, err := preloadChartRefsFake(dir, plays)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestPreloadChartRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	plays2, _ := playbook.Load(filepath.Join(dir, "site.yaml"))
-	_, _, err = preloadChartRefs(dir, plays2)
+	_, _, err = preloadChartRefsFake(dir, plays2)
 	if err == nil || !strings.Contains(err.Error(), "charts/") {
 		t.Fatalf("缺引用应报错并指明 charts/ 解析根: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestPreloadChartRefs(t *testing.T) {
 		t.Fatal(err)
 	}
 	plays3, _ := playbook.Load(filepath.Join(dir, "site.yaml"))
-	refs3, eng3, err := preloadChartRefs(dir, plays3)
+	refs3, eng3, err := preloadChartRefsFake(dir, plays3)
 	if err != nil || refs3 != nil || eng3 != nil {
 		t.Fatalf("无引用应零开销跳过: %v %v %v", refs3, eng3, err)
 	}

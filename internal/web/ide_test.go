@@ -102,6 +102,32 @@ func TestValidateSpec(t *testing.T) {
 	}
 }
 
+// TestValidateChartVersionReconciled 校验与保存同口径：基于已有版本修改、
+// chart.yaml 还带着已被占用的底本版本号时，校验按"保存将产生的形态"
+// 虚拟改写版本——不得报版本对账 ERROR（保存时前端会 patch，对账只在
+// 保存路径是硬约束）。
+func TestValidateChartVersionReconciled(t *testing.T) {
+	s, _ := newTestServer(t)
+	h := s.Handler()
+	token := loginSession(t, s)
+
+	// 请求版本 1.0.3（下一个可用），chart.yaml 仍写底本 1.0.2
+	var resp issuesResp
+	rec := doJSON(t, h, "POST", "/api/apps/validate", ideSpecBody("vapp2", "1.0.3",
+		"# 保留注释\nname: vapp2\nversion: 1.0.2\n", "{}\n", ideDeployOK), &token, &resp)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("validate 应 200: %d %s", rec.Code, rec.Body)
+	}
+	for _, is := range resp.Issues {
+		if strings.Contains(is.Msg, "does not match requested version") {
+			t.Fatalf("校验不应报版本对账 ERROR（保存时会自动 patch）: %+v", resp.Issues)
+		}
+		if is.Level == "ERROR" {
+			t.Fatalf("干净 chart 不应有 ERROR: %+v", resp.Issues)
+		}
+	}
+}
+
 // TestValidateSpecEditMode 编辑模式：app_id>0 时以底本为基底（未提交的
 // 文件原样参与校验）。
 func TestValidateSpecEditMode(t *testing.T) {

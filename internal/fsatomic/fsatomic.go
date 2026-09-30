@@ -1,7 +1,3 @@
-// Package fsatomic 提供崩溃一致的原子文件写原语：同目录临时文件 +
-// chmod + fsync + rename。原先 agent 上传/换证、conn 本地传输、ca 落盘
-// 五处各自内联同一段逻辑且细节不一（fsync 与 chmod 顺序、目录同步缺失、
-// 失败清理方式），收敛到这里取最严格口径统一实现。
 package fsatomic
 
 import (
@@ -26,8 +22,7 @@ import (
 //     在不支持的平台上是 no-op，见 syncdir_other.go。
 //
 // mode 原样生效（含 0）；默认权限（如 0 折叠为 0644）由调用方决定。
-// 不负责创建父目录（目录缺失时直接失败），需要建目录的调用方先
-// MkdirAll。
+// 不负责创建父目录（目录缺失时直接失败），需要建目录的调用方先 MkdirAll。
 func WriteFile(path string, r io.Reader, mode fs.FileMode) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".wdp-fsatomic-*")

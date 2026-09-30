@@ -54,6 +54,17 @@ func TestSSHUnitFile(t *testing.T) {
 	if pins := s.clientPins(); len(pins) != 2 || pins[0] == pins[1] {
 		t.Fatalf("应同时写入证书与公钥两种指纹: %v", pins)
 	}
+	// pin 必须逐个重复传参：--pin-client-fp 是 StringArray，逗号拼接会被
+	// agent 当单个指纹解析失败，新装 agent 启动即退（P0 回归锁）
+	pins := s.clientPins()
+	if n := strings.Count(u, "--pin-client-fp"); n != len(pins) {
+		t.Fatalf("应有 %d 个独立 --pin-client-fp，实际 %d:\n%s", len(pins), n, u)
+	}
+	for _, p := range pins {
+		if !strings.Contains(u, "--pin-client-fp "+p) {
+			t.Fatalf("unit 缺独立 pin %q:\n%s", p, u)
+		}
+	}
 }
 
 // TestSSHInstallRequiresCA 未配置纳管 CA 时明确 503。
@@ -63,5 +74,31 @@ func TestSSHInstallRequiresCA(t *testing.T) {
 	rec := do(t, s.Handler(), "POST", "/api/agents/install", map[string]any{"address": "10.0.0.1"}, &token)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("无 CA 应 503: %d", rec.Code)
+	}
+}
+
+// TestSSHInstallRefusesPlaintext 回归：SSH 推装请求体携带 root 级凭据
+// （密码/私钥口令），明文 HTTP 下必须与纳管命令下发同一口径默认拒绝；
+// 可信内网显式打开 AllowPlaintextEnroll 后放行（推进到参数校验）。
+func TestSSHInstallRefusesPlaintext(t *testing.T) {
+	st := newEnrollOnlyStore(t)
+	s, err := New(st, Options{AdminUser: "admin", CADir: t.TempDir()}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := loginSession(t, s)
+
+	rec := do(t, s.Handler(), "POST", "/api/agents/install", map[string]any{"address": "10.0.0.1"}, &token)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("明文下默认应拒绝接收 SSH 凭据: %d %s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "plaintext") {
+		t.Fatalf("拒绝理由应指明明文通道: %s", rec.Body)
+	}
+
+	s.opts.AllowPlaintextEnroll = true
+	rec = do(t, s.Handler(), "POST", "/api/agents/install", map[string]any{}, &token)
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "address") {
+		t.Fatalf("显式打开开关后应放行门禁并推进到参数校验: %d %s", rec.Code, rec.Body)
 	}
 }

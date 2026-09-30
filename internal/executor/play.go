@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"time"
 
 	"wdp/internal/chart"
 	"wdp/internal/model"
@@ -10,6 +11,7 @@ import (
 // play 推进与生命周期（hook 拆分、批次策略、收尾清理）。
 
 func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
+	playStart := time.Now() // play 墙钟：RECAP 的 wall 列（与主机耗时列配合看编排开销）
 	e.mergeSubHandlers(p)
 	hosts, err := e.selectHosts(p.Hosts)
 	if err != nil {
@@ -68,7 +70,7 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 		if p.Strategy != nil && p.Strategy.AutoRollback {
 			e.rollbackBatch(ctx, executedRuns, stats)
 		}
-		e.finishPlay(ctx, name, stats, failed, executedRuns, hosts)
+		e.finishPlay(ctx, name, stats, failed, executedRuns, hosts, time.Since(playStart).Milliseconds())
 		return true
 	}
 
@@ -90,7 +92,7 @@ func (e *Executor) runPlay(ctx context.Context, p *model.Play) bool {
 		}
 	}
 
-	e.finishPlay(ctx, name, stats, failed, executedRuns, hosts)
+	e.finishPlay(ctx, name, stats, failed, executedRuns, hosts, time.Since(playStart).Milliseconds())
 	return failed
 }
 
@@ -131,6 +133,12 @@ func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts [
 			failed = true
 		}
 		if main.Strategy == nil {
+			// fail-fast 覆盖传统语义：批次失败即终止后续批次（strategy
+			// 配置自带该行为，走下方自己的分支）
+			if e.Opts.FailFast && batchFailed {
+				e.Rep.PlayMsg("fail-fast: batch had failed hosts, aborting subsequent batches")
+				break
+			}
 			continue // 传统语义：批次失败不阻断后续批次
 		}
 		if batchFailed {
@@ -154,11 +162,11 @@ func (e *Executor) runMainBatches(ctx context.Context, main *model.Play, hosts [
 
 // finishPlay 收尾：RECAP、回滚快照清理与 chart 生命周期 marker
 // （deploy 成功后写 / uninstall 成功后清除）。
-func (e *Executor) finishPlay(ctx context.Context, name string, stats map[string]*model.Stats, failed bool, executedRuns []*hostRun, hosts []*model.Host) {
+func (e *Executor) finishPlay(ctx context.Context, name string, stats map[string]*model.Stats, failed bool, executedRuns []*hostRun, hosts []*model.Host, wallMs int64) {
 	// 先并入跨 play 累计（此后本 play 的 stats 不再写入），再出 RECAP
 	// （RECAP 维持单 play 口径，展示不受累计影响）
 	e.mergeStats(stats)
-	e.Rep.Recap(name, stats)
+	e.Rep.Recap(name, stats, wallMs)
 	if e.Opts.CheckMode {
 		e.Rep.PlayMsg("check mode: changed is a change estimate (use --diff to see content-level diffs)")
 	}

@@ -23,7 +23,7 @@ func TestJSONReporter(t *testing.T) {
 	r.Recap("部署", map[string]*model.Stats{
 		"h1": {Ok: 0, Changed: 1},
 		"h2": {Failed: 1},
-	})
+	}, 5_000)
 	r.Finish()
 
 	var doc struct {

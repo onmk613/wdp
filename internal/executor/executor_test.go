@@ -44,7 +44,7 @@ func (c *captureReporter) TaskDone() {}
 // Finish 记录 run 收尾事件。
 func (c *captureReporter) Finish() {}
 
-func (c *captureReporter) Recap(playName string, stats map[string]*model.Stats) {
+func (c *captureReporter) Recap(playName string, stats map[string]*model.Stats, _ int64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.recaps = stats

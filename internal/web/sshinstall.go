@@ -3,20 +3,21 @@ package web
 // SSH 推装 agent：适用于 server→目标机单向可达（目标机无法回连 server，
 // 纳管拉取模式不可用）的网络。流程与 enroll 互补：
 //
-//	server --SSH--> 目标机：探测架构 → 上传二进制（bin 目录同级对应平台）
-//	                       → 上传 server CA 签发的逐主机证书 → systemd 装配
+//	server --SSH--> 目标机：探测架构 → 上传二进制与 CA → 目标机本地
+//	                       gencsr 生成密钥 → server 回签证书并回传 → systemd
 //	server --mTLS--> agent ：health 验证 → 落账
 //
+// 私钥在目标机本地生成（docs/20）：不经 SSH 传输、不落 server 磁盘。
 // SSH 凭据由请求显式提供、仅内存态使用，不落库。verify_host_key 缺省
 // true（与 inventory 路径的安全默认一致）：推装通道承载 SSH 密码/私钥
-// 口令认证、agent 二进制与逐主机证书的下发，中间人不仅可截获该主机
-// 自己的证书，还能截获 SSH 凭据、替换二进制（持久化 RCE）。确需关闭
-// 时显式传 false（受控内网的知情选择），生产建议预先在 server 侧
-// known_hosts 采集指纹。
+// 口令认证、agent 二进制与证书的下发，中间人不仅可截获该主机自己的
+// 证书，还能截获 SSH 凭据、替换二进制（持久化 RCE）。确需关闭时显式
+// 传 false（受控内网的知情选择），生产建议预先在 server 侧 known_hosts
+// 采集指纹。
 
 import (
+	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"wdp/internal/agent"
 	"wdp/internal/agentbin"
 	"wdp/internal/ca"
 	"wdp/internal/conn"
@@ -57,6 +59,15 @@ func (s *Server) sshUnitFile(agentPort int) string {
 func (s *Server) handleSSHInstall(w http.ResponseWriter, r *http.Request) {
 	if s.cam == nil {
 		writeError(w, http.StatusServiceUnavailable, "enrollment CA not configured (start with --data)")
+		return
+	}
+	// 请求体携带 root 级 SSH 凭据（密码/私钥口令）：明文 HTTP 下等同把
+	// 凭据广播给链路窃听者。与纳管命令下发（advertiseBase）同一门禁口径
+	// ——可信内网必须显式打开 AllowPlaintextEnroll。
+	if !s.requestIsHTTPS(r) && !s.allowPlaintextEnroll() {
+		writeError(w, http.StatusBadRequest, "refusing to accept SSH credentials over plaintext HTTP: "+
+			"enable --tls-cert/--tls-key, terminate TLS at a trusted proxy (--trust-proxy), "+
+			"or explicitly opt in with --allow-plaintext-enroll on a trusted network")
 		return
 	}
 	var req SSHInstallRequest
@@ -132,28 +143,8 @@ func (s *Server) sshInstall(ctx context.Context, host *model.Host, name string, 
 		return nil, fmt.Errorf("no binary for platform %s (run the server from a build.sh bin directory)", platform)
 	}
 
-	// 2. 逐主机证书（SAN = 地址 + 台账名；已存在则复用——重装幂等）。
-	// Stat 失败（权限/IO）不得当"已存在"跳过签发：后续上传读不到证书
-	// 才暴错，既误导又留下半装状态，此处直接中止
-	crt, key := s.hostCertPaths(name)
-	_, statErr := os.Stat(crt)
-	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-		return nil, fmt.Errorf("stat host cert: %w", statErr)
-	}
-	if errors.Is(statErr, os.ErrNotExist) {
-		sans := []string{host.Address}
-		if name != host.Address {
-			sans = append(sans, name)
-		}
-		if _, _, _, err := ca.Issue(ca.IssueOptions{
-			Dir: filepath.Join(s.cam.dir, "hosts"), CACertPath: s.cam.caPath, CAKeyPath: s.cam.caKeyPath,
-			SANs: sans, Profile: ca.ProfileServer, Days: DefaultAgentCertDays,
-		}, name); err != nil {
-			return nil, fmt.Errorf("issue host cert: %w", err)
-		}
-	}
-
-	// 3. 上传：二进制 + 证书三件套
+	// 2. 上传二进制与 CA，目标机本地生成密钥并出 CSR——私钥不经 SSH
+	//    传输、不落 server 磁盘（docs/20；gencsr 幂等：重装复用既有钥匙）
 	if err := s.sshUpload(ctx, ssh, binPath, "/usr/local/bin/wdp", 0o755); err != nil {
 		return nil, err
 	}
@@ -167,21 +158,46 @@ func (s *Server) sshInstall(ctx context.Context, host *model.Host, name string, 
 	if err := s.sshUploadBytes(ctx, ssh, caPEM, "/etc/wdp/ca.crt", 0o644); err != nil {
 		return nil, err
 	}
-	for _, f := range []struct {
-		src  string
-		dst  string
-		mode os.FileMode
-	}{
-		{crt, "/etc/wdp/agent.crt", 0o644},
-		{key, "/etc/wdp/agent.key", 0o600},
-	} {
-		if err := s.sshUpload(ctx, ssh, f.src, f.dst, f.mode); err != nil {
-			return nil, err
+	const targetCSR = "/tmp/wdp-enroll.csr"
+	if out, err := sshExec(ctx, ssh,
+		"/usr/local/bin/wdp agent gencsr --key /etc/wdp/agent.key --csr "+targetCSR, 30*time.Second); err != nil || out.Code != 0 {
+		detail := ""
+		if out.Stderr != "" {
+			detail = ": " + out.Stderr
 		}
+		return nil, fmt.Errorf("generate key/CSR on target: %v (code %d)%s", err, out.Code, detail)
+	}
+	var csrBuf bytes.Buffer
+	if err := ssh.DownloadFile(ctx, targetCSR, &csrBuf); err != nil {
+		return nil, fmt.Errorf("download CSR: %w", err)
+	}
+	_, _ = sshExec(ctx, ssh, "rm -f "+targetCSR, 10*time.Second)
+
+	// 3. 签发证书（SAN = 地址 + 台账名，由 server 决定；CSR 自报身份
+	//    一律忽略）并回传——server 全程只见公钥
+	csr, err := ca.ParseCSR(csrBuf.Bytes())
+	if err != nil {
+		return nil, fmt.Errorf("target CSR: %w", err)
+	}
+	sans := []string{host.Address}
+	if name != host.Address {
+		sans = append(sans, name)
+	}
+	crt, _, err := ca.SignCSR(ca.SignCSROptions{
+		Dir: filepath.Join(s.cam.dir, "hosts"), CACertPath: s.cam.caPath, CAKeyPath: s.cam.caKeyPath,
+		SANs: sans, Profile: ca.ProfileServer, Days: DefaultAgentCertDays,
+	}, csr, name)
+	if err != nil {
+		return nil, fmt.Errorf("issue host cert: %w", err)
+	}
+	if err := s.sshUpload(ctx, ssh, crt, "/etc/wdp/agent.crt", 0o644); err != nil {
+		return nil, err
 	}
 
-	// 4. systemd 装配（enable --now + restart：重装时拉起新二进制）
-	script := fmt.Sprintf("cat > /etc/systemd/system/%[2]s.service <<'WDP_UNIT_EOF'\n%[1]sWDP_UNIT_EOF\nsystemctl daemon-reload && systemctl enable --now %[2]s && systemctl restart %[2]s && sleep 1 && systemctl is-active --quiet %[2]s",
+	// 4. systemd 装配（enable + restart：enable 只设自启不启动，restart
+	// 统一拉起——enable --now 先起一进程再 restart 杀掉重启，日志里每次
+	// 安装都会出现两对 "log file attached"/"listening" 启动行）
+	script := fmt.Sprintf("cat > /etc/systemd/system/%[2]s.service <<'WDP_UNIT_EOF'\n%[1]sWDP_UNIT_EOF\nsystemctl daemon-reload && systemctl enable %[2]s && systemctl restart %[2]s && sleep 1 && systemctl is-active --quiet %[2]s",
 		s.sshUnitFile(agentPort), agentUnitName)
 	if out, err := sshExec(ctx, ssh, script, 60*time.Second); err != nil || out.Code != 0 {
 		detail := ""
@@ -202,7 +218,7 @@ func (s *Server) sshInstall(ctx context.Context, host *model.Host, name string, 
 	if err != nil {
 		return nil, err
 	}
-	_ = s.st.SetHostStatus(id, "online")
+	_ = s.st.SetHostStatus(id, "online", agent.BuildVersion(), "")
 	s.logger.Info("agent installed via ssh", "name", name, "address", host.Address, "platform", platform, "id", id)
 	return map[string]any{"id": id, "name": name, "address": host.Address, "agent_port": agentPort, "status": "online", "platform": platform}, nil
 }

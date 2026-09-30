@@ -29,7 +29,7 @@ const (
 	verbHostEnroll  = "host:enroll" // 手动添加/导入/SSH 推装/纳管凭证
 	verbHostUpgrade = "host:upgrade"
 	verbRunExec     = "run:execute" // 应用执行 + 远程命令（按目标主机作用域）
-	verbRunView     = "run:view"
+	verbRunView     = "run:view"    // 执行记录查看（可作用域化：按 run 实际触达的主机裁剪列表/详情/SSE）
 	verbRunDelete   = "run:delete"
 	verbAppView     = "app:view"
 	verbAppCreate   = "app:create"
@@ -50,17 +50,22 @@ var allVerbs = []string{
 }
 
 // scopeableVerbs 可按作用域追加的权限点（其余只能全局授予）。
+// run:view 在列：作用域行经覆盖语义取代 viewer/operator 角色的全局
+// 授予后，runs 列表/详情/SSE 按"实际触达主机 ∈ 作用域"裁剪——此前
+// 执行明细（stdout/stderr 常含凭据）是作用域模型的旁路泄露面。
 var scopeableVerbs = map[string]bool{
-	verbHostView: true, verbHostEdit: true, verbRunExec: true,
+	verbHostView: true, verbHostEdit: true, verbRunExec: true, verbRunView: true,
 	verbAppView: true, verbAppEdit: true, verbAppUpload: true,
 }
 
 // 内置角色。admin 隐含一切；空角色（迁移前旧行）按 operator 收敛。
+// run:delete 仅 admin：operator 可执行也可删除执行记录——操作者能清掉
+// 自己（或他人）的执行痕迹，与审计留存的目标相悖（docs/18 挂账项）。
 var builtinRoles = map[string][]string{
 	"admin": allVerbs,
 	"operator": {
 		verbHostView, verbHostEdit, verbHostEnroll, verbHostUpgrade,
-		verbRunExec, verbRunView, verbRunDelete,
+		verbRunExec, verbRunView,
 		verbAppView, verbAppCreate, verbAppEdit, verbAppUpload, verbAppScope,
 		verbRegistry,
 	},
@@ -271,6 +276,12 @@ func permHost403(w http.ResponseWriter) {
 
 func permApp403(w http.ResponseWriter) {
 	writeError(w, http.StatusForbidden, "forbidden: app outside your scope")
+}
+
+// permRun403 执行记录越权统一口径（列表已按作用域裁剪，越权多为
+// URL 直达详情）。
+func permRun403(w http.ResponseWriter) {
+	writeError(w, http.StatusForbidden, "forbidden: run outside your scope")
 }
 
 // ---- 判定辅助（handler 内使用） ----

@@ -14,14 +14,25 @@
 #                   目标机纳管需要回连：WDP_ADDR=0.0.0.0:7603 + WDP_ADVERTISE=http://<外部IP>:7603
 #   WDP_ADVERTISE   纳管脚本回连 server 的外部基址（见 wdp server --advertise）
 #   WDP_DATA        数据目录（默认 ./wdp-data：SQLite + 纳管 CA + 日志都在这里）
+#   WDP_DB          数据库地址（缺省 <WDP_DATA>/wdp.db，即本地 SQLite 文件）。
+#                   也接受 postgres://user:pass@host:5432/db、mysql://user:pass@host:3306/db。
+#                   密码建议写 ${VAR}（如 postgres://wdp:${WDP_DB_PASS}@host/db），
+#                   由 wdp 自己做环境变量插值——密码不进命令行与 shell 历史。
 #   WDP_ADMIN_USER  管理员用户名（默认 admin）
 #   WDP_ADMIN_PASS  管理员密码：每次启动确保账号密码与之一致（改值后 restart 即改密）；
 #                   缺省仅首启随机生成，打印在日志开头一次
+#   WDP_ALLOW_PLAINTEXT_ENROLL=1
+#                   可信内网明文 HTTP 下放行纳管命令与 SSH 推装凭据
+#                   （默认拒绝；公网/不可信网络请改用 TLS）
 #   NO_FRONTEND=1   构建时跳过前端（不内嵌控制台，访问 / 返回引导页，API 不受影响）
 #
 # 构建：需要时会编译全平台二进制到 bin/（linux/darwin × amd64/arm64、
 # windows），server 按 agent 目标机架构取同级对应文件推装——bin/ 即
 # agent 二进制目录，必须与运行中的 server 二进制一起保留。
+#
+# 数据库：缺省本地 SQLite（单文件随数据目录整体备份/搬迁，零外部依赖）；
+# 设 WDP_DB 为 URL 即改用 PostgreSQL / MySQL（多副本部署时应选它们——本地
+# 数据目录排他锁只在 SQLite 下生效）。
 #
 # 示例:
 #   ./scripts/server.sh start                 # 本机体验，浏览器开 http://127.0.0.1:7603
@@ -103,9 +114,15 @@ start() {
   touch "$LOG_FILE" && chmod 600 "$LOG_FILE"
 
   local args=(server --addr "$ADDR" --data "$DATA_DIR")
+  [ -n "${WDP_DB:-}" ] && args+=(--db "$WDP_DB")
   [ -n "${WDP_ADVERTISE:-}" ] && args+=(--advertise "$WDP_ADVERTISE")
   [ -n "${WDP_ADMIN_USER:-}" ] && args+=(--admin-user "$WDP_ADMIN_USER")
   [ -n "${WDP_ADMIN_PASS:-}" ] && args+=(--admin-pass "$WDP_ADMIN_PASS")
+  # 明文 HTTP 下的纳管/SSH 凭据闸门：默认拒绝（root 级脚本与凭据明文过
+  # 网络等同广播）。可信内网显式 WDP_ALLOW_PLAINTEXT_ENROLL=1 打开
+  if [ "${WDP_ALLOW_PLAINTEXT_ENROLL:-0}" = "1" ]; then
+    args+=(--allow-plaintext-enroll)
+  fi
 
   nohup "$BIN" ${args[@]+"${args[@]}"} >>"$LOG_FILE" 2>&1 &
   echo $! >"$PID_FILE"

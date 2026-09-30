@@ -6,17 +6,31 @@ import { onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh, Search } from '@element-plus/icons-vue'
 import { api, type AuditLog } from '../api'
+import { fmtTime } from '../lib/format'
+import type { PagedResp } from '../lib/usePaging'
+import Pager from '../components/Pager.vue'
 
 const logs = ref<AuditLog[]>([])
 const loading = ref(false)
 const q = ref('')
 let searchTimer: number | undefined
 
+const page = ref(1)
+const pageSize = ref(50)
+const total = ref(0)
+
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    const qs = q.value.trim() ? `?q=${encodeURIComponent(q.value.trim())}&limit=200` : '?limit=200'
-    logs.value = await api<AuditLog[]>('GET', `/api/audit${qs}`)
+    const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value) })
+    if (q.value.trim()) params.set('q', q.value.trim())
+    const r = await api<PagedResp<AuditLog>>('GET', `/api/audit?${params}`)
+    logs.value = r.items
+    total.value = r.total
+    if (r.items.length === 0 && r.total > 0 && page.value > 1) {
+      page.value = Math.ceil(r.total / pageSize.value)
+      return load(silent)
+    }
   } catch (e) {
     if (!silent) ElMessage.error((e as Error).message)
   } finally {
@@ -26,7 +40,7 @@ async function load(silent = false) {
 
 function onSearch() {
   window.clearTimeout(searchTimer)
-  searchTimer = window.setTimeout(() => load(), 300)
+  searchTimer = window.setTimeout(() => { page.value = 1; load() }, 300)
 }
 
 // 动作 → 标签颜色（增=绿、改=橙、删=红、登录/其他=灰蓝）
@@ -68,7 +82,7 @@ onUnmounted(() => window.clearTimeout(searchTimer))
     <el-card shadow="never">
       <el-table :data="logs" v-loading="loading" style="width: 100%">
         <el-table-column prop="CreatedAt" label="时间" width="170">
-          <template #default="{ row }"><span class="muted">{{ row.CreatedAt }}</span></template>
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.CreatedAt) }}</span></template>
         </el-table-column>
         <el-table-column label="用户" width="100">
           <template #default="{ row }">{{ row.User || '-' }}</template>
@@ -100,6 +114,7 @@ onUnmounted(() => window.clearTimeout(searchTimer))
         </el-table-column>
         <template #empty><el-empty description="暂无操作记录" /></template>
       </el-table>
+      <Pager :page="page" :page-size="pageSize" :total="total" @update:page="(v) => { page = v; load(true) }" @update:page-size="(v) => { pageSize = v; load(true) }" />
     </el-card>
   </div>
 </template>

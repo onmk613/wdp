@@ -130,6 +130,7 @@ func (e *Executor) buildRunContext(taskCtx context.Context, tr *taskRun, itemVar
 
 		MaxDownloadBytes: e.Opts.MaxDownloadBytes,
 		MaxUploadBytes:   e.Opts.MaxUploadBytes,
+		TaskLabel:        tr.task.Label(),
 	}
 	// 脚本模块 check 模式需 chart.yaml 显式声明 check_mode: supported
 	if e.Opts.Chart != nil {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"wdp/internal/i18n"
 )
 
 func init() {
@@ -20,23 +21,28 @@ type SystemdUnitModule struct{}
 func (m *SystemdUnitModule) Name() string { return "systemd_unit" }
 
 func (m *SystemdUnitModule) Desc() string {
-	return "deploy systemd unit files and manage service state"
+	return i18n.T("Deploy systemd unit files and manage service state", "部署 systemd unit 文件并管理服务状态")
 }
 
+// Params 声明序即使用频率序（补全候选、悬停文档表与编辑器插入骨架都
+// 按此序取前几个）：纯状态管理（name+state/enabled）与部署启动
+// （name+src+state+enabled）是两种最常见形态，互斥的 content 与低频的
+// dest_dir 靠后——此前 content/src/dest_dir 占据骨架前 4 位，state/
+// enabled 反而不在骨架里，看起来像"补全缺字段"。
 func (m *SystemdUnitModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "unit file name (basename, e.g. myapp.service)"},
-		{Name: "content", Type: "string", Desc: "unit file literal content (mutually exclusive with src, not templated; omit both for state-only management)"},
-		{Name: "src", Type: "string", Desc: "local unit template path (rendered by the engine when the content contains {{)"},
-		{Name: "dest_dir", Type: "string", Default: "/etc/systemd/system", Desc: "unit deploy directory"},
-		{Name: "state", Type: "string", Enum: serviceStates, Desc: "service state to enforce (optional)"},
-		{Name: "enabled", Type: "bool", Desc: "enable on boot (optional)"},
-		{Name: "daemon_reload", Type: "bool", Default: "true", Desc: "run systemctl daemon-reload after unit file changes"},
+		{Name: "name", Type: "string", Desc: i18n.T("unit file name (basename, e.g. myapp.service)", "unit 文件名（basename，如 myapp.service）")},
+		{Name: "state", Type: "string", Enum: serviceStates, Desc: i18n.T("service state to converge to (optional)", "要收敛到的服务状态（可选）")},
+		{Name: "enabled", Type: "bool", Desc: i18n.T("enable at boot; false actively runs systemctl disable (optional)", "开机自启；false 会主动执行 systemctl disable（可选）")},
+		{Name: "src", Type: "string", Desc: i18n.T("local unit template path (auto-rendered by the engine when the content contains {{)", "本地 unit 模板路径（内容含 {{ 时由引擎自动渲染）")},
+		{Name: "content", Type: "string", Desc: i18n.T("literal unit file content (mutually exclusive with src, no template rendering; omit both = state management only)", "unit 文件字面量内容（与 src 互斥，不做模板渲染；两者都不给 = 仅状态管理）")},
+		{Name: "dest_dir", Type: "string", Default: "/etc/systemd/system", Desc: i18n.T("directory to deploy the unit file to", "unit 部署目录")},
+		{Name: "daemon_reload", Type: "bool", Default: "true", Desc: i18n.T("run systemctl daemon-reload after the unit file changes", "unit 文件变化后执行 systemctl daemon-reload")},
 	}
 }
 
 func (m *SystemdUnitModule) Example() string {
-	return `# deploy and start the service (auto daemon-reload on content change)
+	return i18n.T(`# deploy and start (daemon-reload runs automatically when the content changes)
 - name: deploy the myapp service
   become: true
   systemd_unit:
@@ -53,14 +59,38 @@ func (m *SystemdUnitModule) Example() string {
     state: started
     enabled: true
 
-# template-rendered deploy (src containing {{ .env }} etc. is rendered automatically)
+# template-rendered deploy (auto-rendered when src contains {{ .env }} and the like)
 - name: deploy the rendered unit
   become: true
   systemd_unit:
     name: worker.service
     src: templates/worker.service
     dest_dir: /etc/systemd/system
-    state: restarted`
+    state: restarted`, `# 部署并启动（内容变化时自动 daemon-reload）
+- name: 部署 myapp 服务
+  become: true
+  systemd_unit:
+    name: myapp.service
+    content: |
+      [Unit]
+      Description=MyApp
+
+      [Service]
+      ExecStart=/opt/myapp/bin/myapp
+
+      [Install]
+      WantedBy=multi-user.target
+    state: started
+    enabled: true
+
+# 模板渲染部署（src 含 {{ .env }} 等时自动渲染）
+- name: 部署渲染后的 unit
+  become: true
+  systemd_unit:
+    name: worker.service
+    src: templates/worker.service
+    dest_dir: /etc/systemd/system
+    state: restarted`)
 }
 
 // unitReq 是 systemd_unit 解析后的参数。

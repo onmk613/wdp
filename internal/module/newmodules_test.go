@@ -1,6 +1,7 @@
 package module
 
 import (
+	"strings"
 	"testing"
 
 	"wdp/internal/model"
@@ -72,5 +73,39 @@ func TestValidateArgsAnyWildcard(t *testing.T) {
 		"name": "n1", "vars": map[string]any{"a": 1},
 	}, ""); err != nil {
 		t.Fatalf("合法参数应通过: %v", err)
+	}
+}
+
+// TestLintBareCall 空参数调用的静态拦截：模块键写了但底下没有任何参数
+// （如 `set_fact:` 后面内容缺失）运行期必然失败，lint 期即报错。
+// 回归场景：AI 生成的 playbook 携带空 set_fact 桩，运行时全主机报
+// "set_fact requires at least one key/value pair"，用户只看到
+// "run finished with failed hosts"。
+func TestLintBareCall(t *testing.T) {
+	// set_fact：(any) 型，空参数给出键值对语义的报错
+	err := LintBareCall(&SetFactModule{}, map[string]any{}, "")
+	if err == nil || !strings.Contains(err.Error(), "at least one key/value pair") {
+		t.Fatalf("空 set_fact 应报键值对缺失: %v", err)
+	}
+	if err := LintBareCall(&SetFactModule{}, map[string]any{"k": "v"}, ""); err != nil {
+		t.Fatalf("有键值对应通过: %v", err)
+	}
+	// setup：声明 "(no arguments)"，裸调用合法
+	if err := LintBareCall(&SetupModule{}, map[string]any{}, ""); err != nil {
+		t.Fatalf("setup 裸调用应豁免: %v", err)
+	}
+	// 常规模块：空参数报错，带参数/自由格式通过
+	err = LintBareCall(&FileModule{}, map[string]any{}, "")
+	if err == nil || !strings.Contains(err.Error(), "no parameters") {
+		t.Fatalf("空 file 应报无参数: %v", err)
+	}
+	if err := LintBareCall(&FileModule{}, map[string]any{"path": "/tmp"}, ""); err != nil {
+		t.Fatalf("带参数应通过: %v", err)
+	}
+	if err := LintBareCall(&ShellModule{}, map[string]any{}, "uptime"); err != nil {
+		t.Fatalf("自由格式应通过: %v", err)
+	}
+	if err := LintBareCall(&ShellModule{}, map[string]any{}, ""); err == nil {
+		t.Fatal("空 shell（无命令）应报错")
 	}
 }

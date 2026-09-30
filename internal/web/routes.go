@@ -16,6 +16,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /api/users/{id}/scopes", s.requirePerm(verbUserManage, s.handleSetUserScopes))
 	s.mux.HandleFunc("GET /api/sessions", s.requirePerm(verbUserManage, s.handleListSessions))
 	s.mux.HandleFunc("DELETE /api/sessions/{token}", s.requirePerm(verbUserManage, s.handleKillSession))
+	// ---- 运行时设置（admin 专属：单文档，设置页读写）----
+	s.mux.HandleFunc("GET /api/settings", s.requireAuth(s.requireAdmin(s.handleGetSettings)))
+	s.mux.HandleFunc("PUT /api/settings", s.requireAuth(s.requireAdmin(s.handlePutSettings)))
+	// ---- chart 仓库（Helm 兼容；app:view，session/basic 双认证）----
+	s.routesChartRepo()
 	// ---- 主机 ----
 	s.mux.HandleFunc("GET /api/hosts", s.requirePerm(verbHostView, s.handleListHosts))
 	s.mux.HandleFunc("POST /api/hosts", s.requirePerm(verbHostEnroll, s.handleCreateHost))
@@ -50,6 +55,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/hosts/{id}/tasks", s.requirePerm(verbHostView, s.handleHostTasks))
 	s.mux.HandleFunc("POST /api/exec", s.requirePerm(verbRunExec, s.handleExec))
 	s.mux.HandleFunc("GET /api/exec/targets", s.requirePerm(verbRunExec, s.handleExecTargets))
+	s.mux.HandleFunc("GET /api/exec/stream", s.requirePerm(verbRunExec, s.handleExecStream))
 	s.mux.HandleFunc("GET /api/apps", s.requirePerm(verbAppView, s.handleListApps))
 	s.mux.HandleFunc("POST /api/apps/upload", s.requirePerm(verbAppUpload, s.handleUploadChart))
 	s.mux.HandleFunc("POST /api/apps/spec", s.requirePerm(verbAppCreate, s.handleCreateSpec))
@@ -74,6 +80,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /api/runs", s.requirePerm(verbRunView, s.handleListRuns))
 	s.mux.HandleFunc("GET /api/runs/stream", s.requirePerm(verbRunView, s.handleRunStream))
 	s.mux.HandleFunc("GET /api/runs/{id}", s.requirePerm(verbRunView, s.handleGetRun))
+	s.mux.HandleFunc("POST /api/runs/{id}/cancel", s.requirePerm(verbRunExec, s.handleCancelRun))
 	s.mux.HandleFunc("DELETE /api/runs/{id}", s.requirePerm(verbRunDelete, s.handleDeleteRun))
 	s.mux.HandleFunc("POST /api/runs/batch", s.requirePerm(verbRunDelete, s.handleBatchDeleteRuns))
 	s.mux.Handle("GET /assets/", s.handleAssets())

@@ -71,7 +71,7 @@ func setAppScopes(q execer, id int64, pools, groups []string) error {
 }
 
 // CreateApp 新建应用并写入首个版本（tgz 已由调用方落盘）。
-func (s *Store) CreateApp(name, note, labels string, pools, groups []string, version, tgzPath, sha string, size int64, phases []string) (int64, error) {
+func (s *Store) CreateApp(name, note, labels string, pools, groups []string, version, tgzPath, sha string, size int64, phases []string, modules string) (int64, error) {
 	if strings.TrimSpace(name) == "" {
 		return 0, Bizf("app name is required")
 	}
@@ -87,20 +87,18 @@ func (s *Store) CreateApp(name, note, labels string, pools, groups []string, ver
 	var id int64
 	// 应用行、作用域与首个版本同事务：不留缺版本或缺作用域的半初始化应用
 	err := s.tx(func(q execer) error {
-		res, err := q.Exec(`INSERT INTO apps (name, note, latest_version, labels, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		var err error
+		id, err = s.lastInsertID(q, `INSERT INTO apps (name, note, latest_version, labels, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			name, note, version, labels, nowUTC(), nowUTC())
 		if err != nil {
-			return dupErr(err, "app", name)
-		}
-		if id, err = res.LastInsertId(); err != nil {
-			return err
+			return s.dupErr(err, "app", name)
 		}
 		if err := setAppScopes(q, id, pools, groups); err != nil {
 			return err
 		}
 		pj, gj := scopeJSON(pools), scopeJSON(groups)
-		_, err = q.Exec(`INSERT INTO app_versions (app_id, version, tgz_path, sha256, size, pools, groups, labels, phases, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, version, tgzPath, sha, size, pj, gj, labels, scopeJSON(phases), nowUTC())
+		_, err = q.Exec(`INSERT INTO app_versions (app_id, version, tgz_path, sha256, size, pools, groups, labels, phases, modules, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			id, version, tgzPath, sha, size, pj, gj, labels, scopeJSON(phases), modules, nowUTC())
 		return err
 	})
 	if err != nil {
@@ -110,8 +108,50 @@ func (s *Store) CreateApp(name, note, labels string, pools, groups []string, ver
 }
 
 // ListApps 全部应用（最新版本 + 作用域 + 版本数）。
+// ListAppsPage 分页应用列表（q 过滤名称/备注后分页）。
+func (s *Store) ListAppsPage(q string, page, size int) ([]*App, int64, error) {
+	where, args := "", []any{}
+	if q = strings.TrimSpace(q); q != "" {
+		like := "%" + escapeLike(q) + "%"
+		where = ` WHERE name LIKE ? ESCAPE '\' OR note LIKE ? ESCAPE '\'`
+		args = append(args, like, like)
+	}
+	var total int64
+	if err := s.queryRow(`SELECT COUNT(*) FROM apps`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	sqlStr := `SELECT id, name, note, latest_version, labels, created_at, updated_at,
+		(SELECT COUNT(*) FROM app_versions WHERE app_id = apps.id),
+		(SELECT COALESCE(group_concat(pool, ','), '') FROM app_pools WHERE app_id = apps.id),
+		(SELECT COALESCE(group_concat(group_name, ','), '') FROM app_groups WHERE app_id = apps.id)
+		FROM apps` + where + ` ORDER BY name LIMIT ? OFFSET ?`
+	rows, err := s.query(sqlStr, append(args, size, (page-1)*size)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []*App{}
+	for rows.Next() {
+		a := &App{}
+		var pools, groups string
+		if err := rows.Scan(&a.ID, &a.Name, &a.Note, &a.LatestVersion, &a.Labels, &a.CreatedAt, &a.UpdatedAt, &a.VersionCount, &pools, &groups); err != nil {
+			return nil, 0, err
+		}
+		if pools != "" {
+			a.Pools = strings.Split(pools, ",")
+			slices.Sort(a.Pools)
+		}
+		if groups != "" {
+			a.Groups = strings.Split(groups, ",")
+			slices.Sort(a.Groups)
+		}
+		out = append(out, a)
+	}
+	return out, total, rows.Err()
+}
+
 func (s *Store) ListApps() ([]*App, error) {
-	rows, err := s.db.Query(`SELECT id, name, note, latest_version, labels, created_at, updated_at,
+	rows, err := s.query(`SELECT id, name, note, latest_version, labels, created_at, updated_at,
 		(SELECT COUNT(*) FROM app_versions WHERE app_id = apps.id),
 		(SELECT COALESCE(group_concat(pool, ','), '') FROM app_pools WHERE app_id = apps.id),
 		(SELECT COALESCE(group_concat(group_name, ','), '') FROM app_groups WHERE app_id = apps.id)
@@ -142,7 +182,7 @@ func (s *Store) ListApps() ([]*App, error) {
 
 // GetApp 按 id 查询。
 func (s *Store) GetApp(id int64) (*App, error) {
-	row := s.db.QueryRow(`SELECT id, name, note, latest_version, labels, created_at, updated_at,
+	row := s.queryRow(`SELECT id, name, note, latest_version, labels, created_at, updated_at,
 		(SELECT COUNT(*) FROM app_versions WHERE app_id = apps.id),
 		(SELECT COALESCE(group_concat(pool, ','), '') FROM app_pools WHERE app_id = apps.id),
 		(SELECT COALESCE(group_concat(group_name, ','), '') FROM app_groups WHERE app_id = apps.id)
@@ -169,7 +209,7 @@ func (s *Store) GetApp(id int64) (*App, error) {
 
 // ListVersions 应用的全部版本（新→旧）。
 func (s *Store) ListVersions(appID int64) ([]*AppVersion, error) {
-	rows, err := s.db.Query(`SELECT id, app_id, version, tgz_path, sha256, size, note, phases, created_at
+	rows, err := s.query(`SELECT id, app_id, version, tgz_path, sha256, size, note, phases, created_at
 		FROM app_versions WHERE app_id = ? ORDER BY id DESC`, appID)
 	if err != nil {
 		return nil, err
@@ -196,12 +236,12 @@ var ErrVersionExists = errors.New("version already exists")
 // = 底本 scope + 用户改动；chart 上传 = 继承当前应用级 scope）。phases 是
 // 该版本 chart 的可用相位（调用方从制品提取，版本不可变故只写一次）。
 // 版本号已存在返回 ErrVersionExists。
-func (s *Store) AddVersion(appID int64, version, tgzPath, sha string, size int64, note string, pools, groups []string, labels string, phases []string) error {
+func (s *Store) AddVersion(appID int64, version, tgzPath, sha string, size int64, note string, pools, groups []string, labels string, phases []string, modules string) error {
 	if version == "" {
 		return Bizf("version is required")
 	}
 	var existing int64
-	err := s.db.QueryRow(`SELECT id FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&existing)
+	err := s.queryRow(`SELECT id FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&existing)
 	if err == nil {
 		return fmt.Errorf("%w: %s", ErrVersionExists, version)
 	}
@@ -229,9 +269,9 @@ func (s *Store) AddVersion(appID int64, version, tgzPath, sha string, size int64
 			}
 			return err
 		}
-		if _, err := q.Exec(`INSERT INTO app_versions (app_id, version, tgz_path, sha256, size, note, pools, groups, labels, phases, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			appID, version, tgzPath, sha, size, note, scopeJSON(pools), scopeJSON(groups), labels, scopeJSON(phases), nowUTC()); err != nil {
-			if isUniqueErr(err) {
+		if _, err := q.Exec(`INSERT INTO app_versions (app_id, version, tgz_path, sha256, size, note, pools, groups, labels, phases, modules, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			appID, version, tgzPath, sha, size, note, scopeJSON(pools), scopeJSON(groups), labels, scopeJSON(phases), modules, nowUTC()); err != nil {
+			if s.isUniqueErr(err) {
 				return fmt.Errorf("%w: %s", ErrVersionExists, version)
 			}
 			return err
@@ -268,7 +308,7 @@ func parseStrings(s string) []string {
 // VersionPhases 某版本 chart 的可用相位（空串旧行返回 nil）。
 func (s *Store) VersionPhases(appID int64, version string) ([]string, error) {
 	var phases string
-	err := s.db.QueryRow(`SELECT phases FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&phases)
+	err := s.queryRow(`SELECT phases FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&phases)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -278,11 +318,25 @@ func (s *Store) VersionPhases(appID int64, version string) ([]string, error) {
 	return parseStrings(phases), nil
 }
 
+// VersionModules 某版本各相位使用的内置模块清单（相位 → 名单的 JSON
+// 对象原文；” = 迁移前旧行或提取失败，对账按放行处理）。
+func (s *Store) VersionModules(appID int64, version string) (string, error) {
+	var modules string
+	err := s.queryRow(`SELECT modules FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&modules)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return modules, nil
+}
+
 // VersionScopes 读某版本的池/组/标签。列值为空串（迁移前旧行）时返回
 // ok=false，调用方回退应用级 scope（旧行为）。
 func (s *Store) VersionScopes(appID int64, version string) (pools, groups []string, labels string, ok bool, err error) {
 	var pj, gj string
-	err = s.db.QueryRow(`SELECT pools, groups, labels FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&pj, &gj, &labels)
+	err = s.queryRow(`SELECT pools, groups, labels FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&pj, &gj, &labels)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, "", false, ErrNotFound
 	}
@@ -307,7 +361,7 @@ func (s *Store) VersionScopes(appID int64, version string) (pools, groups []stri
 // HasVersion 版本号是否已存在（保存前预检，给出可读提示）。
 func (s *Store) HasVersion(appID int64, version string) (bool, error) {
 	var id int64
-	err := s.db.QueryRow(`SELECT id FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&id)
+	err := s.queryRow(`SELECT id FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -320,7 +374,7 @@ func (s *Store) HasVersion(appID int64, version string) (bool, error) {
 // AppByName 按名查询应用（上传按 chart.yaml 名称归位用）。
 func (s *Store) AppByName(name string) (*App, error) {
 	var id int64
-	err := s.db.QueryRow(`SELECT id FROM apps WHERE name = ?`, name).Scan(&id)
+	err := s.queryRow(`SELECT id FROM apps WHERE name = ?`, name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -386,21 +440,21 @@ func (s *Store) DeleteVersion(appID, versionID int64) (string, error) {
 // SetLatestVersion 指定某版本为默认版本（latest）。版本必须存在。
 func (s *Store) SetLatestVersion(appID int64, version string) error {
 	var id int64
-	err := s.db.QueryRow(`SELECT id FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&id)
+	err := s.queryRow(`SELECT id FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: version %s", ErrNotFound, version)
 	}
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE apps SET latest_version = ?, updated_at = ? WHERE id = ?`, version, nowUTC(), appID)
+	_, err = s.exec(`UPDATE apps SET latest_version = ?, updated_at = ? WHERE id = ?`, version, nowUTC(), appID)
 	return err
 }
 
 // VersionTgz 返回版本制品路径。
 func (s *Store) VersionTgz(appID int64, version string) (string, error) {
 	var tgz string
-	err := s.db.QueryRow(`SELECT tgz_path FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&tgz)
+	err := s.queryRow(`SELECT tgz_path FROM app_versions WHERE app_id = ? AND version = ?`, appID, version).Scan(&tgz)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -484,7 +538,9 @@ func (s *Store) DeleteApp(id int64) ([]string, error) {
 	for _, v := range vs {
 		paths = append(paths, v.TgzPath)
 	}
-	// 应用、版本与作用域同事务：留一半会出现查不到应用却占着版本号的孤儿
+	// 应用、版本与作用域同事务：留一半会出现查不到应用却占着版本号的孤儿。
+	// 草稿**不**随应用删除：孤儿草稿是特性（前端 AppGone 标记 + 草稿箱
+	// 可救回编辑内容），体积与敏感残留由 PruneAppDrafts 的 TTL 收口。
 	err = s.tx(func(q execer) error {
 		if _, err := q.Exec(`DELETE FROM app_versions WHERE app_id = ?`, id); err != nil {
 			return err

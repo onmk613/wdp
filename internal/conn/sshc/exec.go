@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"io"
-	"regexp"
 	"strings"
 	"time"
 
@@ -168,7 +167,7 @@ func WrapStdin(req conn.ExecRequest, sudoPW string) string {
 	}
 	var body strings.Builder
 	for k, v := range req.Env {
-		if envKeyRe.MatchString(k) {
+		if conn.EnvKeyAllowed(k) {
 			fmt.Fprintf(&body, "export %s=%s\n", k, shellquote.Quote(v))
 		}
 	}
@@ -180,5 +179,3 @@ func WrapStdin(req conn.ExecRequest, sudoPW string) string {
 	sb.WriteString(req.Stdin)
 	return sb.String()
 }
-
-var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

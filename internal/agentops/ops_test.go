@@ -62,7 +62,7 @@ func TestLogs(t *testing.T) {
 
 	// 先产生一条 info 级运行记录（执行的命令）
 	resp, err := http.Post(ts.URL+"/exec", "application/json",
-		strings.NewReader(`{"script":"echo marker-cmd"}`))
+		strings.NewReader(`{"script":"echo marker-cmd\nexport TOK=deep-marker-secret"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,11 +85,13 @@ func TestLogs(t *testing.T) {
 	}
 	// 日志只记命令摘要（sha256 前缀），不记脚本明文——含密命令不得随
 	// 日志文件落盘
-	if !strings.Contains(string(data), "sha256=") {
-		t.Fatalf("日志文件应含执行记录（摘要）:\n%s", data)
+	// 日志记命令首行预览（可定位执行了什么）+ sha256 指纹；深行内容
+	// 不得随日志文件落盘（令牌常在深行）
+	if !strings.Contains(string(data), "sha256=") || !strings.Contains(string(data), "marker-cmd") {
+		t.Fatalf("日志文件应含执行记录（首行预览 + 摘要）:\n%s", data)
 	}
-	if strings.Contains(string(data), "marker-cmd") {
-		t.Fatalf("日志文件不得含脚本明文:\n%s", data)
+	if strings.Contains(string(data), "deep-marker-secret") {
+		t.Fatalf("日志文件不得含脚本深行内容:\n%s", data)
 	}
 	if !strings.Contains(out.String(), "web/1") {
 		t.Fatalf("输出应含主机与文件路径: %q", out.String())

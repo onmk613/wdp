@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -22,7 +23,7 @@ type ServiceModule struct{}
 func (m *ServiceModule) Name() string { return "service" }
 
 func (m *ServiceModule) Desc() string {
-	return "manage systemd service state and boot enablement"
+	return i18n.T("Manage systemd service state and start-on-boot", "管理 systemd 服务状态与开机自启")
 }
 
 // Run 管理服务状态与自启（is-active/is-enabled 漂移探测，幂等：
@@ -162,17 +163,22 @@ func wantState(state string) string {
 
 func (m *ServiceModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "systemd unit name (required)"},
-		{Name: "state", Type: "string", Enum: serviceStates, Desc: "target service state"},
-		{Name: "enabled", Type: "bool", Desc: "enable on boot"},
+		{Name: "name", Type: "string", Desc: i18n.T("systemd unit name (required)", "systemd unit 名（必填）")},
+		{Name: "state", Type: "string", Enum: serviceStates, Desc: i18n.T("target service state", "目标服务状态")},
+		{Name: "enabled", Type: "bool", Desc: i18n.T("whether to enable the service at boot", "是否开机自启")},
 	}
 }
 
 func (m *ServiceModule) Example() string {
-	return `- name: start and enable on boot
+	return i18n.T(`- name: start and enable at boot
   service:
     name: nginx
     state: started
     enabled: true
-`
+`, `- name: 启动并设为开机自启
+  service:
+    name: nginx
+    state: started
+    enabled: true
+`)
 }

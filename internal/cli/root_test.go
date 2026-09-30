@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"wdp/internal/config"
+	"wdp/internal/i18nhelp"
 )
 
 // resetGlobals 恢复全局 flag 变量与配置到内置默认。
@@ -116,12 +117,33 @@ func TestRootHelpGrouped(t *testing.T) {
 			t.Fatalf("帮助缺少分组标题 %q:\n%s", title, out)
 		}
 	}
-	// 无未分组命令（"Additional Commands" 不应出现）
-	if strings.Contains(out, "Additional Commands") {
-		t.Fatalf("存在未分组命令:\n%s", out)
+	// 未分组的兜底小节不应出现：业务命令必须全部归属某个组，且 cobra 内置的
+	// help/completion 也归入「框架命令」组（否则模板会渲染一个语义含糊的
+	// 未分组小节）。随语言本地化，中英两种标题都要查。
+	for _, title := range []string{"Additional Commands", "其他命令"} {
+		if strings.Contains(out, title) {
+			t.Fatalf("存在未分组的命令小节:\n%s", out)
+		}
 	}
 
-	// 组 ↔ 命令归属断言（直接断言组 ID 字面量，与 root.go 的分组定义对账）
+	// 组 ↔ 命令归属断言（直接断言组 ID 字面量，与 root.go 的分组定义对账）。
+	// frameworkCmds 是 cobra 内置命令，归框架组而非业务组。
+	frameworkCmds := map[string]bool{"help": true, "completion": true}
+	for _, c := range root.Commands() {
+		if frameworkCmds[c.Name()] {
+			if c.GroupID != i18nhelp.FrameworkGroupID {
+				t.Fatalf("框架命令 %s 应归入 %q，实际 %q", c.Name(), i18nhelp.FrameworkGroupID, c.GroupID)
+			}
+			continue
+		}
+		if !c.IsAvailableCommand() {
+			continue
+		}
+		if c.GroupID == "" {
+			t.Fatalf("业务命令 %s 未归属任何命令组", c.Name())
+		}
+	}
+
 	want := map[string]string{
 		"run": "deploy", "adhoc": "deploy",
 		"schema": "chart", "module": "chart", "render": "chart", "lint": "chart", "package": "chart",
@@ -133,7 +155,7 @@ func TestRootHelpGrouped(t *testing.T) {
 	for _, c := range root.Commands() {
 		gid, ok := want[c.Name()]
 		if !ok {
-			continue // help/completion 等框架命令
+			continue
 		}
 		if c.GroupID != gid {
 			t.Fatalf("命令 %s 分组 %q，期望 %q", c.Name(), c.GroupID, gid)

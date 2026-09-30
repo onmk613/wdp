@@ -23,11 +23,19 @@ async function submit() {
   }
   loading.value = true
   try {
-    const r = await api<{ user: string; role: string; perms: Perms }>('POST', '/api/login', form.value)
-    setAuth(r.user, { ...r.perms, role: r.role })
+    const r = await api<{
+      user: string; role: string; perms: Perms; build?: string; build_unversioned?: boolean
+    }>('POST', '/api/login', form.value)
+    setAuth(r.user, { ...r.perms, role: r.role }, r.build, r.build_unversioned)
     void router.push(safeRedirect(route.query.redirect))
   } catch (e) {
-    ElMessage.error((e as Error).message)
+    // 登录端点的 401 已在 api() 豁免全局处理，这里拿到的是服务器原始
+    // 错误（invalid credentials / too many failed attempts …），映射成用户
+    // 能看懂的中文，其余原样透出
+    const msg = (e as Error).message
+    if (msg.includes('invalid credentials')) ElMessage.error('用户名或密码错误')
+    else if (msg.includes('too many failed attempts')) ElMessage.error('失败次数过多，请稍后再试')
+    else ElMessage.error(msg)
   } finally {
     loading.value = false
   }

@@ -6,6 +6,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, Key, Plus, Refresh, SwitchButton } from '@element-plus/icons-vue'
 import { api, type GroupEntry, type LabelDef, type Pool, type SessionInfo, type User } from '../api'
+import { fmtTime } from '../lib/format'
 
 const users = ref<User[]>([])
 const sessions = ref<SessionInfo[]>([])
@@ -15,11 +16,12 @@ const labels = ref<LabelDef[]>([])
 const loading = ref(false)
 
 // 可按作用域授权的权限点（与后端 scopeableVerbs 对应）
-const SCOPEABLE = ['host:view', 'host:edit', 'run:execute', 'app:view', 'app:edit', 'app:upload']
+const SCOPEABLE = ['host:view', 'host:edit', 'run:execute', 'run:view', 'app:view', 'app:edit', 'app:upload']
 const VERB_DESC: Record<string, string> = {
   'host:view': '看主机（列表/详情/指标）',
   'host:edit': '改主机（含批量设置）',
   'run:execute': '执行（应用执行/远程命令）',
+  'run:view': '看执行记录（按实际触达主机收窄）',
   'app:view': '看应用',
   'app:edit': '编辑应用（保存新版本）',
   'app:upload': '上传 chart 版本',
@@ -47,6 +49,16 @@ onMounted(() => load())
 const createVisible = ref(false)
 const createLoading = ref(false)
 const createForm = reactive({ name: '', password: '', role: 'viewer' })
+
+// 行内校验（空值交给按钮禁用态，不在这里标红）：重名在前端就能查——
+// 不必等一次网络往返吃 400 "user already exists"
+function nameErr(): string | null {
+  const n = createForm.name.trim()
+  if (!n) return null
+  if (/\s/.test(createForm.name)) return '用户名不能含空白'
+  if (users.value.some((u) => u.name === n)) return '用户名已存在'
+  return null
+}
 
 function openCreate() {
   Object.assign(createForm, { name: '', password: '', role: 'viewer' })
@@ -228,7 +240,7 @@ async function kickSession(row: SessionInfo) {
     <el-card shadow="never" class="block">
       <template #header><span>用户</span></template>
       <el-table :data="users" size="small">
-        <el-table-column prop="Name" label="用户名" min-width="120" />
+        <el-table-column prop="name" label="用户名" min-width="120" />
         <el-table-column label="角色" width="140">
           <template #default="{ row }">
             <el-select :model-value="row.role" size="small" @change="(v: string) => changeRole(row, v)">
@@ -258,8 +270,8 @@ async function kickSession(row: SessionInfo) {
             <span v-else class="muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column prop="CreatedAt" label="创建时间" min-width="165">
-          <template #default="{ row }"><span class="muted">{{ row.created_at }}</span></template>
+        <el-table-column prop="created_at" label="创建时间" min-width="165">
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.created_at) }}</span></template>
         </el-table-column>
         <el-table-column label="操作" width="260" fixed="right">
           <template #default="{ row }">
@@ -285,7 +297,9 @@ async function kickSession(row: SessionInfo) {
           </template>
         </el-table-column>
         <el-table-column prop="user" label="用户" min-width="120" />
-        <el-table-column prop="expires" label="过期时间" min-width="165" />
+        <el-table-column prop="expires" label="过期时间" min-width="165">
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.expires) }}</span></template>
+        </el-table-column>
         <el-table-column label="操作" width="110" fixed="right">
           <template #default="{ row }">
             <el-button link type="danger" :icon="SwitchButton" @click="kickSession(row)">踢下线</el-button>
@@ -299,12 +313,14 @@ async function kickSession(row: SessionInfo) {
     <el-dialog v-model="createVisible" title="新建用户" width="440px">
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px"
         title="新用户默认 viewer（只读）；最小权限起步，按需提权或配追加授权。" />
-      <el-form label-width="80px">
+      <el-form label-width="80px" @submit.prevent>
         <el-form-item label="用户名" required>
           <el-input v-model="createForm.name" placeholder="字母数字 . _ -" />
+          <span v-if="createForm.name && nameErr()" class="err">{{ nameErr() }}</span>
         </el-form-item>
         <el-form-item label="初始密码" required>
           <el-input v-model="createForm.password" type="password" show-password placeholder="至少 8 位" />
+          <span v-if="createForm.password && createForm.password.length < 8" class="err">密码至少 8 位</span>
         </el-form-item>
         <el-form-item label="角色">
           <el-radio-group v-model="createForm.role">
@@ -316,7 +332,7 @@ async function kickSession(row: SessionInfo) {
       </el-form>
       <template #footer>
         <el-button @click="createVisible = false">取消</el-button>
-        <el-button type="primary" :loading="createLoading" @click="submitCreate">创建</el-button>
+        <el-button type="primary" :loading="createLoading" :disabled="!!nameErr() || createForm.password.length < 8 || !createForm.name.trim()" @click="submitCreate">创建</el-button>
       </template>
     </el-dialog>
 
@@ -366,6 +382,10 @@ async function kickSession(row: SessionInfo) {
 </template>
 
 <style scoped>
+.err {
+  color: #dc2626;
+  font-size: 12px;
+}
 .toolbar {
   display: flex;
   align-items: center;

@@ -15,13 +15,34 @@ import (
 	"github.com/spf13/cobra"
 
 	"wdp/internal/chart"
+	"wdp/internal/i18n"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 	"wdp/internal/playbook"
 )
 
-const schemaHelp = `
-YAML 结构字段速查（写 inventory / playbook / chart 前的骨架参考）
+// schemaHelp 返回 `wdp schema` 的长帮助（调用时求值）。
+func schemaHelp() string {
+	return i18n.T(`YAML structure field reference (a skeleton to consult before writing inventory / playbook / chart)
+
+Without arguments: an overview — structure-field domains first; concrete module parameters live in wdp module
+host: every connection parameter key available on an inventory host entry (address/auth/TLS/escalation/
+  channel-specific); keys not listed are always treated as host variables (templates reach them via .hostvars)
+task: the full table of playbook task control attributes (conditionals/loops/retries/escalation/delegation/
+  presentation/fault-tolerance blocks), grouped by semantics with copy-pasteable examples
+chart: every chart.yaml field plus lifecycle phase attributes (release/record/clears_marker/values_from),
+  grouped by semantics with examples
+
+These field tables share their source with the parser (a new field without docs fails the reconciliation
+test), so they never drift; for concrete modules (shell/copy/template...) use wdp module <name>
+
+Examples:
+wdp schema                    # overview
+wdp schema host               # host entry fields
+wdp schema task               # task control attributes
+wdp schema chart              # chart.yaml fields
+wdp schema task --json        # machine-readable (editor plugins/scripts)
+`, `YAML 结构字段速查（写 inventory / playbook / chart 前的骨架参考）
 
 不带参数：总览——结构字段域在前，具体模块参数另见 wdp module
 host：inventory 主机条目可用的全部连接参数键（地址/认证/TLS/提权/通道专属），
@@ -40,16 +61,18 @@ wdp schema host               # 主机条目字段
 wdp schema task               # 任务控制属性
 wdp schema chart              # chart.yaml 字段
 wdp schema task --json        # 机器可读（编辑器插件/脚本）
-`
+`)
+}
 
 // newSchemaCmd 构造 `wdp schema`。
 func newSchemaCmd() *cobra.Command {
 	var asJSON bool
 	cmd := &cobra.Command{
-		Use:   "schema [host|task|chart]",
-		Short: "YAML structure field reference: host entries, task attributes and chart.yaml",
-		Long:  schemaHelp,
-		Args:  cobra.MaximumNArgs(1),
+		Use: "schema [host|task|chart]",
+		Short: i18n.T("YAML structure field reference: host entries, task attributes and chart.yaml",
+			"YAML 结构字段速查：主机条目、任务控制属性与 chart.yaml"),
+		Long: schemaHelp(),
+		Args: cobra.MaximumNArgs(1),
 		ValidArgsFunction: func(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
 			if len(args) > 0 {
 				return nil, cobra.ShellCompDirectiveNoFileComp
@@ -58,9 +81,9 @@ func newSchemaCmd() *cobra.Command {
 			// 独立文档，模块参数不在本命令（wdp module）
 			var out []string
 			for _, c := range []struct{ name, desc string }{
-				{"host", "inventory 主机条目连接参数键"},
-				{"task", "playbook 任务控制属性"},
-				{"chart", "chart.yaml 字段与相位属性"},
+				{"host", i18n.T("inventory host entry connection parameter keys", "inventory 主机条目连接参数键")},
+				{"task", i18n.T("playbook task control attributes", "playbook 任务控制属性")},
+				{"chart", i18n.T("chart.yaml fields and phase attributes", "chart.yaml 字段与相位属性")},
 			} {
 				if strings.HasPrefix(c.name, toComplete) {
 					out = append(out, c.name+"\t"+c.desc)

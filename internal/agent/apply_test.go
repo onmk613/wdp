@@ -181,10 +181,10 @@ func TestRecapAccumulatesAcrossPlays(t *testing.T) {
 	jr.Recap("play-1", map[string]*model.Stats{
 		"h1": {Ok: 1, Changed: 2},
 		"h2": {Ok: 1},
-	})
+	}, 0)
 	jr.Recap("play-2", map[string]*model.Stats{
 		"h1": {Ok: 3, Failed: 1},
-	})
+	}, 0)
 	run.mu.Lock()
 	defer run.mu.Unlock()
 	if len(run.stats) != 2 {

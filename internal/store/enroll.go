@@ -21,8 +21,8 @@ type EnrollToken struct {
 	UsedAt       string
 	ClaimHost    string
 	ClaimAddress string
-	// KeyDeliveredAt 非空表示逐主机私钥已交付过（私钥不再可经 token 取走）
-	KeyDeliveredAt string
+	// CSRPubkeySHA 非空 = token 已锁定到该 CSR 公钥（同钥幂等、异钥拒绝）
+	CSRPubkeySHA string
 }
 
 // ErrTokenUsed 凭证已被成功使用（再用于下载/登记返回 410）。
@@ -40,8 +40,8 @@ func (s *Store) CreateEnrollToken(token, hostName string, agentPort int, ttl tim
 	now := time.Now().UTC()
 	// 先清理过期未用凭证，再插入（顺序保证：新建的 token 不会被自身清理）。
 	// 清理失败可忽略：只是顺带 GC，漏删的过期凭证仍会被各校验拒绝
-	_, _ = s.db.Exec(`DELETE FROM enroll_tokens WHERE used_at = '' AND expires_at < ?`, now.Format(time.RFC3339))
-	_, err := s.db.Exec(`INSERT INTO enroll_tokens (token, host_name, agent_port, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
+	_, _ = s.exec(`DELETE FROM enroll_tokens WHERE used_at = '' AND expires_at < ?`, now.Format(time.RFC3339))
+	_, err := s.exec(`INSERT INTO enroll_tokens (token, host_name, agent_port, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
 		token, hostName, agentPort, now.Format(time.RFC3339), now.Add(ttl).Format(time.RFC3339))
 	return err
 }
@@ -49,8 +49,8 @@ func (s *Store) CreateEnrollToken(token, hostName string, agentPort int, ttl tim
 // GetEnrollToken 查询凭证（含使用状态）。
 func (s *Store) GetEnrollToken(token string) (*EnrollToken, error) {
 	t := &EnrollToken{}
-	err := s.db.QueryRow(`SELECT id, token, host_name, agent_port, created_at, expires_at, used_at, claim_host, claim_address, key_delivered_at FROM enroll_tokens WHERE token = ?`, token).
-		Scan(&t.ID, &t.Token, &t.HostName, &t.AgentPort, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.ClaimHost, &t.ClaimAddress, &t.KeyDeliveredAt)
+	err := s.queryRow(`SELECT id, token, host_name, agent_port, created_at, expires_at, used_at, claim_host, claim_address, csr_pubkey_sha FROM enroll_tokens WHERE token = ?`, token).
+		Scan(&t.ID, &t.Token, &t.HostName, &t.AgentPort, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.ClaimHost, &t.ClaimAddress, &t.CSRPubkeySHA)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -87,7 +87,7 @@ func (s *Store) ClaimEnrollToken(token, host, address string) (*EnrollToken, err
 		// 无条件 UPDATE 会后写覆盖先写（"换 hostname 再来按重放拒绝"的
 		// 检测随之失效）。只允许抢到"仍无 claim"的那次落库，输家重读后
 		// 分流——与 ConsumeEnrollToken 的双花防护同口径。
-		res, err := s.db.Exec(`UPDATE enroll_tokens SET claim_host = ?, claim_address = ? WHERE id = ? AND claim_host = ''`, host, address, t.ID)
+		res, err := s.exec(`UPDATE enroll_tokens SET claim_host = ?, claim_address = ? WHERE id = ? AND claim_host = ''`, host, address, t.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -122,7 +122,7 @@ func (s *Store) ConsumeEnrollToken(token string) (*EnrollToken, error) {
 	if err := checkEnrollToken(t); err != nil {
 		return nil, err
 	}
-	res, err := s.db.Exec(`UPDATE enroll_tokens SET used_at = ? WHERE id = ? AND used_at = ''`, nowUTC(), t.ID)
+	res, err := s.exec(`UPDATE enroll_tokens SET used_at = ? WHERE id = ? AND used_at = ''`, nowUTC(), t.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -133,15 +133,42 @@ func (s *Store) ConsumeEnrollToken(token string) (*EnrollToken, error) {
 	return t, nil
 }
 
-// MarkEnrollKeyDelivered 标记逐主机私钥已交付（幂等；交付后不可再取）。
-func (s *Store) MarkEnrollKeyDelivered(id int64) error {
-	_, err := s.db.Exec(`UPDATE enroll_tokens SET key_delivered_at = ? WHERE id = ? AND key_delivered_at = ''`, nowUTC(), id)
-	return err
+// LockEnrollCSRKey 把 token 锁定到首个 CSR 的公钥（docs/20）：条件更新
+// 防并发——两个来源同时提交不同 CSR 时只允许抢到"尚未锁定"的那次落库，
+// 输家重读分流：同钥是并发重试（幂等放行），异钥是换钥匙冒名（拒绝）。
+func (s *Store) LockEnrollCSRKey(token, pubkeySHA string) error {
+	t, err := s.GetEnrollToken(token)
+	if err != nil {
+		return err
+	}
+	if err := checkEnrollToken(t); err != nil {
+		return err
+	}
+	if t.CSRPubkeySHA == "" {
+		res, err := s.exec(`UPDATE enroll_tokens SET csr_pubkey_sha = ? WHERE id = ? AND csr_pubkey_sha = ''`, pubkeySHA, t.ID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			cur, err := s.GetEnrollToken(token)
+			if err != nil {
+				return err
+			}
+			if cur.CSRPubkeySHA != pubkeySHA {
+				return Bizf("enroll token already bound to a different public key")
+			}
+		}
+		return nil
+	}
+	if t.CSRPubkeySHA != pubkeySHA {
+		return Bizf("enroll token already bound to a different public key")
+	}
+	return nil
 }
 
 // ListEnrollTokens 列出未过期凭证（纳管面板展示）。
 func (s *Store) ListEnrollTokens() ([]*EnrollToken, error) {
-	rows, err := s.db.Query(`SELECT id, token, host_name, agent_port, created_at, expires_at, used_at, claim_host, claim_address, key_delivered_at
+	rows, err := s.query(`SELECT id, token, host_name, agent_port, created_at, expires_at, used_at, claim_host, claim_address, csr_pubkey_sha
 		FROM enroll_tokens WHERE expires_at >= ? ORDER BY id DESC`, nowUTC())
 	if err != nil {
 		return nil, err
@@ -150,7 +177,7 @@ func (s *Store) ListEnrollTokens() ([]*EnrollToken, error) {
 	out := []*EnrollToken{}
 	for rows.Next() {
 		t := &EnrollToken{}
-		if err := rows.Scan(&t.ID, &t.Token, &t.HostName, &t.AgentPort, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.ClaimHost, &t.ClaimAddress, &t.KeyDeliveredAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Token, &t.HostName, &t.AgentPort, &t.CreatedAt, &t.ExpiresAt, &t.UsedAt, &t.ClaimHost, &t.ClaimAddress, &t.CSRPubkeySHA); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

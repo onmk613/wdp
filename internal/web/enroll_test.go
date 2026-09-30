@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"wdp/internal/ca"
 	"wdp/internal/store"
 )
 
@@ -103,10 +105,13 @@ func TestEnrollFullFlow(t *testing.T) {
 		t.Fatalf("脚本应 200: %d %s", rec.Code, rec.Body)
 	}
 	script := rec.Body.String()
-	for _, want := range []string{token, "linux_amd64", "UNIT=wdp-agent", "systemctl enable --now"} {
+	for _, want := range []string{token, "linux_amd64", "UNIT=wdp-agent", "systemctl enable --now", "agent gencsr", "/csr"} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("脚本缺 %q:\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, "host-key") {
+		t.Fatalf("脚本不得再经 URL 交付私钥:\n%s", script)
 	}
 	fpRe := regexp.MustCompile(`CA_FP='([0-9a-f]{64})'`)
 	m := fpRe.FindStringSubmatch(script)
@@ -130,25 +135,56 @@ func TestEnrollFullFlow(t *testing.T) {
 		t.Fatalf("二进制下发异常: %d", rec.Code)
 	}
 
-	// 5. 未 claim 不能下载证书
-	if rec := do(t, h, "GET", "/enroll/"+token+"/host-cert", nil, nil); rec.Code != http.StatusGone {
-		t.Fatalf("未 claim 取证书应 410: %d", rec.Code)
+	// 5. 未 claim 不能提交 CSR
+	if rec := do(t, h, "POST", "/enroll/"+token+"/csr", map[string]any{}, nil); rec.Code != http.StatusGone {
+		t.Fatalf("未 claim 提交 CSR 应 410: %d %s", rec.Code, rec.Body)
 	}
 
-	// 6. claim（幂等）→ 证书签发
+	// 6. claim（幂等）→ CSR 换证书（私钥"在目标机本地"生成——测试里
+	//    即进程内临时目录，server 全程只见公钥）
 	for i := 0; i < 2; i++ {
 		rec = do(t, h, "POST", "/enroll/"+token+"/claim", map[string]any{"hostname": "web9", "platform": "linux_amd64"}, nil)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("claim 第 %d 次应 200: %d %s", i+1, rec.Code, rec.Body)
 		}
 	}
-	rec = do(t, h, "GET", "/enroll/"+token+"/host-cert", nil, nil)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "BEGIN CERTIFICATE") {
-		t.Fatalf("主机证书异常: %d %s", rec.Code, rec.Body)
+	enrollTmp := t.TempDir()
+	if _, err := ca.GenCSR(filepath.Join(enrollTmp, "agent.key"), filepath.Join(enrollTmp, "agent.csr")); err != nil {
+		t.Fatal(err)
 	}
-	rec = do(t, h, "GET", "/enroll/"+token+"/host-key", nil, nil)
-	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "PRIVATE KEY") {
-		t.Fatalf("主机私钥异常: %d", rec.Code)
+	csrPEM, err := os.ReadFile(filepath.Join(enrollTmp, "agent.csr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	postCSR := func(pem []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/enroll/"+token+"/csr", bytes.NewReader(pem))
+		req.Header.Set("Content-Type", "application/pem-certificate-request")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	w := postCSR(csrPEM)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "BEGIN CERTIFICATE") {
+		t.Fatalf("CSR 换证书应 200: %d %s", w.Code, w.Body)
+	}
+	// 同钥重试幂等（脚本可重跑），且返回同一张证书
+	w2 := postCSR(csrPEM)
+	if w2.Code != http.StatusOK || w2.Body.String() != w.Body.String() {
+		t.Fatalf("同钥重试应返回同一证书: %d", w2.Code)
+	}
+	// server 侧只留证书：逐主机私钥不落 server 磁盘
+	hostsDir := filepath.Join(s.cam.dir, "hosts")
+	if _, err := os.Stat(filepath.Join(hostsDir, "web9.key")); !os.IsNotExist(err) {
+		t.Fatalf("CSR 纳管后 server 不得持有逐主机私钥: %v", err)
+	}
+	// 异钥 CSR 拒绝（token 已锁定到首个公钥）
+	alt := t.TempDir()
+	if _, err := ca.GenCSR(filepath.Join(alt, "k.key"), filepath.Join(alt, "k.csr")); err != nil {
+		t.Fatal(err)
+	}
+	altPEM, _ := os.ReadFile(filepath.Join(alt, "k.csr"))
+	if w := postCSR(altPEM); w.Code != http.StatusGone {
+		t.Fatalf("异钥 CSR 应 410: %d %s", w.Code, w.Body)
 	}
 
 	// 7. done：消费 token + 落账（绑定名 web9 优先于 claim hostname）
@@ -184,6 +220,7 @@ func TestEnrollTokenExpiry(t *testing.T) {
 		{"GET", "/enroll/expiredtoken/script.sh", nil},
 		{"GET", "/enroll/expiredtoken/ca", nil},
 		{"POST", "/enroll/expiredtoken/claim", map[string]any{"hostname": "h"}},
+		{"POST", "/enroll/expiredtoken/csr", map[string]any{}},
 		{"POST", "/enroll/expiredtoken/done", map[string]any{}},
 	} {
 		if rec := do(t, h, tc.method, tc.path, tc.body, nil); rec.Code != http.StatusGone {

@@ -2,7 +2,7 @@
 // chart 各 playbook 里的 register 变量、内置变量、模板函数白名单。
 // 域随文件内容变化即时刷新（debounce 由调用方做）。
 
-import yaml from 'js-yaml'
+import { parseDocument } from 'yaml'
 import type { SchemaMeta } from '../api'
 
 export interface VarNode {
@@ -33,14 +33,18 @@ export function buildVarDomain(files: Map<string, string>, meta: SchemaMeta): Va
 
   for (const [path, content] of files) {
     if (path === 'values.yaml') {
-      try {
-        const v = yaml.load(content) as any
+      // parseDocument 不抛语法错误（错误收集在 doc.errors）：显式检查，
+      // 保持"语法错误 → 跳过，域保持其他来源"的既有语义。
+      // mapAsMap:false 让映射转普通对象（默认 Map 会绕过 Object.entries）
+      const doc = parseDocument(content)
+      if (doc.errors.length === 0) {
+        const v = doc.toJS({ mapAsMap: false }) as any
         if (v && typeof v === 'object' && !Array.isArray(v)) {
           for (const [k, val] of Object.entries(v)) {
             roots[k] = { name: k, detail: 'values.yaml', children: objToChildren(val, 1) }
           }
         }
-      } catch { /* values.yaml 语法错误：跳过，域保持其他来源 */ }
+      }
     }
     if (path.endsWith('.tpl')) {
       for (const m of content.matchAll(/\{\{-?\s*define\s+"([^"]+)"/g)) helpers.push(m[1])
@@ -128,7 +132,7 @@ export function handlerNames(files: Map<string, string>, control: Set<string>): 
       if (!/^([A-Za-z0-9_-]+)\.yaml$/.test(path) || ['chart.yaml', 'values.yaml', 'inventory.yaml'].includes(path)) continue
     }
     try {
-      const plays = yaml.load(content) as any[] | null
+      const plays = parseDocument(content).toJS({ mapAsMap: false }) as any[] | null
       if (!Array.isArray(plays)) continue
       for (const item of plays) {
         if (isHandlerFragment) {

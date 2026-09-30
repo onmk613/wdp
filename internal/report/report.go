@@ -32,7 +32,9 @@ type Reporter interface {
 	HostResult(host string, r *model.TaskResult)
 	TaskDone() // 单任务全部主机结果收齐后调用
 	PlayMsg(format string, a ...any)
-	Recap(playName string, stats map[string]*model.Stats)
+	// Recap 汇总一个 play：stats 按主机聚合（含 ElapsedMs 耗时列），
+	// wallMs 是该 play 的整体墙钟（首任务前到收尾），供耗时对比呈现
+	Recap(playName string, stats map[string]*model.Stats, wallMs int64)
 	Finish() // 整个 run 结束时调用（JSON 模式输出最终文档）
 }
 

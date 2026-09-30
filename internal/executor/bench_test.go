@@ -54,10 +54,10 @@ func BenchmarkRun1000Hosts5Tasks(b *testing.B) {
 // nopReporter 静默 reporter（基准不度量输出渲染）。
 type nopReporter struct{}
 
-func (nopReporter) PlayStart(string, []string)            {}
-func (nopReporter) TaskStart(string, string)              {}
-func (nopReporter) HostResult(string, *model.TaskResult)  {}
-func (nopReporter) TaskDone()                             {}
-func (nopReporter) PlayMsg(string, ...any)                {}
-func (nopReporter) Recap(string, map[string]*model.Stats) {}
-func (nopReporter) Finish()                               {}
+func (nopReporter) PlayStart(string, []string)                   {}
+func (nopReporter) TaskStart(string, string)                     {}
+func (nopReporter) HostResult(string, *model.TaskResult)         {}
+func (nopReporter) TaskDone()                                    {}
+func (nopReporter) PlayMsg(string, ...any)                       {}
+func (nopReporter) Recap(string, map[string]*model.Stats, int64) {}
+func (nopReporter) Finish()                                      {}

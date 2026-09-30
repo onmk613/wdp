@@ -24,12 +24,25 @@ func yamlTagsOf(v any) map[string]string {
 	return out
 }
 
+// phaseSectionMarker 是「相位属性」小节的判别键。
+//
+// 原先用标题前缀（strings.HasPrefix(sec.Title, "相位属性")）判别，但标题经
+// i18n.T 双语化后取值随语言变化，英文环境再也匹配不上（测试会误报"PhaseSpec
+// 的 yaml 键缺少文档"）。改用只出现在该小节的字段名判别：与语言无关，也不
+// 依赖标题措辞。
+const phaseSectionMarker = "clears_marker"
+
 func TestChartFieldsReconcile(t *testing.T) {
 	metaTags := yamlTagsOf(Meta{})
 	documented := map[string]string{} // 文档键 → GoField
 	phaseDocs := map[string]bool{}    // 相位属性表的文档键
 	for _, sec := range ChartFieldSections() {
-		isPhase := strings.HasPrefix(sec.Title, "相位属性")
+		isPhase := false
+		for _, f := range sec.Fields {
+			if f.Name == phaseSectionMarker {
+				isPhase = true
+			}
+		}
 		for _, f := range sec.Fields {
 			if prev, dup := documented[f.Name]; dup {
 				t.Fatalf("字段 %q 在多个分组重复出现（前一处 GoField=%s）", f.Name, prev)

@@ -213,6 +213,32 @@ describe('ChartFS.rename', () => {
   })
 })
 
+// ---- 新建模式脚手架基线（回归：未编辑也弹「未保存修改」确认）----
+describe('ChartFS 脚手架基线', () => {
+  it('加载脚手架后未编辑不算脏（离开不弹确认）', () => {
+    const fs = new ChartFS()
+    fs.loadFromScaffold('demo', '1.0.0', '')
+    expect(fs.isDirty()).toBe(false)
+    expect(fs.dirtyCount()).toBe(0)
+  })
+  it('编辑脚手架文件才算脏；改回原文恢复干净', () => {
+    const fs = new ChartFS()
+    fs.loadFromScaffold('demo', '1.0.0', '')
+    const before = fs.get('deploy.yaml')!.content
+    fs.get('deploy.yaml')!.content = '- shell: echo hi\n'
+    expect(fs.isDirty()).toBe(true)
+    fs.get('deploy.yaml')!.content = before
+    expect(fs.isDirty()).toBe(false)
+  })
+  it('未编辑也全量回传（新建必须落全部文件）', () => {
+    const fs = new ChartFS()
+    fs.loadFromScaffold('demo', '1.0.0', '')
+    const body = fs.toSaveBody('1.0.0')
+    expect(body.files.map((f) => f.path).sort())
+      .toEqual(['chart.yaml', 'deploy.yaml', 'values.yaml'])
+  })
+})
+
 // ---- 草稿快照往返 ----
 describe('ChartFS 草稿往返', () => {
   it('重命名后走草稿恢复再保存：仍是移动而非复制', () => {

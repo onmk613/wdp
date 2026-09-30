@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"wdp/internal/i18n"
 )
 
 func init() {
@@ -29,26 +30,26 @@ func (m *ArtifactModule) Name() string { return "artifact" }
 func (m *ArtifactModule) RollbackCapability() RollbackCapability { return RollbackFull }
 
 func (m *ArtifactModule) Desc() string {
-	return "distribute an artifact with a control-side cache (cache hit = offline, miss = download once into the cache)"
+	return i18n.T("Distribute artifacts to target hosts; controller cache first (a hit works offline, a miss downloads once into the cache)", "分发制品到目标机；控制端缓存优先（命中即离线可用，未命中下载一次入缓存）")
 }
 
 func (m *ArtifactModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "cache", Type: "string", Desc: "control-side cache path (chart-relative, e.g. packages/<arch>/app.tgz); a non-empty file at this path is used as-is, never downloading (required)"},
-		{Name: "dest", Type: "string", Desc: "remote destination: file path without members, directory with members (required)"},
-		{Name: "url", Type: "string", Desc: "online source downloaded into cache on a miss (http/https, fetched from the control node); a missing cache without url fails"},
-		{Name: "members", Type: "list", Desc: "archive entries to pick by name (basename or full archive path, flattened into dest/); omit to distribute the whole artifact"},
-		{Name: "mode", Type: "mode", Default: "0755", Desc: "destination mode (members keep their archive entry mode unless set)"},
-		{Name: "sha256", Type: "string", Desc: "expected sha256 of the artifact (verified on both cache hits and downloads; a mismatched cache re-downloads when url is set)"},
-		{Name: "timeout_secs", Type: "int", Default: "30", Desc: "download timeout in seconds (control node)"},
-		{Name: "headers", Type: "map", Desc: "extra request headers (e.g. Authorization)"},
+		{Name: "cache", Type: "string", Desc: i18n.T("controller cache path (relative path inside the chart, e.g. packages/<arch>/app.tgz); a non-empty file at this path is used as is and never downloaded (required)", "控制端缓存路径（chart 内相对路径，如 packages/<arch>/app.tgz）；该路径存在非空文件即直接使用、永不下载（必填）")},
+		{Name: "dest", Type: "string", Desc: i18n.T("remote destination: a file path when members is omitted, a directory when members is given (required)", "远端目标：不带 members 时是文件路径，带 members 时是目录（必填）")},
+		{Name: "url", Type: "string", Desc: i18n.T("online source the controller downloads into the cache on a miss (http/https); fails when the cache is missing and no url is given", "在线源，缓存未命中时由控制端下载入缓存（http/https）；缓存缺失且无 url 则失败")},
+		{Name: "members", Type: "list", Desc: i18n.T("archive entries picked by name (basename or full path inside the archive, flattened into dest/); distributes the whole artifact by default", "按名字挑选的压缩包条目（basename 或完整包内路径，拍平进 dest/）；缺省分发整个制品")},
+		{Name: "mode", Type: "mode", Default: "0755", Desc: i18n.T("mode on the target (when unset, members keep their archive entry permissions)", "目标权限位（不设时 members 保持包内条目权限）")},
+		{Name: "sha256", Type: "string", Desc: i18n.T("expected sha256 (verified for both cache hits and downloads; re-downloads when the cache mismatches and url is given)", "期望 sha256（缓存命中与下载都校验；缓存不匹配且给了 url 时重新下载）")},
+		{Name: "timeout_secs", Type: "int", Default: "30", Desc: i18n.T("download timeout in seconds (controller)", "下载超时（秒，控制端）")},
+		{Name: "headers", Type: "map", Desc: i18n.T("extra request headers (e.g. Authorization)", "附加请求头（如 Authorization）")},
 	}
 }
 
 func (m *ArtifactModule) Example() string {
-	return `# one task for both online and offline: cache packages/ pre-seeded -> offline;
-# empty cache -> download once on the control node, then distribute
-- name: distribute kubernetes components from the server bundle
+	return i18n.T(`# One task for online and offline: a pre-seeded packages/ cache -> works offline;
+# an empty cache -> the controller downloads once, then distributes
+- name: Distribute Kubernetes components from the official archive
   artifact:
     url: "https://dl.k8s.io/v1.31.0/kubernetes-server-linux-amd64.tar.gz"
     cache: "packages/{{ .arch }}/kubernetes-server-{{ .version }}.tar.gz"
@@ -56,15 +57,51 @@ func (m *ArtifactModule) Example() string {
     dest: "{{ .bin_dir }}"
     mode: "0755"
 
-# plain binary artifact (no archive): dest is the file path
-- name: distribute etcdctl
+# bare binary artifact (not an archive): dest is a file path
+- name: Distribute etcdctl
   artifact:
     url: "https://github.com/etcd-io/etcd/releases/download/{{ .etcd_version }}/etcd-{{ .etcd_version }}-linux-{{ .arch }}.tar.gz"
     cache: "packages/{{ .arch }}/etcd-{{ .etcd_version }}.tar.gz"
     members: [etcdctl]
     dest: "{{ .bin_dir }}"
     mode: "0755"
-`
+
+# an empty cache -> the controller downloads once, then distributes
+- name: Distribute Kubernetes components from the official archive
+  artifact:
+    url: "https://dl.k8s.io/v1.31.0/kubernetes-server-linux-amd64.tar.gz"
+    cache: "packages/{{ .arch }}/kubernetes-server-{{ .version }}.tar.gz"
+    members: [kube-apiserver, kube-controller-manager, kube-scheduler, kubelet, kubectl]
+    dest: "{{ .bin_dir }}"
+    mode: "0755"
+
+# bare binary artifact (not an archive): dest is a file path
+- name: Distribute etcdctl
+  artifact:
+    url: "https://github.com/etcd-io/etcd/releases/download/{{ .etcd_version }}/etcd-{{ .etcd_version }}-linux-{{ .arch }}.tar.gz"
+    cache: "packages/{{ .arch }}/etcd-{{ .etcd_version }}.tar.gz"
+    members: [etcdctl]
+    dest: "{{ .bin_dir }}"
+    mode: "0755"
+`, `# 在线/离线一份任务：packages/ 预置了缓存 -> 离线可用；
+# 缓存为空 -> 控制端下载一次，之后分发
+- name: 从官方包分发 Kubernetes 组件
+  artifact:
+    url: "https://dl.k8s.io/v1.31.0/kubernetes-server-linux-amd64.tar.gz"
+    cache: "packages/{{ .arch }}/kubernetes-server-{{ .version }}.tar.gz"
+    members: [kube-apiserver, kube-controller-manager, kube-scheduler, kubelet, kubectl]
+    dest: "{{ .bin_dir }}"
+    mode: "0755"
+
+# 裸二进制制品（非压缩包）：dest 为文件路径
+- name: 分发 etcdctl
+  artifact:
+    url: "https://github.com/etcd-io/etcd/releases/download/{{ .etcd_version }}/etcd-{{ .etcd_version }}-linux-{{ .arch }}.tar.gz"
+    cache: "packages/{{ .arch }}/etcd-{{ .etcd_version }}.tar.gz"
+    members: [etcdctl]
+    dest: "{{ .bin_dir }}"
+    mode: "0755"
+`)
 }
 
 // Run 执行制品分发。

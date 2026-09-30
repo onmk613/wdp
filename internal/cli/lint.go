@@ -7,11 +7,28 @@ import (
 
 	"wdp/internal/chart"
 	"wdp/internal/config"
+	"wdp/internal/i18n"
 	"wdp/internal/playbook"
 )
 
-const lintHelp = `
-chart 或裸 playbook 静态校验（不连主机）
+// lintHelp 返回 `wdp lint` 的长帮助（调用时求值）。
+func lintHelp() string {
+	return i18n.T(`Static validation of a chart or a bare playbook (no host connection)
+
+Bare playbook (argument ends in .yaml/.yml): task tree structure, module names, chart ref validity
+Chart (directory/tgz): task tree validation across all phases (including sub-chart refs, recursive block
+groups and module names), parse-only template fields rejecting bare variable references, phases
+declarations matched against phase files (catching silently ineffective typos), template files renderable
+(sample domain), envs files parseable and schema-valid, merged values validated against values.schema.json
+(sub-charts walked statically layer by layer), inventory_override whitelist key existence
+Passing real values with -f/--set validates the actual merge result
+Non-zero exit on ERROR (CI-ready); WARN is informational only
+
+Examples:
+wdp lint ./myapp
+wdp lint ./myapp -f envs/prod.yaml
+wdp lint site.yaml
+`, `chart 或裸 playbook 静态校验（不连主机）
 
 裸 playbook（参数以 .yaml/.yml 结尾）：任务树结构、模块名、chart 引用合法性
 chart（目录/tgz）：全相位任务树校验（含子 chart 引用、block 组递归、模块名）、
@@ -26,16 +43,18 @@ inventory_override 白名单键存在性
 wdp lint ./myapp
 wdp lint ./myapp -f envs/prod.yaml
 wdp lint site.yaml
-`
+`)
+}
 
 // newLintCmd 构造 `wdp lint`。
 func newLintCmd() *cobra.Command {
 	var valuesFiles, setArgs []string
 	cmd := &cobra.Command{
-		Use:   "lint <chart-dir|tgz|playbook.yaml>",
-		Short: "statically validate a chart or a bare playbook",
-		Long:  lintHelp,
-		Args:  cobra.ExactArgs(1),
+		Use: "lint <chart-dir|tgz|playbook.yaml>",
+		Short: i18n.T("statically validate a chart or a bare playbook",
+			"chart 或裸 playbook 静态校验（不连主机）"),
+		Long: lintHelp(),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			out := cmd.OutOrStdout()
 			// 裸 playbook 只做任务树静态检查（模块名/结构/chart 引用拒绝）。

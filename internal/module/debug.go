@@ -6,6 +6,7 @@ package module
 import (
 	"fmt"
 	"strings"
+	"wdp/internal/i18n"
 
 	"gopkg.in/yaml.v3"
 )
@@ -18,13 +19,13 @@ type DebugModule struct{}
 func (m *DebugModule) Name() string { return "debug" }
 
 func (m *DebugModule) Desc() string {
-	return "print a variable or a message (playbook debugging)"
+	return i18n.T("Print a variable or message (playbook debugging)", "打印变量或消息（playbook 调试）")
 }
 
 func (m *DebugModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "var", Type: "string", Desc: "variable name (e.g. a register'd result, or result.stdout): prints its value as YAML"},
-		{Name: "msg", Type: "string", Desc: "message text (template vars supported); may combine with var, msg prints first"},
+		{Name: "var", Type: "string", Desc: i18n.T("variable name (e.g. a register result; dot paths such as result.stdout are supported): prints its value as YAML", "变量名（如 register 的结果，支持点路径 result.stdout）：以 YAML 打印其值")},
+		{Name: "msg", Type: "string", Desc: i18n.T("message text (template variables supported); can be combined with var, msg is printed first", "消息文本（支持模板变量）；可与 var 同用，msg 先输出")},
 	}
 }
 
@@ -73,6 +74,26 @@ func (m *DebugModule) Run(rc *RunContext, args map[string]any, _ string) *Result
 		return Fail("debug: requires var or msg")
 	}
 	return res
+}
+
+// Example 使用示例（实现 UsageProvider 的另一半：Params+Example 齐备后
+// var/msg 才会进 /api/modules，编辑器补全与文档随之可用）。
+func (m *DebugModule) Example() string {
+	return i18n.T(`- name: Print a register result (dot path)
+  debug:
+    var: result
+
+- name: Print a rendered message (template variables supported)
+  debug:
+    msg: 'current host {{ .inventory_hostname }}'
+`, `- name: 打印 register 结果（点路径）
+  debug:
+    var: result
+
+- name: 打印渲染消息（支持模板变量）
+  debug:
+    msg: '当前主机 {{ .inventory_hostname }}'
+`)
 }
 
 // resolveVarPath 按点路径解析变量（"result.stdout" → Vars["result"].(map)["stdout"]）。

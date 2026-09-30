@@ -9,12 +9,17 @@ import { Delete, Download, EditPen, PriceTag, Refresh, Star, Upload } from '@ele
 import { api, upload, appDownloadURL, type App, type AppVersion, type GroupEntry, type LabelDef, type Pool } from '../api'
 import LabelRows from '../components/LabelRows.vue'
 import { can } from '../auth'
-import { parseLabels } from '../lib/format'
+import { parseLabels, fmtTime } from '../lib/format'
+import type { PagedResp } from '../lib/usePaging'
+import Pager from '../components/Pager.vue'
 
 const router = useRouter()
 
 const apps = ref<App[]>([])
 const loading = ref(false)
+const page = ref(1)
+const pageSize = ref(50)
+const total = ref(0)
 const pools = ref<Pool[]>([])
 const groups = ref<GroupEntry[]>([])
 const labels = ref<LabelDef[]>([])
@@ -29,12 +34,22 @@ const tableRef = ref()
 async function load(silent = false) {
   if (!silent) loading.value = true
   try {
-    ;[apps.value, pools.value, groups.value, labels.value] = await Promise.all([
-      api<App[]>('GET', '/api/apps'),
+    const params = new URLSearchParams({ page: String(page.value), page_size: String(pageSize.value) })
+    const [paged, pl, gl, lb] = await Promise.all([
+      api<PagedResp<App>>('GET', `/api/apps?${params}`),
       api<Pool[]>('GET', '/api/pools'),
       api<GroupEntry[]>('GET', '/api/groups'),
       api<LabelDef[]>('GET', '/api/labels'),
     ])
+    apps.value = paged.items
+    total.value = paged.total
+    pools.value = pl
+    groups.value = gl
+    labels.value = lb
+    if (paged.items.length === 0 && paged.total > 0 && page.value > 1) {
+      page.value = Math.ceil(paged.total / pageSize.value)
+      return load(silent)
+    }
     for (const id of expanded.value) loadVersions(id, true)
   } catch (e) {
     if (!silent) ElMessage.error((e as Error).message)
@@ -298,7 +313,7 @@ onMounted(() => load())
                   <template #default="{ row: v }">{{ (v.Size / 1024).toFixed(0) }} KB</template>
                 </el-table-column>
                 <el-table-column prop="CreatedAt" label="修改时间" min-width="165">
-                  <template #default="{ row: v }"><span class="muted">{{ v.CreatedAt }}</span></template>
+                  <template #default="{ row: v }"><span class="muted">{{ fmtTime(v.CreatedAt) }}</span></template>
                 </el-table-column>
                 <el-table-column label="操作" width="360" fixed="right">
                   <template #default="{ row: v }">
@@ -319,6 +334,7 @@ onMounted(() => load())
                 </el-table-column>
                 <template #empty><el-empty description="该应用暂无版本" /></template>
               </el-table>
+        <Pager :page="page" :page-size="pageSize" :total="total" @update:page="(v) => { page = v; load(true) }" @update:page-size="(v) => { pageSize = v; load(true) }" />
             </div>
           </template>
         </el-table-column>
@@ -354,7 +370,7 @@ onMounted(() => load())
           </template>
         </el-table-column>
         <el-table-column prop="UpdatedAt" label="最近修改" min-width="170">
-          <template #default="{ row }"><span class="muted">{{ row.UpdatedAt }}</span></template>
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.UpdatedAt) }}</span></template>
         </el-table-column>
         <template #empty>
           <el-empty description="还没有应用：上传 chart.tgz 创建，或在「新建应用」用 IDE 从零搭建" />

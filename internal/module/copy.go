@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"wdp/internal/i18n"
 )
 
 func init() {
@@ -21,7 +22,7 @@ func (m *CopyModule) Name() string { return "copy" }
 func (m *CopyModule) RollbackCapability() RollbackCapability { return RollbackFull }
 
 func (m *CopyModule) Desc() string {
-	return "distribute local files or content to remote hosts"
+	return i18n.T("Distribute local files or literal content to remote hosts", "分发本地文件或字面量内容到远端")
 }
 
 // Run 执行分发（校验和幂等管线见 putFile）。
@@ -113,7 +114,13 @@ func resolveLocal(rc *RunContext, p string) (string, error) {
 	}
 	rel, err := filepath.Rel(absBase, abs)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path %q is outside the chart/playbook directory %s (absolute paths and .. escapes are refused; put the file inside the chart)", p, absBase)
+		// 绝对路径大概率是把目标机路径误当本地 src（get_url remote 下载后
+		// 就地处理的常见写法）——提示直接指向修法
+		hint := "; put the file inside the chart"
+		if filepath.IsAbs(p) {
+			hint = "; if this is a path on the target host, add remote_src: true"
+		}
+		return "", fmt.Errorf("path %q is outside the chart/playbook directory %s (absolute paths and .. escapes are refused%s)", p, absBase, hint)
 	}
 	return abs, nil
 }
@@ -122,22 +129,28 @@ func resolveLocal(rc *RunContext, p string) (string, error) {
 // 其余按使用频率排列——补全候选与 snippet 骨架都按此序展示。
 func (m *CopyModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "src", Type: "string", Desc: "local source file path (mutually exclusive with content)"},
-		{Name: "dest", Type: "string", Desc: "remote destination path (required)"},
-		{Name: "content", Type: "string", Desc: "literal content (mutually exclusive with src; \"\" writes an empty file)"},
-		{Name: "mode", Type: "mode", Default: "0644", Desc: "mode (inherits the local file mode when src is set)"},
-		{Name: "owner", Type: "string", Desc: "owner (requires become)"},
-		{Name: "group", Type: "string", Desc: "group (requires become)"},
-		{Name: "backup", Type: "bool", Default: "false", Desc: "back up as dest.bak.<timestamp> before overwriting"},
+		{Name: "src", Type: "string", Desc: i18n.T("local source file path, relative to the chart/playbook (mutually exclusive with content)", "本地源文件路径，chart/playbook 内相对路径（与 content 互斥）")},
+		{Name: "dest", Type: "string", Desc: i18n.T("remote destination path (required)", "远端目标路径（必填）")},
+		{Name: "content", Type: "string", Desc: i18n.T("literal content (mutually exclusive with src; an empty string writes an empty file)", "字面量内容（与 src 互斥；空串写入空文件）")},
+		{Name: "mode", Type: "mode", Default: "0644", Desc: i18n.T("mode (with src, defaults to the local file's permissions)", "权限位（src 方式缺省继承本地文件权限）")},
+		{Name: "owner", Type: "string", Desc: i18n.T("owner (requires become)", "属主（需 become）")},
+		{Name: "group", Type: "string", Desc: i18n.T("group (requires become)", "属组（需 become）")},
+		{Name: "backup", Type: "bool", Default: "false", Desc: i18n.T("back up to dest.bak.<timestamp> before overwriting", "覆盖前先备份为 dest.bak.<时间戳>")},
 	}
 }
 
 func (m *CopyModule) Example() string {
-	return `- name: push a static config
+	return i18n.T(`- name: Push a static config file
   copy:
     src: files/app.conf
     dest: /etc/app/app.conf
     mode: "0644"
     backup: true
-`
+`, `- name: 下发静态配置
+  copy:
+    src: files/app.conf
+    dest: /etc/app/app.conf
+    mode: "0644"
+    backup: true
+`)
 }

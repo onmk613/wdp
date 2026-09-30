@@ -308,8 +308,9 @@ func TestUnarchiveMembers(t *testing.T) {
 	if r := mod.Run(rc, map[string]any{"src": "server.tar.gz", "dest": "/opt/bin", "members": []any{"nope"}}, ""); !r.Failed {
 		t.Fatal("未命中成员应失败")
 	}
-	// remote_src 与 members 互斥
-	if r := mod.Run(rc, map[string]any{"src": "/tmp/s.tar.gz", "dest": "/opt/bin", "members": []any{"kubelet"}, "remote_src": true}, ""); !r.Failed {
-		t.Fatal("remote_src + members 应失败")
+	// remote_src + members 已支持（目标机暂存解压拍平，行为级测试见
+	// unarchive_remote_test.go）；此处只确认不再被参数层拒绝
+	if r := mod.Run(rc, map[string]any{"src": "/tmp/s.tar.gz", "dest": "/opt/bin", "members": []any{"kubelet"}, "remote_src": true}, ""); r.Failed {
+		t.Fatalf("remote_src + members 应可用: %s", r.Msg)
 	}
 }

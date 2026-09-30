@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -22,7 +23,7 @@ type PackageModule struct{}
 func (m *PackageModule) Name() string { return "package" }
 
 func (m *PackageModule) Desc() string {
-	return "install/remove packages (auto-detects the package manager)"
+	return i18n.T("Install/uninstall packages (auto-detects apt/dnf/yum/apk/zypper)", "安装/卸载软件包（自动探测 apt/dnf/yum/apk/zypper）")
 }
 
 // pkgPlan 是单包的动作计划：kind 取 install/remove/upgrade（需要执行）
@@ -374,15 +375,19 @@ func (p *pkgManager) run(rc *RunContext, script string) *Result {
 
 func (m *PackageModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "list", Desc: "package name(s) (whitespace-separated string or list, required)"},
-		{Name: "state", Type: "string", Default: "present", Enum: packageStates, Desc: "desired state (auto-detects apt/dnf/yum/apk/zypper)"},
+		{Name: "name", Type: "list", Desc: i18n.T("package name (whitespace-separated string or list, required)", "包名（空白分隔的字符串或列表，必填）")},
+		{Name: "state", Type: "string", Default: "present", Enum: packageStates, Desc: i18n.T("target state (package manager is auto-detected)", "目标状态（包管理器自动探测）")},
 	}
 }
 
 func (m *PackageModule) Example() string {
-	return `- name: install dependencies
+	return i18n.T(`- name: install dependencies
   package:
     name: [curl, jq]
     state: present
-`
+`, `- name: 安装依赖
+  package:
+    name: [curl, jq]
+    state: present
+`)
 }

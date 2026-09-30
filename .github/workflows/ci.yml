@@ -1,10 +1,10 @@
-# wdp CI：质量门禁（build/vet/gofmt/tidy/race/coverage/golangci-lint）+ 安全扫描。
-# 对含 CA/SSH/root-agent 原语的工具，govulncheck 与回归测试是硬性要求。
 name: ci
 
 on:
   push:
-    branches: [main, master]
+    # web-console 是活跃开发分支（Web 管理端主体在此演进），直推同样要过
+    # CI——此前直推不触发，叠加 [skip ci] 习惯会让该分支长期没有 CI 信号
+    branches: [main, master, web-console]
   pull_request:
 
 permissions:
@@ -31,7 +31,7 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Gofmt（输出差异即失败）
+      - name: Gofmt
         run: |
           unformatted=$(gofmt -l .)
           if [ -n "$unformatted" ]; then
@@ -40,7 +40,7 @@ jobs:
             exit 1
           fi
 
-      - name: go mod tidy（产生差异即失败）
+      - name: go mod tidy
         run: |
           go mod tidy
           if ! git diff --exit-code go.mod go.sum; then
@@ -48,7 +48,7 @@ jobs:
             exit 1
           fi
 
-      - name: Test（含竞态检测 + 覆盖率）
+      - name: Test
         run: |
           set -o pipefail
           status=0
@@ -104,25 +104,49 @@ jobs:
           ./build.sh --help | tee /tmp/help.txt
           grep -q '用法:' /tmp/help.txt
 
-      - name: 前端类型检查 + 单测（脚本早已存在，此前从未在 CI 运行）
+      - name: 前端类型检查 + lint + 单测
         run: |
           cd frontend
           npm ci --no-fund --no-audit
           npm run typecheck
+          npm run lint
           npm run test
 
-      - name: build.sh 缺省全平台构建 + 前端内嵌
+      - name: build.sh 缺省全平台构建 + 前端内嵌（full + agent 两档）
         run: |
           ./build.sh --frontend
           test -x bin/wdp-linux-amd64
           test -x bin/wdp-linux-arm64
           test -x bin/wdp-darwin-arm64
           test -f bin/wdp-windows-amd64.exe
+          test -x bin/wdp-agent-linux-amd64
+          test -x bin/wdp-agent-linux-arm64
           test -s bin/SHA256SUMS
           test -f internal/web/static/index.html
 
-      - name: 全集产物可用（--version 冒烟）
-        run: ./bin/wdp-linux-amd64 --version
+      - name: 全集产物可用（--version / 两档命令面冒烟）
+        run: |
+          ./bin/wdp-linux-amd64 --version | grep -q 'tier full'
+          # 瘦入口命令形态与全量档同构（纳管脚本/systemd 按 <bin> agent 调用）
+          ./bin/wdp-agent-linux-amd64 agent --help >/dev/null
+          ./bin/wdp-agent-linux-amd64 agent gencsr --help >/dev/null
+          ./bin/wdp-agent-linux-amd64 --version | grep -q 'tier agent'
+
+      # 两档即全部产物面（原 --tier cli / --tier console 已删除，见 build.sh
+      # 头部档位说明）：这里钉住两件事——全量档的控制端命令面齐全（取代原先
+      # 用 cli/console 两档间接覆盖的部分），以及被删档位确实不再可选（防
+      # 有人把 tier_tags 那套机制加回来而又没有消费方）。
+      - name: 全量档命令面 + 已删档位不可达
+        run: |
+          ./bin/wdp-linux-amd64 server --help >/dev/null
+          ./bin/wdp-linux-amd64 ca --help >/dev/null
+          ./bin/wdp-linux-amd64 module >/dev/null
+          for t in cli console; do
+            if ./build.sh --tier "$t" linux/amd64 2>/dev/null; then
+              echo "::error::--tier $t 已被删除，此处应报错而非构建成功"
+              exit 1
+            fi
+          done
 
   # 多平台编译矩阵：控制端支持 macOS/Windows，交叉编译必须在 CI 验证
   #（单元测试仍只在 linux 跑，避免把平台差异带进断言）。

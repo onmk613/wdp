@@ -23,9 +23,6 @@ type (
 	specReq           = console.SpecReq
 )
 
-// chartYAMLVersion 读 chart.yaml 顶层 version（console 实现）。
-var chartYAMLVersion = console.ChartYAMLVersion
-
 func (s *Server) handleGetSpec(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r)
 	if !ok {
@@ -124,7 +121,7 @@ func (s *Server) handleCreateSpec(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, fmt.Errorf("load packed chart: %w", perr))
 		return
 	}
-	id, err := s.st.CreateApp(req.Name, req.Description, req.Labels, req.Pools, req.Groups, req.Version, final, sha, size, phases)
+	id, err := s.st.CreateApp(req.Name, req.Description, req.Labels, req.Pools, req.Groups, req.Version, final, sha, size, phases, chartModulesOf(final))
 	if err != nil {
 		// 约束：失败先确认制品未被并发先到者入库引用（重名即同路径），
 		// 被引用则不删
@@ -197,7 +194,7 @@ func (s *Server) handleSaveSpec(w http.ResponseWriter, r *http.Request) {
 		},
 		func(_ *store.App, final, sha string, size int64) error {
 			note := fmt.Sprintf("edited from %s", baseVersion)
-			return s.st.AddVersion(id, req.Version, final, sha, size, note, req.Pools, req.Groups, req.Labels, phases)
+			return s.st.AddVersion(id, req.Version, final, sha, size, note, req.Pools, req.Groups, req.Labels, phases, chartModulesOf(final))
 		},
 	) {
 		return

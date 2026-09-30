@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"regexp"
 	"sync"
 	"time"
 
@@ -48,10 +49,23 @@ func Timeout(d time.Duration) int64 {
 type ExecRequest struct {
 	Script     string            // POSIX sh 脚本
 	Stdin      string            // 附加到脚本 stdin 的数据（可选）
-	Env        map[string]string // 环境变量
+	Env        map[string]string // 环境变量（键须经 EnvKeyAllowed 白名单）
 	TimeoutMs  int64             // 超时毫秒（conn.Timeout 换算），0 表示不限
 	BecomeUser string            // 非空时以该用户执行（sudo -u）
+	// Label 人读标识（任务名 / run 来源等），agent 日志用它替代裸 sha256
+	// 摘要定位"执行的是什么"。只用于日志呈现，不参与执行语义；旧 agent
+	// 忽略未知 JSON 字段，通道兼容
+	Label string
 }
+
+// envKeyRe 是 Env 键的白名单：env 键经网络/plan 下发，拼进进程环境或
+// export 语句前必须限定字符集，防 LF/空格等利用 K=V 形态的注入。
+// 允许下划线续位（FOO_BAR 是合法环境变量名）。所有通道（sshc/local/
+// selfrun）共用此单一实现，防各处正则漂移导致同名任务跨通道行为分叉。
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// EnvKeyAllowed 报告 env 键是否允许注入。越白名单的键由调用方静默丢弃。
+func EnvKeyAllowed(k string) bool { return envKeyRe.MatchString(k) }
 
 // ExecResult 是脚本执行结果。
 type ExecResult struct {

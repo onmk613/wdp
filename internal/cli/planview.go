@@ -13,11 +13,23 @@ import (
 	"github.com/spf13/cobra"
 
 	"wdp/internal/drift"
+	"wdp/internal/i18n"
 	"wdp/internal/plan"
 )
 
-const planShowHelp = `
-查看已编译计划的内容
+// planShowHelp 返回 `wdp plan show` 的长帮助（调用时求值）。
+func planShowHelp() string {
+	return i18n.T(`Inspect the content of a compiled plan
+
+Prints the plan summary (chart/phase/PlanID/host count/file count) and the global values, then lists the
+effective values and task list of every (play, host) shard; tasks are grouped as pre/tasks/post/handler,
+with block/rescue/always indented and rollback capability annotated
+--host shows only one host's shards (a host has several under a multi-play phase)
+
+Examples:
+wdp plan show plan.json
+wdp plan show plan.json --host web1
+`, `查看已编译计划的内容
 
 打印计划概要（chart/相位/PlanID/主机数/文件数）与全局 values，再逐主机列出
 每个 (play, host) 分片的生效 values 与任务清单；任务按 pre/tasks/post/handler
@@ -27,16 +39,18 @@ const planShowHelp = `
 示例：
 wdp plan show plan.json
 wdp plan show plan.json --host web1
-`
+`)
+}
 
 // newPlanShowCmd 构造 `wdp plan show`。
 func newPlanShowCmd() *cobra.Command {
 	var host string
 	cmd := &cobra.Command{
-		Use:   "show <plan.json>",
-		Short: "inspect a compiled plan (per-host values and task lists)",
-		Long:  planShowHelp,
-		Args:  cobra.ExactArgs(1),
+		Use: "show <plan.json>",
+		Short: i18n.T("inspect a compiled plan (per-host values and task lists)",
+			"查看已编译计划的内容（逐主机 values 与任务清单）"),
+		Long: planShowHelp(),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := plan.Load(args[0])
 			if err != nil {
@@ -110,8 +124,21 @@ func printPlanTask(out io.Writer, t *plan.ResolvedTask, prefix, indent string) {
 	}
 }
 
-const planDiffHelp = `
-对比两份执行计划，回答"这次变更与上次相比会多做/少做什么"
+// planDiffHelp 返回 `wdp plan diff` 的长帮助（调用时求值）。
+func planDiffHelp() string {
+	return i18n.T(`Compare two execution plans and answer "what will this change do more or less than last time"
+
+Diff dimensions: chart name/version, phase, global values (field-level), host set additions/removals,
+per-host task list additions/removals (pre/tasks/post/handler all included)
+Tasks are aligned by label+module (+ group prefix); reordering is not a difference — review cares about
+"what will run", not display order; idx is display-only and never used for alignment: a single insertion
+shifts the idx of every later task, so aligning by idx would mark all unchanged tasks as differences
+(drowning real differences in cascading noise)
+Prints plans are equivalent when the two are fully equal
+
+Examples:
+wdp plan diff plan-old.json plan-new.json
+`, `对比两份执行计划，回答"这次变更与上次相比会多做/少做什么"
 
 差异维度：chart 名/版本、相位、全局 values（字段级）、主机集合增删、
 逐主机任务清单增删（pre/tasks/post/handler 全计入）
@@ -122,15 +149,17 @@ idx 只用于展示不参与对齐：清单中单点插入会平移后续任务�
 
 示例：
 wdp plan diff plan-old.json plan-new.json
-`
+`)
+}
 
 // newPlanDiffCmd 构造 `wdp plan diff`。
 func newPlanDiffCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "diff <plan-a.json> <plan-b.json>",
-		Short: "task-level and values-level diff of two plans",
-		Long:  planDiffHelp,
-		Args:  cobra.ExactArgs(2),
+		Use: "diff <plan-a.json> <plan-b.json>",
+		Short: i18n.T("task-level and values-level diff of two plans",
+			"对比两份计划的任务级与 values 级差异"),
+		Long: planDiffHelp(),
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := plan.Load(args[0])
 			if err != nil {

@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -23,39 +24,58 @@ type GroupModule struct{}
 func (m *GroupModule) Name() string { return "group" }
 
 func (m *GroupModule) Desc() string {
-	return "manage system groups (create/delete/GID correction)"
+	return i18n.T("Manage system groups (create/delete/GID drift correction)", "管理系统组（创建/删除/GID 漂移校正）")
 }
 
 func (m *GroupModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "group name"},
-		{Name: "state", Type: "string", Default: "present", Enum: groupStates, Desc: "present creates/fixes drift; absent removes"},
-		{Name: "gid", Type: "int", Desc: "GID (drift on existing groups is fixed via groupmod -g)"},
-		{Name: "system", Type: "bool", Default: "false", Desc: "create as a system group (groupadd -r, only at creation)"},
+		{Name: "name", Type: "string", Desc: i18n.T("group name", "组名")},
+		{Name: "state", Type: "string", Default: "present", Enum: groupStates, Desc: i18n.T("present creates or corrects drift; absent deletes", "present 创建/校正漂移；absent 删除")},
+		{Name: "gid", Type: "int", Desc: i18n.T("GID (drift on an existing group is corrected with groupmod -g)", "GID（已有组的漂移经 groupmod -g 校正）")},
+		{Name: "system", Type: "bool", Default: "false", Desc: i18n.T("create as a system group (groupadd -r, only applies on creation)", "创建为系统组（groupadd -r，仅创建时生效）")},
 	}
 }
 
 func (m *GroupModule) Example() string {
-	return `# create a deploy group
-- name: create the deploy group
+	return i18n.T(`# create the deployment group
+- name: Create the deploy group
   become: true
   group:
     name: deploy
     gid: 2000
 
-# fix GID drift (groupmod only runs when changed)
-- name: fix the app group GID
+# correct GID drift (groupmod runs only when something changed)
+- name: Correct the GID of the app group
   become: true
   group:
     name: app
     gid: 2010
 
-# remove a group (not rollback-able)
-- name: remove an obsolete group
+# delete a group (no automatic rollback)
+- name: Delete the obsolete group
   become: true
   group:
     name: legacy
-    state: absent`
+    state: absent`, `# 创建部署组
+- name: 创建 deploy 组
+  become: true
+  group:
+    name: deploy
+    gid: 2000
+
+# 校正 GID 漂移（有变化时才跑 groupmod）
+- name: 校正 app 组的 GID
+  become: true
+  group:
+    name: app
+    gid: 2010
+
+# 删除组（不可自动回滚）
+- name: 删除废弃组
+  become: true
+  group:
+    name: legacy
+    state: absent`)
 }
 
 // groupReq 是 group 解析后的参数。

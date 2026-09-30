@@ -58,3 +58,21 @@ func TestStateParamsCarryEnums(t *testing.T) {
 		}
 	}
 }
+
+// TestSystemdUnitParamsOrder systemd_unit 参数声明序 = 使用频率序：
+// 编辑器插入骨架取 Params 前 4 个，纯状态管理与部署启动两种最常见
+// 形态的字段（name/state/enabled/src）必须落在骨架里——回归：此前
+// 互斥的 content/src/dest_dir 占据前 4，常用字段反而不在骨架。
+func TestSystemdUnitParamsOrder(t *testing.T) {
+	params := Usage(&SystemdUnitModule{})
+	if len(params) < 4 {
+		t.Fatalf("参数表异常: %+v", params)
+	}
+	got := []string{params[0].Name, params[1].Name, params[2].Name, params[3].Name}
+	want := []string{"name", "state", "enabled", "src"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("前 4 参数 = %v, want %v（骨架可见性）", got, want)
+		}
+	}
+}

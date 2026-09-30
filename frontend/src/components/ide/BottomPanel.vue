@@ -10,6 +10,8 @@ const props = defineProps<{
   problems: ProblemItem[]
   module: ModuleMeta | null
   panel: 'none' | 'problems' | 'doc'
+  /** 跑过至少一次整体校验（区分「还没跑」与「跑过且干净」） */
+  validated?: boolean
 }>()
 const emit = defineEmits<{
   (e: 'update:panel', v: 'none' | 'problems' | 'doc'): void
@@ -107,7 +109,7 @@ watch(
           </div>
         </div>
       </template>
-      <div v-else class="empty">暂无校验发现（点击工具栏「校验」运行整体校验）</div>
+      <div v-else class="empty">{{ validated ? '校验通过，未发现问题' : '暂无校验发现（点击工具栏「校验」运行整体校验）' }}</div>
     </div>
 
     <div v-show="tab === 'doc'" class="panel-body doc">

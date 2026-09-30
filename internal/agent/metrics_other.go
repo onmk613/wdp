@@ -8,3 +8,5 @@ package agent
 func darwinMemTotal() (uint64, bool) { return 0, false }
 
 func darwinBootSecs() (uint64, bool) { return 0, false }
+
+func darwinLoadavg() (float64, float64, float64, bool) { return 0, 0, 0, false }

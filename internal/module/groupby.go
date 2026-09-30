@@ -3,6 +3,7 @@ package module
 import (
 	"fmt"
 	"strings"
+	"wdp/internal/i18n"
 )
 
 func init() {
@@ -24,7 +25,7 @@ type GroupByModule struct{}
 func (m *GroupByModule) Name() string { return "group_by" }
 
 func (m *GroupByModule) Desc() string {
-	return "build dynamic groups from vars/facts (used by later plays host selection)"
+	return i18n.T("Create groups dynamically from variables/facts (for wildcard host selection in later plays)", "按变量/facts 动态建组（供后续 play 的 hosts 通配选择）")
 }
 
 // Run 产出组名（name/free-form 均已由 executor 渲染，此处仅组合 prefix）。
@@ -45,17 +46,22 @@ func (m *GroupByModule) Run(_ *RunContext, args map[string]any, free string) *Re
 
 func (m *GroupByModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "group name expression (the rendered template becomes the group name; free-form works too)"},
-		{Name: "(free-form)", Type: "string", Desc: "group name expression (shorthand for name)"},
-		{Name: "prefix", Type: "string", Desc: "optional prefix (group name = prefix-name)"},
+		{Name: "name", Type: "string", Desc: i18n.T("group name expression (the template rendering result is the group name; a free-form shorthand also works)", "组名表达式（模板渲染结果即组名；也可用 free-form 简写）")},
+		{Name: "(free-form)", Type: "string", Desc: i18n.T("shorthand for the group name expression: `group_by: 'os_{{ .os.family }}'`", "组名表达式的简写：`group_by: 'os_{{ .os.family }}'`")},
+		{Name: "prefix", Type: "string", Desc: i18n.T("optional prefix (final group name = prefix-name)", "可选前缀（最终组名 = prefix-名称）")},
 	}
 }
 
 func (m *GroupByModule) Example() string {
-	return `- name: group hosts dynamically by OS family
+	return i18n.T(`- name: Create groups dynamically by OS family
   group_by: 'os_{{ .os.family }}'
 
-- name: reference via wildcard in the next play
+- name: Reference them with a wildcard in the next play
   hosts: "os_*"
-`
+`, `- name: 按系统族动态建组
+  group_by: 'os_{{ .os.family }}'
+
+- name: 下个 play 用通配引用
+  hosts: "os_*"
+`)
 }

@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -24,9 +26,12 @@ import (
 type RunRequest struct {
 	Items    []RunItem `json:"items"`
 	Selector struct {
-		Kind    string  `json:"kind"` // all | pool | group | label | hosts
+		Kind    string  `json:"kind"` // all | pool | group | label | hosts | inline
 		Value   string  `json:"value"`
 		HostIDs []int64 `json:"host_ids"`
+		// Inventory 是 kind=inline 时粘贴的 inventory YAML（未纳管主机；
+		// 可能含凭据，只进执行期内存，不落库）
+		Inventory string `json:"inventory"`
 	} `json:"selector"`
 }
 
@@ -49,12 +54,43 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "items is empty")
 		return
 	}
+	var (
+		hosts      []*store.Host
+		inlineHost []*model.Host
+	)
+	if req.Selector.Kind == "inline" {
+		var sel string
+		var ok bool
+		inlineHost, sel, ok = s.runAppsInlineTargets(w, r, req.Selector.Inventory)
+		if !ok {
+			return
+		}
+		// inline 目标在受理期已定型，run 记录直接以它建
+		items, ok := s.runAppsItems(w, r, &req)
+		if !ok {
+			return
+		}
+		user, _ := r.Context().Value(ctxUser{}).(string)
+		runIDs, ok := s.runAppsCreateRuns(w, items, sel, user)
+		if !ok {
+			return
+		}
+		go s.execRunItems(runIDs, items, nil, inlineHost, inlineGateIDs(inlineHost))
+		writeJSON(w, http.StatusAccepted, map[string]any{"run_ids": runIDs, "hosts": len(inlineHost)})
+		return
+	}
 	hosts, sel, ok := s.runAppsTargets(w, r, &req)
 	if !ok {
 		return
 	}
 	items, ok := s.runAppsItems(w, r, &req)
 	if !ok {
+		return
+	}
+	// 模块能力对账（受理期失败优于执行期半途炸）；无清单/无上报的
+	// 兼容口径见函数注释
+	if err := s.runAppsModuleCheck(hosts, items); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	user, _ := r.Context().Value(ctxUser{}).(string)
@@ -66,7 +102,7 @@ func (s *Server) handleRunApps(w http.ResponseWriter, r *http.Request) {
 	for _, h := range hosts {
 		hostIDs = append(hostIDs, h.ID)
 	}
-	go s.execRunItems(runIDs, items, hosts, hostIDs)
+	go s.execRunItems(runIDs, items, hosts, nil, hostIDs)
 	writeJSON(w, http.StatusAccepted, map[string]any{"run_ids": runIDs, "hosts": len(hosts)})
 }
 
@@ -202,7 +238,10 @@ func (s *Server) runAppsCreateRuns(w http.ResponseWriter, items []runItem, sel, 
 
 // execRunItems 执行阶段（后台 goroutine）：排队等主机闸门 → 逐应用执行
 // 并落 runs/run_tasks。
-func (s *Server) execRunItems(runIDs []int64, items []runItem, hosts []*store.Host, hostIDs []int64) {
+func (s *Server) execRunItems(runIDs []int64, items []runItem, hosts []*store.Host, inlineHost []*model.Host, hostIDs []int64) {
+	// 取消注册（排队期即可被 /api/runs/{id}/cancel 命中）；终态由下方
+	// 循环逐个注销
+	s.registerRunCancels(runIDs)
 	// per-host 执行闸门：拿到全部目标主机的锁才开始（同主机串行，
 	// 排队期间 run 状态为 queued）
 	// 约束：排队等待必须可中断——挂在 server 生命周期 ctx 上并叠加
@@ -220,6 +259,7 @@ func (s *Server) execRunItems(runIDs []int64, items []runItem, hosts []*store.Ho
 		for _, id := range runIDs {
 			_ = s.st.FinishRun(id, "failed", reason)
 			s.runs.notify(runEvent{ID: id, Status: "failed", Summary: reason})
+			s.unregisterRunCancel(id)
 		}
 		s.logger.Warn("app run aborted while queuing", "runs", len(runIDs), "reason", reason)
 		return
@@ -233,15 +273,37 @@ func (s *Server) execRunItems(runIDs []int64, items []runItem, hosts []*store.Ho
 	defer cancelExec()
 	// 探测一次全部目标主机（agent scheme 判定），items 循环内复用：
 	// 每个应用条目重探 N 台主机 ×2 趟 /health 是纯重复开销
-	mhosts := s.runHostModels(ctx, hosts)
+	// 自定义目标（inline）：解析出的主机模型直通（自带 conn 配置，
+	// 不经台账探活）；managed 目标按台账行建模
+	mhosts := inlineHost
+	if mhosts == nil {
+		mhosts = s.runHostModels(ctx, hosts)
+	}
 	for i, it := range items {
+		// 逐 run 派生 ctx：单 run 可被用户取消（/api/runs/{id}/cancel），
+		// 不拖累同批其它应用；取消请求在排队期已发出的直接跳过
+		itemCtx, itemCancel := context.WithCancel(ctx)
+		if !s.armRunCancel(runIDs[i], itemCancel) {
+			itemCancel()
+			_ = s.st.FinishRun(runIDs[i], "cancelled", "用户取消（排队阶段，未执行任何任务）")
+			s.runs.notify(runEvent{ID: runIDs[i], Status: "cancelled"})
+			s.unregisterRunCancel(runIDs[i])
+			continue
+		}
 		_ = s.st.SetRunStatus(runIDs[i], "running")
 		s.runs.notify(runEvent{ID: runIDs[i], Status: "running"})
-		err := s.runsvc.RunOneApp(ctx, it.tgz, mhosts, it.phase, &dbReporter{st: s.st, runID: runIDs[i], hub: s.runs})
+		err := s.runsvc.RunOneApp(itemCtx, it.tgz, mhosts, it.phase, &dbReporter{st: s.st, runID: runIDs[i], hub: s.runs, logger: s.logger})
+		itemCancel()
 		status, summary := "succeeded", "ok"
-		if err != nil {
+		switch {
+		case s.runCancelRequested(runIDs[i]):
+			// 执行器边界响应取消：在途任务已跑完，已执行任务的结果都在
+			// run_tasks——幂等模块下重新发起即断点续跑
+			status, summary = "cancelled", "用户取消（已执行任务的结果已保留，可重新发起续跑）"
+		case err != nil:
 			status, summary = "failed", err.Error()
 		}
+		s.unregisterRunCancel(runIDs[i])
 		_ = s.st.FinishRun(runIDs[i], status, summary)
 		s.runs.notify(runEvent{ID: runIDs[i], Status: status, Summary: summary})
 		s.logger.Info("app run finished", "app", it.app.Name, "version", it.version, "phase", it.phase, "status", status, "err", err)
@@ -256,11 +318,74 @@ type runItem struct {
 	phase   string
 }
 
+// runAppsModuleCheck 执行受理期的模块能力对账（分层方案 P2）：应用版本
+// 各相位要用的内置模块 ∩ 目标主机 agent 上报的模块集（/info 探活落库），
+// 缺了在受理期拒绝——agent 缺新模块的典型场景是控制端升级后老 agent
+// 还没跟上，报错应指向「升级该主机 agent」而不是执行半途的模块不存在。
+//
+// 兼容口径（放行，不阻塞存量）：
+//   - 版本无模块清单（迁移前旧行 / 提取失败）：” 或坏 JSON → 跳过
+//   - 主机无上报（老 agent 无 /info、尚未探活）：AgentModules 空 → 跳过
+//   - inline 目标不经此校验（自定义 inventory 无台账行，天然无上报）
+func (s *Server) runAppsModuleCheck(hosts []*store.Host, items []runItem) error {
+	needed := map[string]bool{}
+	for _, it := range items {
+		raw, err := s.st.VersionModules(it.app.ID, it.version)
+		if err != nil || raw == "" {
+			continue // 版本未知模块清单：放行（兼容旧行）
+		}
+		var perPhase map[string][]string
+		if err := json.Unmarshal([]byte(raw), &perPhase); err != nil {
+			continue // 坏清单：放行（提取侧已保证结构，防御性兜底）
+		}
+		for _, m := range perPhase[it.phase] {
+			needed[m] = true
+		}
+	}
+	if len(needed) == 0 {
+		return nil
+	}
+	var lines []string
+	for _, h := range hosts {
+		if h.AgentModules == "" {
+			continue // 主机未上报：放行（老 agent 兼容）
+		}
+		var have []string
+		if err := json.Unmarshal([]byte(h.AgentModules), &have); err != nil || have == nil {
+			continue
+		}
+		haveSet := make(map[string]bool, len(have))
+		for _, m := range have {
+			haveSet[m] = true
+		}
+		var missing []string
+		for m := range needed {
+			if !haveSet[m] {
+				missing = append(missing, m)
+			}
+		}
+		if len(missing) > 0 {
+			slices.Sort(missing)
+			build := h.AgentBuild
+			if build == "" {
+				build = "未知版本"
+			}
+			lines = append(lines, fmt.Sprintf("%s（agent %s）：缺 %s", h.Name, build, strings.Join(missing, "、")))
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+	return fmt.Errorf("目标主机的 agent 缺少本次执行需要的模块，请先升级对应主机的 agent（或调整应用）：\n  %s",
+		strings.Join(lines, "\n  "))
+}
+
 // dbReporter 把 executor 回调落 runs/run_tasks。
 type dbReporter struct {
-	st    *store.Store
-	runID int64
-	hub   *runHub // 任务明细落库后发事件（SSE 订阅方增量拉详情）
+	st     *store.Store
+	runID  int64
+	hub    *runHub // 任务明细落库后发事件（SSE 订阅方增量拉详情）
+	logger *slog.Logger
 
 	mu        sync.Mutex
 	curPlay   string
@@ -306,17 +431,22 @@ func (d *dbReporter) HostResult(host string, r *model.TaskResult) {
 		d.failed++
 	}
 	d.hub.notify(runEvent{ID: d.runID, Status: "running"})
-	_ = d.st.AddRunTask(&store.RunTask{
+	// run_tasks 是执行审计面：落库失败（磁盘满/库锁）不能中断执行，
+	// 但也不能无声——与 exec 路径（console/exec.go）同口径留告警供事后核对
+	if terr := d.st.AddRunTask(&store.RunTask{
 		RunID: d.runID, Play: d.curPlay, Task: d.curTask, Module: d.curModule,
 		Host: host, Status: status, Changed: r.Changed, Detail: truncate(detail, 16<<10),
-	})
+	}); terr != nil {
+		d.logger.Warn("run_tasks audit write failed",
+			"run_id", d.runID, "host", host, "err", terr)
+	}
 }
 
 func (d *dbReporter) TaskDone() {}
 
 func (d *dbReporter) PlayMsg(format string, a ...any) {}
 
-func (d *dbReporter) Recap(_ string, _ map[string]*model.Stats) {}
+func (d *dbReporter) Recap(_ string, _ map[string]*model.Stats, _ int64) {}
 
 func (d *dbReporter) Finish() {}
 

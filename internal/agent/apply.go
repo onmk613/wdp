@@ -104,6 +104,15 @@ func (s *Server) handlePlanSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("plan content hash mismatch: submitted %s, computed %s", shortID(req.Plan.PlanID), shortID(id)), http.StatusBadRequest)
 		return
 	}
+	// 结构版本门（分层方案 P3 的演进安全网）：类型化解码对未知字段静默
+	// 忽略、对语义变更字段错误解读——超前 schema 的 plan 必须在入口显式
+	// 拒绝并指向升级动作，而不是带着误解执行。与 plan.Load 的校验同口径
+	//（严格相等），提交路径不走 Load（直接解码请求体），须在此单独立门。
+	if req.Plan.SchemaVer != plan.SchemaVer {
+		http.Error(w, fmt.Sprintf("plan schema %d not supported by this agent (built for %d): upgrade the agent on this host, or recompile the plan with a matching wdp",
+			req.Plan.SchemaVer, plan.SchemaVer), http.StatusBadRequest)
+		return
+	}
 	// 自更新拒绝：plan 若升级 agent 自身（二进制路径/单元名），会杀掉正在
 	// 执行本 plan 的进程——收敛中断且难恢复；自更新走 agentctl 专用路径
 	if err := s.rejectSelfUpdate(req.Plan); err != nil {
@@ -504,7 +513,7 @@ func (j *journalReporter) HostResult(host string, r *model.TaskResult) {
 // 一个 play，控制端 /plan/status 拿到的统计残缺。executor 侧自身的跨
 // play 口径是 totalStats 累计（mergeStats），这里对齐：同一主机计数叠加、
 // 主机集取并集。stats 归 run 所有后 reporter 不再写它，无别名问题。
-func (j *journalReporter) Recap(name string, stats map[string]*model.Stats) {
+func (j *journalReporter) Recap(name string, stats map[string]*model.Stats, _ int64) {
 	j.run.mu.Lock()
 	defer j.run.mu.Unlock()
 	if j.run.stats == nil {
@@ -525,6 +534,7 @@ func (j *journalReporter) Recap(name string, stats map[string]*model.Stats) {
 		total.Unreachable += s.Unreachable
 		total.Skipped += s.Skipped
 		total.Ignored += s.Ignored
+		total.ElapsedMs += s.ElapsedMs
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 )
 
@@ -30,7 +31,7 @@ type AddHostModule struct{}
 func (m *AddHostModule) Name() string { return "add_host" }
 
 func (m *AddHostModule) Desc() string {
-	return "add or update an inventory host at runtime, optionally joining groups (visible to later plays)"
+	return i18n.T("Add or update inventory hosts at runtime (optionally joining groups); immediately visible to selectors in later plays", "运行期新增/更新 inventory 主机（可同时入组），后续 play 的选择器立即可见")
 }
 
 // Run 构造 HostAddition（name 必填；其余字段覆盖缺省 Host）。
@@ -77,29 +78,42 @@ func groupsSuffix(groups []string) string {
 
 func (m *AddHostModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "host name (required, used as inventory_hostname)"},
-		{Name: "address", Type: "string", Desc: "connection address (defaults to name)"},
-		{Name: "agent_port", Type: "int", Desc: "agent port (defaults to wdp.cfg [agent].port / 7602)"},
-		{Name: "conn", Type: "string", Desc: "connection type: agent | local"},
-		{Name: "agent_url", Type: "string", Desc: "agent service url when conn=agent"},
-		{Name: "groups", Type: "list", Desc: "groups to join (later plays can select them)"},
-		{Name: "vars", Type: "map", Desc: "host vars (visible via .hostvars and templates on that host)"},
+		{Name: "name", Type: "string", Desc: i18n.T("host name (required, i.e. inventory_hostname)", "主机名（必填，即 inventory_hostname）")},
+		{Name: "address", Type: "string", Desc: i18n.T("connection address (defaults to name)", "连接地址（缺省同 name）")},
+		{Name: "agent_port", Type: "int", Desc: i18n.T("agent port (defaults to wdp.cfg [agent].port / 7602)", "agent 端口（缺省取 wdp.cfg [agent].port / 7602）")},
+		{Name: "conn", Type: "string", Enum: []string{"agent", "local"}, Desc: i18n.T("connection channel type", "连接通道类型")},
+		{Name: "agent_url", Type: "string", Desc: i18n.T("agent service address (used when conn=agent)", "agent 服务地址（conn=agent 时用）")},
+		{Name: "groups", Type: "list", Desc: i18n.T("groups to join as well (later plays can select by group)", "同时加入的组（后续 play 可按组选择）")},
+		{Name: "vars", Type: "map", Desc: i18n.T("host variables (visible on that host via .hostvars and templates)", "主机变量（该主机上经 .hostvars 与模板可见）")},
 	}
 }
 
 func (m *AddHostModule) Example() string {
-	return `- name: register a scaled-out node from a runtime query
+	return i18n.T(`- name: Pick up the scale-out node from a runtime query
   shell: 'cat /etc/mycluster/pending-node'   # e.g. prints 10.8.2.105
   register: pending
 
-- name: add it to the cluster group
+- name: Register it into the cluster group
   add_host:
     name: 'node-{{ .pending.stdout | trim }}'
     address: '{{ .pending.stdout | trim }}'
     groups: [etcd]
     vars: {zone: az2}
 
-- name: configure it like the rest
-  …  # hosts: etcd in the next play now includes the new node
-`
+- name: Configure it the same way as existing nodes
+  …  # the next play's hosts: etcd already includes the new node
+`, `- name: 从运行期查询拿到扩容节点
+  shell: 'cat /etc/mycluster/pending-node'   # 例如输出 10.8.2.105
+  register: pending
+
+- name: 登记进集群组
+  add_host:
+    name: 'node-{{ .pending.stdout | trim }}'
+    address: '{{ .pending.stdout | trim }}'
+    groups: [etcd]
+    vars: {zone: az2}
+
+- name: 与既有节点同套路配置
+  …  # 下个 play 的 hosts: etcd 已包含新节点
+`)
 }

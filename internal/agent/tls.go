@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
+
 	"wdp/internal/ca"
 )
 
@@ -120,15 +122,23 @@ func loadCertPair(cert, key string) (tls.Certificate, *x509.Certificate, error) 
 	return pair, leaf, nil
 }
 
-// parsePins 解析指纹串列表为准许名单
+// parsePins 解析指纹串列表为准许名单。单个值里的逗号分隔也接受：
+// --pin-client-fp 既有 StringArray（重复传参）用法，历史上也下发过逗号
+// 拼接形态，两端都容忍可避免旧 unit / 手写命令直接失效。
 func parsePins(pins []string) (map[string]struct{}, error) {
 	m := make(map[string]struct{}, len(pins))
 	for _, p := range pins {
-		norm, err := ca.ParsePin(p)
-		if err != nil {
-			return nil, err
+		parts := []string{p}
+		if strings.Contains(p, ",") {
+			parts = strings.Split(p, ",")
 		}
-		m[norm] = struct{}{}
+		for _, part := range parts {
+			norm, err := ca.ParsePin(part)
+			if err != nil {
+				return nil, err
+			}
+			m[norm] = struct{}{}
+		}
 	}
 	return m, nil
 }

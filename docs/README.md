@@ -21,8 +21,9 @@ wdp 是 Go 编写的自动化部署工具：单二进制、零运行时依赖，
 | [15-自治执行改造方案](15-自治执行改造方案.md) | 分期改造路线与设计依据：P0 地基修复、P1 plan 一等产物（`wdp plan`/`apply`）、P2 agent 自治执行（断连容忍/中继/断点续跑）；P0–P2 已实施 |
 | [16-host-config 与结构自描述方案](16-host-config与结构自描述方案.md) | 设计记录：`--host-config` 内联主机连接配置（待实施）；`wdp schema` 结构字段自描述（host/task/chart 已实施，对账测试防漂移） |
 | [19-二轮全量审查与修复记录](19-二轮全量审查与修复记录.md) | 开发者向：四个包域并行审查产出的 52 项修复清单（含面向用户的行为变更索引）与验证口径 |
+| [20-CSR 纳管改造方案](20-CSR纳管改造方案.md) | 设计与实施记录：纳管私钥由目标机本地生成（CSR 流程），server 不持有也不传输逐主机私钥；`wdp agent gencsr`、`POST /enroll/<token>/csr`、SSH 推装与无钥续期均已实施 |
 
-> `examples/` 目录已不纳入版本控制（本机开发用，fresh checkout 不存在）：文档中引用的示例路径仅在本地保留 `examples/` 的机器上可运行；CI 与 golden 测试使用的示例 tgz 夹具已随 `internal/plan/testdata/` 跟踪。仓库根目录的 `kubeok/` 同为本机开发目录，不要当作可复现示例。
+> `examples/` 目录已不纳入版本控制（本机开发用，fresh checkout 不存在）：文档中引用的示例路径仅在本地保留 `examples/` 的机器上可运行；CI 与 golden 测试使用的示例 tgz 夹具已随 `internal/planbuild/testdata/` 跟踪。仓库根目录的 `kubeok/` 同为本机开发目录，不要当作可复现示例。
 > 模块参数文档也可直接用 `wdp module <模块名>` 查看（与实现同源，永不漂移）。
 
 ## 阅读路线

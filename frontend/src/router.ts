@@ -75,6 +75,9 @@ export const router = createRouter({
         { path: 'groups', name: 'groups', component: ScopePage, props: { kind: 'group' }, meta: { perm: 'registry:manage' } },
         { path: 'labels', name: 'labels', component: ScopePage, props: { kind: 'label' }, meta: { perm: 'registry:manage' } },
         { path: 'users', name: 'users', component: UsersPage, meta: { perm: 'user:manage' } },
+        // 系统设置：admin 专属（后端 requireAdmin 双保险；user:manage 是
+        // 内置角色里唯一 admin-only 的 verb，借既有守卫机制收敛入口）
+        { path: 'settings', name: 'settings', component: () => import('./views/SettingsPage.vue'), meta: { perm: 'user:manage' } },
       ],
     },
     // 兜底：拼错的地址回主机列表，不给空白页

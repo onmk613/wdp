@@ -1,4 +1,4 @@
-package plan
+package planbuild
 
 // §6.4 P1 验证：plan 的确定性（逐字节相同）、离线编译（不连接主机）、
 // 文件快照物化往返、连接元数据脱敏。
@@ -17,6 +17,7 @@ import (
 	"wdp/internal/chart"
 	"wdp/internal/inventory"
 	"wdp/internal/model"
+	"wdp/internal/plan"
 )
 
 // writeCompileChart 写出多模块 chart（含 hook / block / chart 引用 / 模板）。
@@ -74,7 +75,7 @@ dbs:
 `
 
 // compileOnce 编译一次（webservers 相位 play）。
-func compileOnce(t *testing.T, sets []string) *Plan {
+func compileOnce(t *testing.T, sets []string) *plan.Plan {
 	t.Helper()
 	inv, err := inventory.Parse([]byte(compileInv))
 	if err != nil {
@@ -214,7 +215,7 @@ func TestPlanWriteLoadRoundTrip(t *testing.T) {
 	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
 		t.Fatalf("plan 权限应 0600: %v %v", fi, err)
 	}
-	q, err := Load(path)
+	q, err := plan.Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +231,7 @@ func TestPlanWriteLoadRoundTrip(t *testing.T) {
 	if err := os.WriteFile(path, []byte(tampered), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "mismatch") {
+	if _, err := plan.Load(path); err == nil || !strings.Contains(err.Error(), "mismatch") {
 		t.Fatalf("篡改的 plan 应被拒绝: %v", err)
 	}
 }
@@ -333,7 +334,7 @@ func TestCompilePayloads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	byPath := map[string]PayloadRef{}
+	byPath := map[string]plan.PayloadRef{}
 	for _, ref := range p.Payloads {
 		byPath[ref.Path] = ref
 	}
@@ -441,7 +442,7 @@ func TestCompileMarkerValuesDeterministic(t *testing.T) {
 		"w2": {"tag": "w2"},
 		"w1": {"tag": "w1"},
 	}
-	compile := func() *Plan {
+	compile := func() *plan.Plan {
 		p, err := Compile(dir, inv, nil, nil, CompileOptions{Phase: "uninstall", HostValues: hostValues})
 		if err != nil {
 			t.Fatal(err)
@@ -463,7 +464,7 @@ func TestCompileMarkerValuesDeterministic(t *testing.T) {
 // TestFillIDUnserializableErrors 序列化失败必须报错：回退常量 ID 会让所有
 // 坏 plan 共享同一 PlanID 且通过 Load 校验，完整性检查被绕过。
 func TestFillIDUnserializableErrors(t *testing.T) {
-	p := &Plan{Values: map[string]any{"x": math.Inf(1)}} // JSON 不支持 Inf
+	p := &plan.Plan{Values: map[string]any{"x": math.Inf(1)}} // JSON 不支持 Inf
 	if err := p.FillID(); err == nil {
 		t.Fatal("FillID 序列化失败应报错")
 	}

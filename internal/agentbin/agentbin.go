@@ -1,7 +1,8 @@
 // Package agentbin 提供"目标平台 → 本地 agent 二进制"解析：build.sh 全集
-// 交叉编译产出多架构 bin 目录（wdp-<os>-<arch>[.exe]），各平台二进制互为
-// 同级文件，控制端按目标机 uname 归一出的平台键在自身所在目录查找同级
-// 二进制。push 自举与 agentctl install 共用这套逻辑，跨平台分发不再依赖
+// 交叉编译产出多架构 bin 目录（全量档 wdp-<os>-<arch>[.exe] 与瘦 agent 档
+// wdp-agent-<os>-<arch>[.exe]），各平台二进制互为同级文件，控制端按目标机
+// uname 归一出的平台键在自身所在目录查找同级二进制（瘦档优先，缺失回退
+// 全量档）。push 自举与 agentctl install 共用这套逻辑，跨平台分发不再依赖
 // [agent].push_binary 配置表，也不再把载荷内嵌进控制端二进制自身。
 package agentbin
 
@@ -47,10 +48,22 @@ func FromUname(s string) string {
 	return goos + "_" + arch
 }
 
-// FileName 返回平台键对应的 bin 目录产物文件名：linux_amd64 →
+// FileName 返回平台键对应的全量档产物文件名：linux_amd64 →
 // wdp-linux-amd64（下划线转连字符，windows 平台带 .exe 后缀）。
 func FileName(platform string) string {
-	name := "wdp-" + strings.ReplaceAll(platform, "_", "-")
+	return binName("wdp", platform)
+}
+
+// AgentFileName 返回瘦 agent 档产物文件名：linux_amd64 →
+// wdp-agent-linux-amd64。纳管/推装优先下发该产物（目标机攻击面更小），
+// 缺失时回退全量档产物（存量部署只有旧产物时保持可用）。
+func AgentFileName(platform string) string {
+	return binName("wdp-agent", platform)
+}
+
+// binName 拼平台产物文件名（<前缀>-<os>-<arch>，windows 带 .exe）。
+func binName(prefix, platform string) string {
+	name := prefix + "-" + strings.ReplaceAll(platform, "_", "-")
 	if strings.HasPrefix(platform, "windows_") {
 		name += ".exe"
 	}
@@ -67,9 +80,11 @@ func SiblingPath(platform string) (string, bool) {
 	return SiblingPathFor(exe, platform)
 }
 
-// SiblingPathFor 在 exePath 所在目录查找 platform 平台键对应的同级二进制。
-// exePath 先经符号链接解析取真实路径再取目录（运行入口常是链入 bin/ 的
-// 符号链接，如 /usr/local/bin/wdp → /opt/wdp/bin/wdp-darwin-arm64）。
+// SiblingPathFor 在 exePath 所在目录查找 platform 平台键对应的同级二进制：
+// 优先瘦 agent 档产物（wdp-agent-<os>-<arch>），缺失时回退全量档产物
+// （wdp-<os>-<arch>，兼容只部署了旧产物的存量环境）。exePath 先经符号
+// 链接解析取真实路径再取目录（运行入口常是链入 bin/ 的符号链接，如
+// /usr/local/bin/wdp → /opt/wdp/bin/wdp-darwin-arm64）。
 // 文件不存在或不是普通文件返回 ok=false。
 func SiblingPathFor(exePath, platform string) (string, bool) {
 	if !platformKeyRe.MatchString(platform) {
@@ -79,10 +94,12 @@ func SiblingPathFor(exePath, platform string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	path := filepath.Join(filepath.Dir(real), FileName(platform))
-	info, err := os.Stat(path)
-	if err != nil || info.IsDir() {
-		return "", false
+	dir := filepath.Dir(real)
+	for _, name := range []string{AgentFileName(platform), FileName(platform)} {
+		path := filepath.Join(dir, name)
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return path, true
+		}
 	}
-	return path, true
+	return "", false
 }

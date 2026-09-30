@@ -34,6 +34,7 @@ func (c *Conn) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult,
 		"timeout_ms":      req.TimeoutMs,
 		"become_user":     becomeUser,
 		"become_password": becomePW,
+		"label":           req.Label,
 	})
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/exec", bytes.NewReader(body))
 	if err != nil {

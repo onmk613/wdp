@@ -30,6 +30,16 @@ func (s *Server) auditEntry(user, ip, action, object, name, detail string) {
 
 // handleListAuditLogs 操作日志查询（?q= 模糊过滤，?limit=）。
 func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Has("page") || r.URL.Query().Has("page_size") {
+		pp := parsePage(r)
+		items, total, err := s.st.ListAuditLogsPage(r.URL.Query().Get("q"), pp.Page, pp.PageSize)
+		if err != nil {
+			s.writeInternal(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, pagedResp[*store.AuditLog]{Items: items, Total: total, Page: pp.Page, PageSize: pp.PageSize})
+		return
+	}
 	limit := 100
 	if v := r.URL.Query().Get("limit"); v != "" {
 		_, _ = fmt.Sscanf(v, "%d", &limit)

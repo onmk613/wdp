@@ -1,8 +1,12 @@
-package plan
+package planbuild
 
 // plan 编译器：控制端离线把 chart + inventory + values 编译为完全解析的
 // 执行计划。不连接任何主机（跨主机信息在此固化为字面值；非部署相位的
 // marker values 由调用方先行解析传入）。
+//
+// 编译器与 plan 数据模型分属两包（分层方案 P3）：plan 是冻结契约包
+//（依赖面收敛到 model，见 plan/deps_test.go），本包承载 chart 耦合的
+// 编译逻辑——chart/playbook 的演进只影响本包，不触碰契约面。
 
 import (
 	"crypto/sha256"
@@ -23,6 +27,7 @@ import (
 	"wdp/internal/inventory"
 	"wdp/internal/model"
 	"wdp/internal/module"
+	"wdp/internal/plan"
 )
 
 // CompileOptions 是编译参数。
@@ -44,7 +49,7 @@ type CompileOptions struct {
 // chart 目录或 .tgz；inv 提供主机选择与内置变量快照；valuesFiles/setArgs
 // 是 -f/--set 覆盖（仅部署相位使用）。已持有 chart 的调用方（marker 相位
 // 需先加载 chart 读相位与主机）走 CompileChart 免去二次加载。
-func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []string, opts CompileOptions) (*Plan, error) {
+func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []string, opts CompileOptions) (*plan.Plan, error) {
 	ch, err := chart.LoadWithLimits(target, opts.Limits)
 	if err != nil {
 		return nil, err
@@ -56,7 +61,7 @@ func Compile(target string, inv *inventory.Inventory, valuesFiles, setArgs []str
 // CompileChart 在已加载的 chart 上编译执行计划（参数语义同 Compile）。
 // chart 的生命周期归调用方：编译期间须保持打开（tgz 形态挂着解包临时
 // 目录），结束后自行 Close。
-func CompileChart(ch *chart.Chart, inv *inventory.Inventory, valuesFiles, setArgs []string, opts CompileOptions) (*Plan, error) {
+func CompileChart(ch *chart.Chart, inv *inventory.Inventory, valuesFiles, setArgs []string, opts CompileOptions) (*plan.Plan, error) {
 	phase := opts.Phase
 	if phase == "" {
 		phase = "deploy"
@@ -80,14 +85,14 @@ func CompileChart(ch *chart.Chart, inv *inventory.Inventory, valuesFiles, setArg
 
 	facts := loadFacts(opts.FactCache)
 
-	p := &Plan{
-		SchemaVer:  SchemaVer,
+	p := &plan.Plan{
+		SchemaVer:  plan.SchemaVer,
 		Chart:      ch.Meta.Name,
 		Version:    ch.Meta.Version,
 		Phase:      phase,
 		WdpVersion: opts.WdpVersion,
 		Values:     values,
-		Meta:       ch.Meta,
+		Meta:       metaOf(ch.Meta),
 		Helpers:    ch.CollectHelpers(),
 		Files:      files,
 		Payloads:   payloads,
@@ -108,7 +113,7 @@ func CompileChart(ch *chart.Chart, inv *inventory.Inventory, valuesFiles, setArg
 // values + 覆盖并过 required/schema 校验；marker 相位要求调用方传入逐
 // 主机还原值，代表值取主机名字典序首个。
 func compileValues(ch *chart.Chart, phase string, spec chart.PhaseSpec, valuesFiles, setArgs []string, hostValues map[string]map[string]any) (map[string]any, error) {
-	values := map[string]any{}
+	var values map[string]any
 	switch spec.EffectiveValuesFrom() {
 	case chart.ValuesFromChart:
 		var err error
@@ -144,8 +149,8 @@ func compileValues(ch *chart.Chart, phase string, spec chart.PhaseSpec, valuesFi
 // compileHostPlans 按 play × host 编译主机计划：连接元数据（含 via 链）、
 // 主机 values 与变量域快照在此冻结，任务树解析为计划镜像。
 // idx 按主机顺序统一编号（journal 的 (主机, 任务) 键要求主机内唯一且稳定）
-func compileHostPlans(inv *inventory.Inventory, ch *chart.Chart, plays []*model.Play, phase string, values map[string]any, opts CompileOptions, facts map[string]map[string]any) []*HostPlan {
-	var hostPlans []*HostPlan
+func compileHostPlans(inv *inventory.Inventory, ch *chart.Chart, plays []*model.Play, phase string, values map[string]any, opts CompileOptions, facts map[string]map[string]any) []*plan.HostPlan {
+	var hostPlans []*plan.HostPlan
 	counters := map[string]int{}
 	for playIdx, play := range plays {
 		hosts := inv.SelectPlays([]*model.Play{play}, opts.Limit)
@@ -155,7 +160,7 @@ func compileHostPlans(inv *inventory.Inventory, ch *chart.Chart, plays []*model.
 			hc.Via = inv.ViaChain(h.Name)
 			// hostValues 含全量 deepCopy，只算一次并复用（此前算了两遍）
 			hv := hostValues(ch, values, h, opts.HostValues)
-			hp := &HostPlan{
+			hp := &plan.HostPlan{
 				PlayIdx: playIdx,
 				Host:    h.Name,
 				Conn:    hc,
@@ -169,7 +174,7 @@ func compileHostPlans(inv *inventory.Inventory, ch *chart.Chart, plays []*model.
 			}
 			for _, group := range []struct {
 				src []*model.Task
-				dst *[]*ResolvedTask
+				dst *[]*plan.ResolvedTask
 			}{
 				{pre, &hp.Pre}, {main, &hp.Tasks}, {post, &hp.Post}, {play.Handlers, &hp.Handlers},
 			} {
@@ -185,8 +190,8 @@ func compileHostPlans(inv *inventory.Inventory, ch *chart.Chart, plays []*model.
 }
 
 // compileRelays 收集 via 中继根的连接元数据（不在 Hosts 里的非目标中继机）。
-func compileRelays(inv *inventory.Inventory, hostPlans []*HostPlan) map[string]HostConn {
-	relays := map[string]HostConn{}
+func compileRelays(inv *inventory.Inventory, hostPlans []*plan.HostPlan) map[string]plan.HostConn {
+	relays := map[string]plan.HostConn{}
 	targets := map[string]bool{}
 	for _, hp := range hostPlans {
 		targets[hp.Host] = true
@@ -203,10 +208,10 @@ func compileRelays(inv *inventory.Inventory, hostPlans []*HostPlan) map[string]H
 }
 
 // countResolved 统计任务树节点数（block 子任务递归计入 idx 空间）。
-func countResolved(tasks []*ResolvedTask) int {
+func countResolved(tasks []*plan.ResolvedTask) int {
 	n := 0
-	var walk func(ts []*ResolvedTask)
-	walk = func(ts []*ResolvedTask) {
+	var walk func(ts []*plan.ResolvedTask)
+	walk = func(ts []*plan.ResolvedTask) {
 		for _, t := range ts {
 			n++
 			walk(t.Block)
@@ -219,12 +224,12 @@ func countResolved(tasks []*ResolvedTask) int {
 }
 
 // playMetaOf 快照 play 级编排属性。
-func playMetaOf(p *model.Play, hosts []*model.Host) PlayMeta {
+func playMetaOf(p *model.Play, hosts []*model.Host) plan.PlayMeta {
 	names := make([]string, len(hosts))
 	for i, h := range hosts {
 		names[i] = h.Name
 	}
-	return PlayMeta{
+	return plan.PlayMeta{
 		Name:        p.Name,
 		Hosts:       p.Hosts,
 		Become:      p.Become,
@@ -295,8 +300,8 @@ func hostvarsSnapshot(inv *inventory.Inventory, facts map[string]map[string]any)
 }
 
 // hostConnOf 提取可安全落盘的连接元数据（明文密钥剔除，env 引用保留）。
-func hostConnOf(h *model.Host) HostConn {
-	c := HostConn{
+func hostConnOf(h *model.Host) plan.HostConn {
+	c := plan.HostConn{
 		Address:            h.Address,
 		Port:               h.Port,
 		User:               h.User,
@@ -327,47 +332,17 @@ func hostConnOf(h *model.Host) HostConn {
 	return c
 }
 
-// HostOf 把计划连接元数据还原为执行用主机（密钥经 env 引用恢复）。
-func (c HostConn) Host(name string) *model.Host {
-	h := &model.Host{
-		Name:               name,
-		Address:            c.Address,
-		Port:               c.Port,
-		User:               c.User,
-		Conn:               c.Conn,
-		AgentURL:           c.AgentURL,
-		AgentPort:          c.AgentPort,
-		TLS:                c.TLS,
-		InsecureSkipVerify: c.InsecureSkipVerify,
-		TLSSkipHostVerify:  c.TLSSkipHostVerify,
-		TLSServerName:      c.TLSServerName,
-		CAFile:             c.CAFile,
-		CertFile:           c.CertFile,
-		KeyFile:            c.KeyFile,
-		PasswordEnv:        c.PasswordEnv,
-		Password:           c.PasswordEnvRef,
-		KeyPassphraseEnv:   c.KeyPassphraseEnv,
-		BecomePasswordEnv:  c.BecomePasswordEnv,
-		BecomePassword:     c.BecomePasswordRef,
-		Vars:               map[string]any{},
-	}
-	if h.Address == "" {
-		h.Address = name
-	}
-	return h
-}
-
 // resolveTasks 把 model.Task 树转成计划镜像（idx 从 start 起顺序编号，
 // block 子任务递归编号）。
-func resolveTasks(tasks []*model.Task, start int) []*ResolvedTask {
+func resolveTasks(tasks []*model.Task, start int) []*plan.ResolvedTask {
 	if len(tasks) == 0 {
 		return nil
 	}
 	idx := start
-	var out []*ResolvedTask
-	var conv func(t *model.Task) *ResolvedTask
-	conv = func(t *model.Task) *ResolvedTask {
-		rt := &ResolvedTask{
+	var out []*plan.ResolvedTask
+	var conv func(t *model.Task) *plan.ResolvedTask
+	conv = func(t *model.Task) *plan.ResolvedTask {
+		rt := &plan.ResolvedTask{
 			Idx:             idx,
 			Label:           t.Label(),
 			Module:          t.Module,
@@ -454,9 +429,9 @@ type snapshotFileEnt struct {
 
 // snapshotFiles 以确定序快照 chart 目录树：packages/ 与超限大文件记录为
 // PayloadRef（路径+尺寸+sha256，不进 plan 本体），其余小文件嵌入 base64。
-func snapshotFiles(dir string) (map[string]string, []PayloadRef, error) {
+func snapshotFiles(dir string) (map[string]string, []plan.PayloadRef, error) {
 	files := map[string]string{}
-	var payloads []PayloadRef
+	var payloads []plan.PayloadRef
 	var ents []snapshotFileEnt
 	var total int64
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -488,7 +463,7 @@ func snapshotFiles(dir string) (map[string]string, []PayloadRef, error) {
 			if err != nil {
 				return nil, nil, err
 			}
-			payloads = append(payloads, PayloadRef{Path: ent.rel, Size: ent.info.Size(), SHA256: sum})
+			payloads = append(payloads, plan.PayloadRef{Path: ent.rel, Size: ent.info.Size(), SHA256: sum})
 			continue
 		}
 		total += ent.info.Size()
@@ -565,4 +540,46 @@ func deepCopyAny(v any) any {
 	default:
 		return v
 	}
+}
+
+// 文件嵌入上限：chart 是配置载体（模板/清单/小文件），大负载走 artifact
+// 模块按 URL 分发——超限即编译报错，避免 plan 变成制品分发通道。
+const (
+	MaxFileBytes  int64 = 32 << 20  // 单文件 32MiB
+	MaxTotalBytes int64 = 256 << 20 // 全部文件合计 256MiB
+)
+
+// 阈值以变量形式参与判定：测试用小型临时文件即可覆盖"超限转 payload /
+// 总量超限报错"两条分支，无需真的写出 32MiB 制品。生产路径恒等于上面的常量。
+var (
+	maxFileBytes  = MaxFileBytes
+	maxTotalBytes = MaxTotalBytes
+)
+
+// metaOf 把 chart.Meta 转换为计划快照镜像（字段级拷贝；plan.Meta 与
+// chart.Meta 的 JSON 编码字节一致，PlanID 内容寻址不受影响）。
+func metaOf(m chart.Meta) plan.Meta {
+	pm := plan.Meta{
+		Name:              m.Name,
+		Version:           m.Version,
+		Description:       m.Description,
+		Required:          m.Required,
+		MarkerDir:         m.MarkerDir,
+		NoMarker:          m.NoMarker,
+		CheckMode:         bool(m.CheckMode),
+		InventoryOverride: m.InventoryOverride,
+		SensitiveValues:   m.SensitiveValues,
+	}
+	if len(m.Phases) > 0 {
+		pm.Phases = make(map[string]plan.PhaseSpec, len(m.Phases))
+		for k, spec := range m.Phases {
+			pm.Phases[k] = plan.PhaseSpec{
+				Release:      spec.Release,
+				Record:       spec.Record,
+				ClearsMarker: spec.ClearsMarker,
+				ValuesFrom:   plan.ValuesFrom(spec.ValuesFrom),
+			}
+		}
+	}
+	return pm
 }

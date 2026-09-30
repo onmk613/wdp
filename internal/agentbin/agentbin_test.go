@@ -3,6 +3,7 @@ package agentbin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -38,6 +39,49 @@ func TestFileName(t *testing.T) {
 		if got := FileName(in); got != want {
 			t.Fatalf("FileName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestAgentFileName 瘦 agent 档产物文件名。
+func TestAgentFileName(t *testing.T) {
+	cases := map[string]string{
+		"linux_amd64":   "wdp-agent-linux-amd64",
+		"darwin_arm64":  "wdp-agent-darwin-arm64",
+		"windows_amd64": "wdp-agent-windows-amd64.exe",
+	}
+	for in, want := range cases {
+		if got := AgentFileName(in); got != want {
+			t.Fatalf("AgentFileName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestSiblingPathPreferAgentTier 同级查找的档位优先级：瘦 agent 档产物
+// 存在时优先下发；只有全量档产物时回退（存量部署兼容）。
+func TestSiblingPathPreferAgentTier(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "wdp-darwin-arm64")
+	touch := func(name string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	touch("wdp-darwin-arm64")
+	touch("wdp-linux-amd64")
+
+	// 只有全量档：回退旧名
+	if p, ok := SiblingPathFor(exe, "linux_amd64"); !ok || !strings.HasSuffix(p, "wdp-linux-amd64") {
+		t.Fatalf("无瘦档产物应回退全量档: %q %v", p, ok)
+	}
+	// 两档并存：优先瘦 agent 档
+	touch("wdp-agent-linux-amd64")
+	if p, ok := SiblingPathFor(exe, "linux_amd64"); !ok || !strings.HasSuffix(p, "wdp-agent-linux-amd64") {
+		t.Fatalf("瘦档产物存在时应优先: %q %v", p, ok)
+	}
+	// 只有瘦档（未来 build.sh 只发 agent 档的场景）
+	touch("wdp-agent-linux-arm64")
+	if p, ok := SiblingPathFor(exe, "linux_arm64"); !ok || !strings.HasSuffix(p, "wdp-agent-linux-arm64") {
+		t.Fatalf("仅瘦档产物应命中: %q %v", p, ok)
 	}
 }
 

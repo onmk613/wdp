@@ -178,6 +178,57 @@ func locateTopDir(tmp string) (string, error) {
 	return root, nil
 }
 
+// ExtractTo 把 chart tgz 解包为目录形态（dst 直接就是 chart 根，含
+// chart.yaml；顶层 <name>/ 前缀被剥掉）。供 chart 仓库拉取落盘用：
+// 目录形态与「playbook 同级 charts/<name>/」的引用解析根对齐，拉下来
+// 即可被 run/lint/render 消费。解包防御（穿越/炸弹/条目数）与加载路径
+// 同一套实现。dst 必须不存在或为空目录。
+func ExtractTo(tgzPath, dst string) error {
+	f, err := os.Open(tgzPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("failed to decompress: %w", err)
+	}
+	defer gz.Close()
+
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	if entries, err := os.ReadDir(dst); err != nil || len(entries) > 0 {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("extract target %s is not empty", dst)
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dst), ".extract-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	if err := extractTgz(gz, tmp, Limits{}); err != nil {
+		return err
+	}
+	root, err := locateTopDir(tmp)
+	if err != nil {
+		return err
+	}
+	// 把定位到的根整体改名进 dst（同文件系统 rename，原子且省一次拷贝）
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		if err := os.Rename(filepath.Join(root, e.Name()), filepath.Join(dst, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // tarTypeName 把 tar 类型旗标映射为可读名称（unsupported 条目报错用）。
 func tarTypeName(f byte) string {
 	switch f {

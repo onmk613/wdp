@@ -3,6 +3,7 @@ package module
 import (
 	"fmt"
 	"io/fs"
+	"wdp/internal/i18n"
 )
 
 func init() {
@@ -18,7 +19,7 @@ func (m *TemplateModule) Name() string { return "template" }
 func (m *TemplateModule) RollbackCapability() RollbackCapability { return RollbackFull }
 
 func (m *TemplateModule) Desc() string {
-	return "render Go templates and distribute to remote hosts"
+	return i18n.T("Render a Go template and distribute it to the remote host", "渲染 Go 模板并分发到远端")
 }
 
 // Run 渲染本地模板并经 putFile 幂等分发（幂等/备份/回滚/check/diff 语义同 copy）。
@@ -65,20 +66,25 @@ func (m *TemplateModule) Run(rc *RunContext, args map[string]any, _ string) *Res
 
 func (m *TemplateModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "src", Type: "string", Desc: "local Go template path (chart-relative, helpers available)"},
-		{Name: "dest", Type: "string", Desc: "remote destination path"},
-		{Name: "mode", Type: "mode", Default: "0644", Desc: "mode"},
-		{Name: "owner", Type: "string", Desc: "owner (requires become)"},
-		{Name: "group", Type: "string", Desc: "group (requires become)"},
-		{Name: "backup", Type: "bool", Default: "false", Desc: "back up before overwriting"},
+		{Name: "src", Type: "string", Desc: i18n.T("local template path (relative to the chart; _helpers.tpl definitions are available)", "本地模板路径（chart 内相对路径，可用 _helpers.tpl 定义）")},
+		{Name: "dest", Type: "string", Desc: i18n.T("remote destination path", "远端目标路径")},
+		{Name: "mode", Type: "mode", Default: "0644", Desc: i18n.T("permission bits", "权限位")},
+		{Name: "owner", Type: "string", Desc: i18n.T("owner (requires become)", "属主（需 become）")},
+		{Name: "group", Type: "string", Desc: i18n.T("group (requires become)", "属组（需 become）")},
+		{Name: "backup", Type: "bool", Default: "false", Desc: i18n.T("back up before overwriting", "覆盖前先备份")},
 	}
 }
 
 func (m *TemplateModule) Example() string {
-	return `- name: render and push the config
+	return i18n.T(`- name: render and push the config
   template:
     src: templates/app.conf.tpl
     dest: "{{ .global.workdir }}/app.conf"
   notify: reload app
-`
+`, `- name: 渲染并下发配置
+  template:
+    src: templates/app.conf.tpl
+    dest: "{{ .global.workdir }}/app.conf"
+  notify: reload app
+`)
 }

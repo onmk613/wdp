@@ -21,7 +21,7 @@ func (t *sessionTable) issue(user string) (string, error) {
 	token := hex.EncodeToString(buf)
 	now := time.Now()
 	t.mu.Lock()
-	t.sessns[token] = session{user: user, exp: now.Add(sessionTTL), issued: now}
+	t.sessns[token] = session{user: user, exp: now.Add(t.idleTTL()), issued: now}
 	t.mu.Unlock()
 	return token, nil
 }
@@ -43,7 +43,7 @@ func (t *sessionTable) lookup(token string) (string, bool) {
 		delete(t.sessns, token)
 		return "", false
 	}
-	s.exp = now.Add(sessionTTL) // 滑动续期（绝对上限仍以 issued 为锚）
+	s.exp = now.Add(t.idleTTL()) // 滑动续期（绝对上限仍以 issued 为锚）
 	t.sessns[token] = s
 	return s.user, true
 }

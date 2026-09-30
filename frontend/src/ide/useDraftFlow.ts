@@ -232,6 +232,10 @@ export function useDraftFlow(opts: DraftFlowOptions) {
     // 重进时横幅恢复的适用场景
     if (to.path === '/user/login') return true
     if (!opts.isReady() || !opts.fs.isDirty()) return true
+    // 当前内容与上次暂存一致（stashed 标记：改动后置 false，暂存成功置
+    // true）：离开无损失，重进时按横幅/静默续上恢复，无需再问。只有
+    // 相对「上次」（底本或最近一次暂存）有未落盘变化的才弹确认。
+    if (stashed.value) return true
     const choice = await askLeaveChoice()
     if (choice === 'stay') return false
     if (choice === 'stash') {

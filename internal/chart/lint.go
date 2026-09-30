@@ -92,9 +92,15 @@ func lintTaskTree(c *Chart, eng *render.Engine) []LintIssue {
 				return
 			}
 			// 模块解析唯一规则（module.Resolve）：内置优先，chart 本地脚本模块视为合法
-			if _, _, ok := module.Resolve(t.Module, []string{ch.Dir, c.Dir}); !ok {
+			if mod, _, ok := module.Resolve(t.Module, []string{ch.Dir, c.Dir}); !ok {
 				issues = append(issues, LintIssue{ERROR, path,
 					fmt.Sprintf("task %q uses unknown module %q", label, t.Module), t.Line})
+			} else if mod != nil {
+				// 空参数调用（如 `set_fact:` 下没写键值对）运行期必失败，提前拦截
+				if err := module.LintBareCall(mod, t.Args, t.FreeForm); err != nil {
+					issues = append(issues, LintIssue{ERROR, path,
+						fmt.Sprintf("task %q: %v", label, err), t.Line})
+				}
 			}
 			// 模板字段 parse-only 校验（裸变量引用 {{ var }} 这类运行时才炸的错误提前拦截）
 			for _, msg := range eng.ValidateTaskTemplates(t) {

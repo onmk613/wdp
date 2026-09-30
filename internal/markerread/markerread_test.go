@@ -128,7 +128,7 @@ func TestReadHonorsRequestMeta(t *testing.T) {
 			}
 			cur := atomic.AddInt32(&inflight, 1)
 			for {
-				old := maxInflight
+				old := atomic.LoadInt32(&maxInflight)
 				if cur <= old || atomic.CompareAndSwapInt32(&maxInflight, old, cur) {
 					break
 				}

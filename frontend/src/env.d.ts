@@ -8,3 +8,6 @@ declare module '*.vue' {
 
 declare module 'element-plus/dist/locale/zh-cn.mjs'
 
+// 构建标识（vite define 注入，见 vite.config.ts）
+declare const __APP_BUILD_ID__: string
+

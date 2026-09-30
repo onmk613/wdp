@@ -10,6 +10,7 @@ export interface Host {
   Groups: string[] | null
   Labels: string
   Status: string
+  AgentBuild?: string // 最近在线上报的 agent 版本（升级门控：与 server build 一致=已最新）
   LastSeenAt: string
   CreatedAt: string
   UpdatedAt: string
@@ -66,6 +67,7 @@ export interface ProbeResult {
   error?: string
   hostname?: string
   version?: string
+  build?: string
   goos?: string
   arch?: string
   cert_not_after?: string
@@ -92,8 +94,14 @@ export interface HostFactsResponse {
 // handleResponse 响应统一处理：401 全局事件 + JSON 容错解析 + error 字段
 // 提取。api() 与 upload() 共用一份——此前两处逐行复制，401 事件与错误
 // 口径需双处同步维护。
-async function handleResponse<T>(resp: Response): Promise<T> {
-  if (resp.status === 401) {
+//
+// loginUrl 的 401 是「凭据错误」而非「会话失效」：登录端点必须豁免全局
+// 401 处理，否则输错密码会提示「登录已失效」并触发全局跳登录（人就在
+// 登录页），真实原因（服务器返回 invalid credentials）反而被吞。
+const loginUrl = '/api/login'
+
+async function handleResponse<T>(resp: Response, url?: string): Promise<T> {
+  if (resp.status === 401 && url !== loginUrl) {
     window.dispatchEvent(new Event('wdp-unauthorized'))
     throw new Error('登录已失效')
   }
@@ -115,7 +123,7 @@ export async function api<T>(method: string, url: string, body?: unknown): Promi
     opt.body = JSON.stringify(body)
   }
   const resp = await fetch(url, opt)
-  return handleResponse<T>(resp)
+  return handleResponse<T>(resp, url)
 }
 
 export interface App {
@@ -140,6 +148,26 @@ export interface AppVersion {
   Note: string
   Phases: string[] | null
   CreatedAt: string
+}
+
+// 运行时设置（admin 设置页）：全库单文档，nil 字段 = 未配置（回落
+// 启动参数/默认），显式 0 合法（如保留 0 = 永久）
+export interface SettingsDoc {
+  probe_every_sec?: number
+  session_ttl_min?: number
+  alert_warn_pct?: number
+  alert_crit_pct?: number
+  metrics_retain_days?: number
+  runs_retention_days?: number
+  audit_retention_days?: number
+  drafts_retention_days?: number
+  allow_plaintext_enroll?: boolean
+}
+
+export interface SettingsView extends SettingsDoc {
+  version: number
+  updated_at?: string
+  updated_by?: string
 }
 
 export interface Run {
@@ -259,7 +287,7 @@ export async function upload<T = unknown>(url: string, fields: Record<string, st
   for (const [k, v] of Object.entries(fields)) fd.append(k, v)
   fd.append('tgz', file)
   const resp = await fetch(url, { method: 'POST', body: fd, headers: { Accept: 'application/json' } })
-  return handleResponse<T>(resp)
+  return handleResponse<T>(resp, url)
 }
 
 export interface SpecFile {
@@ -415,6 +443,45 @@ export function subscribeRuns(onEvent: (e: RunEvent) => void, onError?: () => vo
   // HTTP 错误（server 重启期间的 502、反代超时）会让 EventSource fail 且
   // 不再自动重连——不通知调用方的话，它把"收到过事件"当永久状态，兜底
   // 轮询从此卡在慢档
+  if (onError) es.onerror = () => onError()
+  return () => es.close()
+}
+
+// ---- exec 结果实时流（SSE）----
+// POST /api/exec 立即返回 run_id，逐主机完成即推送 host 事件（完整
+// stdout/stderr），run 收尾推送 done 后服务端关流。返回断开函数。
+// 连接断开时 EventSource 自动重连，服务端会完整重放缓冲（按 id 幂等
+// 覆盖即可）；HTTP 错误不重连，调用方 onError 落库兜底。
+export interface ExecStreamHost {
+  result: ExecHostResult
+  status: string
+}
+
+export interface ExecStreamDone {
+  ok: number
+  failed: number
+}
+
+export function subscribeExecStream(
+  runId: number,
+  onHost: (h: ExecStreamHost) => void,
+  onDone: (d: ExecStreamDone) => void,
+  onError?: () => void,
+): () => void {
+  const es = new EventSource(`/api/exec/stream?run_id=${runId}`)
+  es.addEventListener('host', (ev) => {
+    try {
+      onHost(JSON.parse((ev as MessageEvent).data) as ExecStreamHost)
+    } catch { /* 坏载荷忽略：重连重放会补 */ }
+  })
+  es.addEventListener('done', (ev) => {
+    es.close()
+    try {
+      onDone(JSON.parse((ev as MessageEvent).data) as ExecStreamDone)
+    } catch {
+      onDone({ ok: 0, failed: 0 })
+    }
+  })
   if (onError) es.onerror = () => onError()
   return () => es.close()
 }

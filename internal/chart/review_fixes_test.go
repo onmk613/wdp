@@ -31,6 +31,38 @@ func TestValidateMetaVersion(t *testing.T) {
 	}
 }
 
+// TestLintBareModuleCall 模块键下没有任何参数的任务（`set_fact:` 后内容
+// 缺失）必须在 chart lint 期拦截：运行期它会在全部主机上失败，汇总只给
+// "run finished with failed hosts"，定位不到任务。setup 声明
+// "(no arguments)" 豁免，不误报。
+func TestLintBareModuleCall(t *testing.T) {
+	dir := writeMinimalChart(t)
+	if err := os.WriteFile(filepath.Join(dir, "deploy.yaml"), []byte(`- hosts: all
+  tasks:
+    - name: 获取主机详细信息
+      set_fact:
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	issues := Lint(c, c.Values)
+	found := false
+	for _, i := range issues {
+		if i.Level == ERROR && i.Path == "deploy.yaml" &&
+			strings.Contains(i.Msg, `task "获取主机详细信息"`) &&
+			strings.Contains(i.Msg, "set_fact requires at least one key/value pair") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("应发现空 set_fact 任务: %+v", issues)
+	}
+}
+
 // writeMinimalChart 写出可加载的最小 chart 目录（可选追加文件）。
 func writeMinimalChart(t *testing.T) string {
 	t.Helper()

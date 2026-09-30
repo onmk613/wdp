@@ -22,8 +22,36 @@ export function taskStatus(s: string): 'success' | 'info' | 'danger' {
   return s === 'ok' ? 'success' : s === 'skipped' ? 'info' : 'danger'
 }
 
-// run 状态 → el-tag type（succeeded 绿 / failed 红 / queued 黄 / 其余如
-// running 灰）
+// run 状态 → el-tag type（succeeded 绿 / failed 红 / queued 黄 / cancelled
+// 灰 / 其余如 running 灰）
 export function runStatus(s: string): 'success' | 'danger' | 'info' | 'warning' {
-  return s === 'succeeded' ? 'success' : s === 'failed' ? 'danger' : s === 'queued' ? 'warning' : 'info'
+  return s === 'succeeded'
+    ? 'success'
+    : s === 'failed' ? 'danger'
+      : s === 'queued' || s === 'cancelling' ? 'warning'
+        : 'info'
+}
+
+// 统一时间展示：后端一律 RFC3339 UTC 裸串，直接展示既不符中文习惯还
+// 三种格式混用（ISO / 美式 locale / +08 偏移）。统一 zh-CN 24 小时制；
+// 空值回退 '-'，解析失败原样透出（不吞数据）
+export function fmtTime(iso: string | undefined | null): string {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  return isNaN(d.getTime()) ? iso : d.toLocaleString('zh-CN', { hour12: false })
+}
+
+// run 目标选择器（内部 JSON）→ 可读文案：{"ids":[1],"kind":"hosts"} →
+// 「主机 #1」；解析失败原样返回（不比裸 JSON 更差）
+export function selectorLabel(raw: string | undefined | null): string {
+  if (!raw) return '-'
+  try {
+    const sel = JSON.parse(raw) as { ids?: number[]; names?: string[]; hosts?: string[]; kind?: string }
+    const kind = sel.kind || 'hosts'
+    const kindName = kind === 'hosts' ? '主机' : kind === 'inline' ? '自定义' : kind === 'pools' ? '池' : kind === 'groups' ? '组' : kind === 'labels' ? '标签' : kind
+    const items = (sel.hosts || sel.names || sel.ids || []).map((v) => (typeof v === 'number' ? `#${v}` : v))
+    return items.length ? `${kindName} ${items.join('、')}` : kindName
+  } catch {
+    return raw
+  }
 }

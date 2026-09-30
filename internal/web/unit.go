@@ -6,7 +6,6 @@ package web
 
 import (
 	"fmt"
-	"strings"
 )
 
 // agentUnitName agent 的 systemd 单元名（不含 .service 后缀）。
@@ -22,9 +21,12 @@ const agentUnitName = "wdp-agent"
 // 后者在控制端证书续期（保留密钥对）后依然匹配，避免自动续期把整片
 // agent 打成不可达。
 func agentUnitFile(binDir, etcDir, logFile string, port int, clientPins []string) string {
+	// --pin-client-fp 是 pflag StringArray：只认重复传参，逗号拼接会被
+	// 当成单个指纹解析失败——曾以 Join(pins, ",") 下发导致新装 agent 启动
+	// 即退、systemd Restart=always 崩溃循环。
 	pinFlag := ""
-	if len(clientPins) > 0 {
-		pinFlag = " --pin-client-fp " + strings.Join(clientPins, ",")
+	for _, p := range clientPins {
+		pinFlag += " --pin-client-fp " + p
 	}
 	return fmt.Sprintf(`[Unit]
 Description=wdp agent

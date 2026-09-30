@@ -19,6 +19,14 @@ func TestUpgradeAlreadyLatest(t *testing.T) {
 	h := s.Handler()
 	token := loginSession2(t, s, "e2e-pass-1")
 
+	// 注入定版构建信息：测试二进制默认 Commit=="none"（未注入 ldflags），
+	// 属「未定版本」形态——版本串不反映内容，幂等短路被有意跳过（见
+	// upgradeAgent）。注入后 loopback agent（同进程，实时取值）与 server
+	// 报同一定版串，短路生效
+	oldCommit := buildinfo.Commit
+	buildinfo.Commit = "c0ffee0"
+	defer func() { buildinfo.Commit = oldCommit }()
+
 	// loopback agent 与 server 同二进制：非 force 应幂等短路
 	rec := do(t, h, "POST", "/api/hosts/1/upgrade", map[string]any{}, &token)
 	if rec.Code != http.StatusOK {

@@ -17,7 +17,7 @@ type MetricPoint struct {
 // BatchUpsertMetric5m 一台主机一轮采样并入桶（单事务——scrapeLoop 每分钟
 // 每主机十几条样本，逐条自提交事务的 fsync 开销是监控写入的主要成本）。
 func (s *Store) BatchUpsertMetric5m(hostID int64, bucket int64, pts []MetricPoint) error {
-	tx, err := s.db.Begin()
+	tx, err := s.raw.Begin()
 	if err != nil {
 		return err
 	}
@@ -47,7 +47,7 @@ type SeriesPoint struct {
 
 // QuerySeries 查某主机某指标（可带 labels 精确匹配）自 from 起的桶序列。
 func (s *Store) QuerySeries(hostID int64, metric, labels string, from int64) ([]*SeriesPoint, error) {
-	rows, err := s.db.Query(`SELECT bucket, vsum / n, vmax FROM metrics_5m
+	rows, err := s.query(`SELECT bucket, vsum / n, vmax FROM metrics_5m
 		WHERE host_id = ? AND metric = ? AND labels = ? AND bucket >= ? ORDER BY bucket`,
 		hostID, metric, labels, from)
 	if err != nil {
@@ -67,7 +67,7 @@ func (s *Store) QuerySeries(hostID int64, metric, labels string, from int64) ([]
 
 // PruneMetrics 清理过期桶（保留窗口外全删）。
 func (s *Store) PruneMetrics(before int64) error {
-	_, err := s.db.Exec(`DELETE FROM metrics_5m WHERE bucket < ?`, before)
+	_, err := s.exec(`DELETE FROM metrics_5m WHERE bucket < ?`, before)
 	return err
 }
 
@@ -84,7 +84,7 @@ type HostAlert struct {
 
 // SetHostAlert upsert 一条告警。
 func (s *Store) SetHostAlert(hostID int64, kind, level, detail string, value float64) error {
-	_, err := s.db.Exec(`INSERT INTO host_alerts (host_id, kind, level, detail, value, updated_at)
+	_, err := s.exec(`INSERT INTO host_alerts (host_id, kind, level, detail, value, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(host_id, kind) DO UPDATE SET level = excluded.level, detail = excluded.detail,
 		value = excluded.value, updated_at = excluded.updated_at`,
@@ -107,7 +107,7 @@ func (s *Store) ClearHostAlert(hostID int64, kinds ...string) error {
 
 // ListHostAlerts 当前全部告警（带主机名）。
 func (s *Store) ListHostAlerts() ([]*HostAlert, error) {
-	rows, err := s.db.Query(`SELECT ha.host_id, COALESCE(h.name, ''), ha.kind, ha.level, ha.detail, ha.value, ha.updated_at
+	rows, err := s.query(`SELECT ha.host_id, COALESCE(h.name, ''), ha.kind, ha.level, ha.detail, ha.value, ha.updated_at
 		FROM host_alerts ha LEFT JOIN hosts h ON h.id = ha.host_id ORDER BY ha.host_id, ha.kind`)
 	if err != nil {
 		return nil, err

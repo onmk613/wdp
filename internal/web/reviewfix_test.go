@@ -177,21 +177,20 @@ func TestExecDuplicateHostIDs(t *testing.T) {
 		t.Fatalf("重复 host_ids 应正常执行而非 409: %d %s", rec.Code, rec.Body)
 	}
 	var resp struct {
-		RunID   int64 `json:"run_id"`
-		OK      int   `json:"ok"`
-		Failed  int   `json:"failed"`
-		Results []any `json:"results"`
+		RunID int64 `json:"run_id"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Results) != 1 {
-		t.Fatalf("重复 ID 应去重为单台执行: %s", rec.Body)
-	}
-	// run 的 selector 同样只记去重后的集合
-	run, err := st.GetRun(resp.RunID)
+	// 重复 ID 应去重为单台执行：后台收尾后任务明细只有一行；run 的
+	// selector 同样只记去重后的集合
+	run := waitExecRun(t, st, resp.RunID)
+	tasks, err := st.RunTasks(resp.RunID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(tasks) != 1 {
+		t.Fatalf("重复 ID 应去重为单台执行: %+v", tasks)
 	}
 	want := fmt.Sprintf(`{"ids":[%d],"kind":"hosts"}`, id)
 	if run.Selector != want {

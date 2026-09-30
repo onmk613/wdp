@@ -28,7 +28,7 @@ type UserScope struct {
 
 func (s *Store) CountUsers() (int, error) {
 	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
+	if err := s.queryRow(`SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
 		return 0, err
 	}
 	return n, nil
@@ -53,7 +53,7 @@ func (s *Store) CreateUser(name, passwordHash, role string) error {
 	if !validUserRole(role) {
 		return Bizf("invalid role %q (admin | operator | viewer)", role)
 	}
-	_, err := s.db.Exec(`INSERT INTO users (name, password_hash, role, created_at) VALUES (?, ?, ?, ?)`, name, passwordHash, role, nowUTC())
+	_, err := s.exec(`INSERT INTO users (name, password_hash, role, created_at) VALUES (?, ?, ?, ?)`, name, passwordHash, role, nowUTC())
 	return err
 }
 
@@ -63,7 +63,7 @@ func (s *Store) SetUserPassword(name, passwordHash string) error {
 	if strings.TrimSpace(name) == "" {
 		return Bizf("user name is required")
 	}
-	_, err := s.db.Exec(`INSERT INTO users (name, password_hash, created_at) VALUES (?, ?, ?)
+	_, err := s.exec(`INSERT INTO users (name, password_hash, created_at) VALUES (?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET password_hash = excluded.password_hash`,
 		name, passwordHash, nowUTC())
 	return err
@@ -72,7 +72,7 @@ func (s *Store) SetUserPassword(name, passwordHash string) error {
 // UserByName 按名查询账号。
 func (s *Store) UserByName(name string) (*User, error) {
 	u := &User{}
-	err := s.db.QueryRow(`SELECT id, name, password_hash, role, disabled, created_at FROM users WHERE name = ?`, name).
+	err := s.queryRow(`SELECT id, name, password_hash, role, disabled, created_at FROM users WHERE name = ?`, name).
 		Scan(&u.ID, &u.Name, &u.PasswordHash, &u.Role, &u.Disabled, &u.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -86,7 +86,7 @@ func (s *Store) UserByName(name string) (*User, error) {
 // UserByID 按 id 查询。
 func (s *Store) UserByID(id int64) (*User, error) {
 	u := &User{}
-	err := s.db.QueryRow(`SELECT id, name, password_hash, role, disabled, created_at FROM users WHERE id = ?`, id).
+	err := s.queryRow(`SELECT id, name, password_hash, role, disabled, created_at FROM users WHERE id = ?`, id).
 		Scan(&u.ID, &u.Name, &u.PasswordHash, &u.Role, &u.Disabled, &u.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -99,7 +99,7 @@ func (s *Store) UserByID(id int64) (*User, error) {
 
 // ListUsers 全部账号（名字典序）。
 func (s *Store) ListUsers() ([]*User, error) {
-	rows, err := s.db.Query(`SELECT id, name, password_hash, role, disabled, created_at FROM users ORDER BY name`)
+	rows, err := s.query(`SELECT id, name, password_hash, role, disabled, created_at FROM users ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -195,19 +195,19 @@ func (s *Store) DeleteUser(id int64) error {
 // CountAdmins 未禁用的 admin 数（最后一个 admin 不可删/禁/降级）。
 func (s *Store) CountAdmins() (int, error) {
 	var n int
-	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0`).Scan(&n)
+	err := s.queryRow(`SELECT COUNT(*) FROM users WHERE role = 'admin' AND disabled = 0`).Scan(&n)
 	return n, err
 }
 
 // SetUserRole 设置角色（bootstrapAdmin 首启把管理员账号标为 admin）。
 func (s *Store) SetUserRole(name, role string) error {
-	_, err := s.db.Exec(`UPDATE users SET role = ? WHERE name = ?`, role, name)
+	_, err := s.exec(`UPDATE users SET role = ? WHERE name = ?`, role, name)
 	return err
 }
 
 // UserScopes 某用户的追加授权清单。
 func (s *Store) UserScopes(userID int64) ([]*UserScope, error) {
-	rows, err := s.db.Query(`SELECT verb, kind, value FROM user_scopes WHERE user_id = ? ORDER BY verb, kind, value`, userID)
+	rows, err := s.query(`SELECT verb, kind, value FROM user_scopes WHERE user_id = ? ORDER BY verb, kind, value`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -227,7 +227,7 @@ func (s *Store) UserScopes(userID int64) ([]*UserScope, error) {
 // UserScopes 同口径）。用户列表页逐用户查询是 N+1——用户多了列表接口
 // 线性变慢，单连接 SQLite 下尤甚。
 func (s *Store) AllUserScopes() (map[int64][]*UserScope, error) {
-	rows, err := s.db.Query(`SELECT user_id, verb, kind, value FROM user_scopes ORDER BY user_id, verb, kind, value`)
+	rows, err := s.query(`SELECT user_id, verb, kind, value FROM user_scopes ORDER BY user_id, verb, kind, value`)
 	if err != nil {
 		return nil, err
 	}

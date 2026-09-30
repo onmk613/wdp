@@ -10,266 +10,197 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"wdp/internal/store/dialect"
 )
 
 // ErrNotFound 操作对象不存在（上层转 HTTP 404）。
 var ErrNotFound = errors.New("not found")
 
-// Store 包装 SQLite 连接。
+// Store 包装数据库连接与方言。
 type Store struct {
-	db *sql.DB
+	// raw 是底层连接。除方言无关的系统操作外不要直接用——业务读写走
+	// exec/query/queryRow，它们会做方言改写（见各方法注释）。
+	raw *sql.DB
+	// d 是方言（sqlite / postgres / mysql）。
+	d dialect.Dialect
+	// addr 是可外显的库地址（密码已遮罩）。
+	addr string
 }
 
-var migrations = []string{`
-CREATE TABLE hosts (
-  id           INTEGER PRIMARY KEY AUTOINCREMENT,
-  name         TEXT NOT NULL UNIQUE,
-  address      TEXT NOT NULL,
-  agent_port   INTEGER NOT NULL DEFAULT 7602,
-  group_name   TEXT NOT NULL DEFAULT '',
-  labels       TEXT NOT NULL DEFAULT '{}',
-  status       TEXT NOT NULL DEFAULT 'unknown',
-  last_seen_at TEXT NOT NULL DEFAULT '',
-  created_at   TEXT NOT NULL,
-  updated_at   TEXT NOT NULL
-);
-CREATE TABLE users (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  name          TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
-  created_at    TEXT NOT NULL
-);
-`, `
-CREATE TABLE enroll_tokens (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  token         TEXT NOT NULL UNIQUE,
-  host_name     TEXT NOT NULL DEFAULT '',
-  agent_port    INTEGER NOT NULL DEFAULT 7602,
-  created_at    TEXT NOT NULL,
-  expires_at    TEXT NOT NULL,
-  used_at       TEXT NOT NULL DEFAULT '',
-  claim_host    TEXT NOT NULL DEFAULT '',
-  claim_address TEXT NOT NULL DEFAULT ''
-);
-`, `
-ALTER TABLE hosts ADD COLUMN pool TEXT NOT NULL DEFAULT '';
-CREATE TABLE pools (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  name       TEXT NOT NULL UNIQUE,
-  note       TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-CREATE TABLE host_groups (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  name       TEXT NOT NULL UNIQUE,
-  note       TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-CREATE TABLE label_defs (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  key        TEXT NOT NULL UNIQUE,
-  note       TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-`, `
--- 池/组多值化：单值列搬迁到关系表后删除
-CREATE TABLE host_pools (host_id INTEGER NOT NULL, pool TEXT NOT NULL, UNIQUE(host_id, pool));
-CREATE TABLE host_group_map (host_id INTEGER NOT NULL, group_name TEXT NOT NULL, UNIQUE(host_id, group_name));
-INSERT INTO host_pools (host_id, pool) SELECT id, pool FROM hosts WHERE pool != '';
-INSERT INTO host_group_map (host_id, group_name) SELECT id, group_name FROM hosts WHERE group_name != '';
-ALTER TABLE hosts DROP COLUMN pool;
-ALTER TABLE hosts DROP COLUMN group_name;
--- 应用（chart 版本化）
-CREATE TABLE apps (
-  id             INTEGER PRIMARY KEY AUTOINCREMENT,
-  name           TEXT NOT NULL UNIQUE,
-  note           TEXT NOT NULL DEFAULT '',
-  latest_version TEXT NOT NULL DEFAULT '',
-  labels         TEXT NOT NULL DEFAULT '{}',
-  created_at     TEXT NOT NULL,
-  updated_at     TEXT NOT NULL
-);
-CREATE TABLE app_pools (app_id INTEGER NOT NULL, pool TEXT NOT NULL, UNIQUE(app_id, pool));
-CREATE TABLE app_groups (app_id INTEGER NOT NULL, group_name TEXT NOT NULL, UNIQUE(app_id, group_name));
-CREATE TABLE app_versions (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  app_id     INTEGER NOT NULL,
-  version    TEXT NOT NULL,
-  tgz_path   TEXT NOT NULL,
-  sha256     TEXT NOT NULL DEFAULT '',
-  size       INTEGER NOT NULL DEFAULT 0,
-  note       TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL,
-  UNIQUE(app_id, version)
-);
--- 执行记录（应用执行与远程命令共用；多应用顺序执行每个应用一行，seq 记序）
-CREATE TABLE runs (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  kind       TEXT NOT NULL DEFAULT 'app',
-  app_id     INTEGER NOT NULL DEFAULT 0,
-  app_name   TEXT NOT NULL DEFAULT '',
-  version    TEXT NOT NULL DEFAULT '',
-  seq        INTEGER NOT NULL DEFAULT 0,
-  status     TEXT NOT NULL DEFAULT 'running',
-  selector   TEXT NOT NULL DEFAULT '',
-  summary    TEXT NOT NULL DEFAULT '',
-  started_at TEXT NOT NULL,
-  finished_at TEXT NOT NULL DEFAULT ''
-);
-CREATE TABLE run_tasks (
-  id      INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id  INTEGER NOT NULL,
-  play    TEXT NOT NULL DEFAULT '',
-  task    TEXT NOT NULL DEFAULT '',
-  module  TEXT NOT NULL DEFAULT '',
-  host    TEXT NOT NULL DEFAULT '',
-  status  TEXT NOT NULL DEFAULT '',
-  changed INTEGER NOT NULL DEFAULT 0,
-  detail  TEXT NOT NULL DEFAULT ''
-);
-`, `
-ALTER TABLE app_versions ADD COLUMN pools TEXT NOT NULL DEFAULT '';
-ALTER TABLE app_versions ADD COLUMN groups TEXT NOT NULL DEFAULT '';
-ALTER TABLE app_versions ADD COLUMN labels TEXT NOT NULL DEFAULT '';
-`, `
-ALTER TABLE runs ADD COLUMN user TEXT NOT NULL DEFAULT '';
-CREATE TABLE audit_logs (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  user       TEXT NOT NULL DEFAULT '',
-  action     TEXT NOT NULL, -- create / update / delete / import / install / login / logout / set_latest / upload
-  object     TEXT NOT NULL, -- host / pool / group / label / app / version / run / chart
-  name       TEXT NOT NULL DEFAULT '',
-  detail     TEXT NOT NULL DEFAULT '',
-  ip         TEXT NOT NULL DEFAULT '',
-  created_at TEXT NOT NULL
-);
-CREATE INDEX idx_audit_created ON audit_logs (id DESC);
-`, `
-CREATE TABLE metrics_5m (
-  host_id INTEGER NOT NULL,
-  metric  TEXT NOT NULL,
-  labels  TEXT NOT NULL DEFAULT '',
-  bucket  INTEGER NOT NULL, -- 5 分钟桶起点（Unix 秒）
-  n       INTEGER NOT NULL DEFAULT 0,
-  vsum    REAL NOT NULL DEFAULT 0,
-  vmax    REAL NOT NULL DEFAULT 0,
-  PRIMARY KEY (host_id, metric, labels, bucket)
-);
-CREATE TABLE host_alerts (
-  host_id    INTEGER NOT NULL,
-  kind       TEXT NOT NULL, -- cpu / mem / fs / offline
-  level      TEXT NOT NULL, -- warn / crit
-  detail     TEXT NOT NULL DEFAULT '',
-  value      REAL NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL,
-  PRIMARY KEY (host_id, kind)
-);
-`, `
-ALTER TABLE app_versions ADD COLUMN phases TEXT NOT NULL DEFAULT ''; -- 相位清单（JSON 数组，版本创建时从 chart 提取；'' = 迁移前旧行）
-ALTER TABLE runs ADD COLUMN phase TEXT NOT NULL DEFAULT ''; -- 本次执行使用的相位（app 类；exec 为空）
-`, `
-ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT ''; -- admin / operator / viewer（空 = 迁移前旧行，按 operator 处理）
-ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0;
-CREATE TABLE user_scopes ( -- 细粒度授权：角色之外的按作用域追加授权（叠加模型）
-  user_id INTEGER NOT NULL,
-  verb    TEXT NOT NULL, -- 权限点，如 host:edit
-  kind    TEXT NOT NULL DEFAULT '', -- '' = 全部 | pool | group | label
-  value   TEXT NOT NULL DEFAULT '',
-  UNIQUE(user_id, verb, kind, value)
-);
-`, `
-CREATE TABLE app_drafts ( -- 编辑器草稿（按用户隔离；app_key = '<appID>' 或 'new:<应用名>'）
-  user_id      INTEGER NOT NULL,
-  app_key      TEXT NOT NULL,
-  base_version TEXT NOT NULL DEFAULT '', -- 编辑底本（保存乐观锁回传）
-  payload      TEXT NOT NULL,            -- 完整文件集 + UI 状态（JSON，前端定义）
-  updated_at   TEXT NOT NULL,
-  UNIQUE(user_id, app_key)
-);
-`, `
--- 明文通道显式声明：CA 启用时控制台→agent 默认走 mTLS（证书校验含主机名），
--- 只有明确标记的主机才允许明文 HTTP。此前"探活失败即回落明文"是可被中间人
--- 主动触发的降级（阻断 TLS 后自行应答即可拿到脚本/become 密码/制品）。
-ALTER TABLE hosts ADD COLUMN allow_plaintext INTEGER NOT NULL DEFAULT 0;
--- 逐主机私钥交付标记：私钥只在"证书尚未交付"的窗口内可取，取走一次即
--- 作废该路径（纳管 token 会经 URL 进反代日志/shell 历史，仅靠 TTL 与
--- 来源 IP 绑定仍嫌宽）
-ALTER TABLE enroll_tokens ADD COLUMN key_delivered_at TEXT NOT NULL DEFAULT '';
-`, `
--- 热路径补索引（走新迁移版本，不改历史迁移）：
---   host_pools(pool) / host_group_map(group_name)：按池/组圈选主机
---   （ListHosts 的 scope 过滤）、池/组列表的成员计数与删除池/组时清理
---   成员关系，此前全部全表扫。host_id 一侧无需另建——建表时的
---   UNIQUE(host_id, pool/group_name) 前缀已覆盖按主机删/查。
---   runs(app_id, status) / runs(status)：执行互斥预检（同应用 queued/
---   running 判定）与启动期失败收尾按状态扫表；runs 随执行历史线性增长，
---   无索引时越用越慢。
-CREATE INDEX idx_host_pools_pool ON host_pools (pool);
-CREATE INDEX idx_host_group_map_group ON host_group_map (group_name);
-CREATE INDEX idx_runs_app_status ON runs (app_id, status);
-CREATE INDEX idx_runs_status ON runs (status);
-`}
-
-// Open 打开（必要时创建）数据库并执行增量迁移。
+// Open 打开（必要时创建）SQLite 数据库并执行增量迁移。
+//
+// 这是历史入口，语义不变：path 是 SQLite 文件路径。要连 MySQL/PostgreSQL 或
+// 带连接参数，用 OpenDSN（CLI 的 --db 走那条路）。
 func Open(path string) (*Store, error) {
-	// synchronous(NORMAL)：WAL 下的推荐档——写不 fsync 每次提交，掉电
-	// 最多丢最后几笔事务但不损坏库；监控指标/审计类高频小写收益明显。
-	// foreign_keys(1)：schema 暂无 FOREIGN KEY 声明，pragma 目前空转，
-	// 为将来声明外键的迁移预留；孤儿行防护现阶段靠同事务删除（见
-	// DeletePool/DeleteGroup/DeleteUser 等的成对清理）。
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)")
+	return OpenDSN(DSN{
+		Dialect:   mustDialect("sqlite"),
+		Config:    applyDefaults("sqlite", dialect.Config{Path: path}),
+		driverDSN: mustDialect("sqlite").DSN(applyDefaults("sqlite", dialect.Config{Path: path})),
+		Redacted:  path,
+	})
+}
+
+// OpenDSN 按解析后的库地址打开数据库并执行增量迁移。支持 sqlite / postgres /
+// mysql 三种方言（方言差异见 internal/store/dialect）。
+//
+// 连接池由方言自行配置：SQLite 限单连接（单写者模型，语句与事务天然互斥），
+// 网络库给正常池。因此调用方仍需遵守「事务内不得再走 Store 的其它方法」——
+// SQLite 下会死锁，网络库下只是多占一条连接。
+func OpenDSN(d DSN) (*Store, error) {
+	if d.Dialect == nil {
+		return nil, errors.New("store: nil dialect")
+	}
+	db, err := sql.Open(d.Driver(), d.DriverDSN())
 	if err != nil {
 		return nil, err
 	}
-	// 单连接全串行：SQLite 单写者模型下语句/事务天然互斥，免去 BUSY 处理
-	db.SetMaxOpenConns(1)
-	s := &Store{db: db}
+	d.Dialect.Configure(db)
+	s := &Store{raw: db, d: d.Dialect, addr: d.Redacted}
 	if err := s.migrate(); err != nil {
 		db.Close()
-		return nil, err
+		return nil, fmt.Errorf("migrate %s database: %w", d.Redacted, err)
 	}
 	return s, nil
 }
 
 // Close 关闭底层连接。
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error { return s.raw.Close() }
 
+// DB 暴露底层连接（系统级操作用；业务读写一律走 Store 方法，不在这里绕过）。
+// 经它执行的 SQL 不经过方言改写，除 SQLite 外不要用。
+func (s *Store) DB() *sql.DB { return s.raw }
+
+// Address 返回可安全外显的库地址（密码已遮罩），用于日志与错误信息。
+func (s *Store) Address() string { return s.addr }
+
+// DialectName 返回方言名（sqlite / postgres / mysql）。
+func (s *Store) DialectName() string { return s.d.Name() }
+
+// --- 方言感知的查询入口 ---
+//
+// 所有业务读写都走下面四个方法：它们把 SQL 交给方言改写（占位符、聚合、
+// 冲突子句、字符串拼接）后再执行。直接调 s.raw 会跳过改写——除 SQLite 外
+// 都可能语法错，因此 s.raw 只应出现在方言无关的系统操作里（如 Ping）。
+
+// exec 执行写语句（方言改写后）。
+func (s *Store) exec(query string, args ...any) (sql.Result, error) {
+	return s.raw.Exec(s.d.Rewrite(query), args...)
+}
+
+// query 执行查询（方言改写后）。
+func (s *Store) query(query string, args ...any) (*sql.Rows, error) {
+	return s.raw.Query(s.d.Rewrite(query), args...)
+}
+
+// queryRow 执行单行查询（方言改写后）。
+func (s *Store) queryRow(query string, args ...any) *sql.Row {
+	return s.raw.QueryRow(s.d.Rewrite(query), args...)
+}
+
+// rawExecer 把 Store 自身适配成 execer：无事务的写路径（如 UpsertHostByName）
+// 也要用 lastInsertID 的方言分支，因此需要一个非事务的 execer。
+func (s *Store) rawExecer() execer { return &storeExecer{s: s} }
+
+// storeExecer 是 execer 的非事务实现（方言改写 + 直连）。
+type storeExecer struct{ s *Store }
+
+func (e *storeExecer) Exec(query string, args ...any) (sql.Result, error) {
+	return e.s.exec(query, args...)
+}
+func (e *storeExecer) Query(query string, args ...any) (*sql.Rows, error) {
+	return e.s.query(query, args...)
+}
+func (e *storeExecer) QueryRow(query string, args ...any) *sql.Row {
+	return e.s.queryRow(query, args...)
+}
+
+// lastInsertID 回读刚插入行的自增主键。
+//
+// PostgreSQL 的驱动不支持 Result.LastInsertId，INSERT 必须以 `RETURNING id`
+// 结尾并走 queryRow；SQLite 与 MySQL（含 MariaDB）用 LastInsertId 更省事，
+// 也避免依赖 MySQL 8.0.19+ 才有的 INSERT ... RETURNING。
+//
+// insertSQL 必须是**不带** RETURNING 的 INSERT；args 与其占位符一一对应。
+func (s *Store) lastInsertID(r execer, insertSQL string, args ...any) (int64, error) {
+	if s.d.Name() == "postgres" {
+		var id int64
+		if err := r.QueryRow(insertSQL+" RETURNING id", args...).Scan(&id); err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+	res, err := r.Exec(insertSQL, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+// migrate 建表并执行增量迁移。
+//
+// 与历史实现的区别：DDL 逐条执行（PG 驱动的 Exec 不接受一次多条语句），
+// 且对 SQLite 专有写法做方言改写（自增主键、类型、冲突子句）。
 func (s *Store) migrate() error {
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
+	if _, err := s.exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
 		return err
 	}
 	var version int
-	row := s.db.QueryRow(`SELECT version FROM schema_version`)
-	if err := row.Scan(&version); err != nil {
+	err := s.queryRow(`SELECT version FROM schema_version`).Scan(&version)
+	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if _, err := s.db.Exec(`INSERT INTO schema_version (version) VALUES (0)`); err != nil {
+		// 全新库：MySQL/PG 无「空表 SELECT 返回 0 行」之外的坑，插入 0 行即可
+		if _, err := s.exec(`INSERT INTO schema_version (version) VALUES (?)`, 0); err != nil {
 			return err
 		}
 	}
-	for v := version; v < len(migrations); v++ {
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
+	// 网络库（MySQL/PG）没有历史包袱：新建库先执行一份基线（当前 schema 的
+	// 等价物），把版本号直接推到基线末尾，避免重放 SQLite 专有的历史迁移。
+	// 存量 SQLite 库走原路逐条重放（版本号与对象状态强相关，不能走捷径）。
+	if version == 0 {
+		base := baselineFor(s.d.Name())
+		if len(base) > 0 {
+			if err := s.applyBaseline(base); err != nil {
+				return err
+			}
+			version = baselineCount(s.d.Name())
 		}
-		if _, err := tx.Exec(migrations[v]); err != nil {
-			_ = tx.Rollback()
+	}
+	for v := version; v < migrationCount(s.d.Name()); v++ {
+		if err := s.applyMigration(v); err != nil {
 			return fmt.Errorf("migration v%d: %w", v+1, err)
-		}
-		if _, err := tx.Exec(`UPDATE schema_version SET version = ?`, v+1); err != nil {
-			_ = tx.Rollback()
-			return err
-		}
-		if err := tx.Commit(); err != nil {
-			return err
 		}
 	}
 	return nil
+}
+
+// applyMigration 在单事务里执行第 v 条迁移（0 基）并推进版本号。
+func (s *Store) applyMigration(v int) error {
+	stmts, err := s.prepareMigration(migrationFor(s.d.Name(), v))
+	if err != nil {
+		return err
+	}
+	tx, err := s.raw.Begin()
+	if err != nil {
+		return err
+	}
+	t := &txExecer{tx: tx, d: s.d}
+	for _, st := range stmts {
+		if _, err := t.Exec(st); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	if _, err := t.Exec(`UPDATE schema_version SET version = ?`, v+1); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }
@@ -288,15 +219,34 @@ type execer interface {
 // "先 DELETE 后 INSERT"的整体替换中途失败丢光旧数据）。fn 内不得再走
 // s.db 查询——单连接已被事务占住，嵌套查询会死锁。
 func (s *Store) tx(fn func(q execer) error) error {
-	t, err := s.db.Begin()
+	t, err := s.raw.Begin()
 	if err != nil {
 		return err
 	}
-	if err := fn(t); err != nil {
+	if err := fn(&txExecer{tx: t, d: s.d}); err != nil {
 		_ = t.Rollback()
 		return err
 	}
 	return t.Commit()
+}
+
+// txExecer 是事务内的 execer 实现：与 Store 的 exec/query/queryRow 一样先做
+// 方言改写再执行，保证事务内外 SQL 走同一条翻译路径。
+type txExecer struct {
+	tx *sql.Tx
+	d  dialect.Dialect
+}
+
+func (t *txExecer) Exec(query string, args ...any) (sql.Result, error) {
+	return t.tx.Exec(t.d.Rewrite(query), args...)
+}
+
+func (t *txExecer) Query(query string, args ...any) (*sql.Rows, error) {
+	return t.tx.Query(t.d.Rewrite(query), args...)
+}
+
+func (t *txExecer) QueryRow(query string, args ...any) *sql.Row {
+	return t.tx.QueryRow(t.d.Rewrite(query), args...)
 }
 
 // dedup 去空去重（保持顺序）。
@@ -358,19 +308,31 @@ func validScopeNames(what string, list []string) error {
 	return nil
 }
 
-// isUniqueErr 是否 SQLite 唯一约束冲突（modernc 驱动以错误串暴露）。
-func isUniqueErr(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+// isUniqueErr 是否是唯一约束冲突。各库判定方式不同（SQLite 是错误串、
+// PG 是 SQLSTATE 23505、MySQL 是错误码 1062），统一问方言。
+func (s *Store) isUniqueErr(err error) bool { return s.d.IsUniqueErr(err) }
+
+// IsUniqueErr 报告错误是否唯一约束冲突：web 层用它区分"用户可见的重名冲突"
+// （400）与基础设施错误（500 脱敏，理由见 bizErr 注释）。
+//
+// 这里无法问方言（没有 Store 实例），故按三库特征做**并集**判定：SQLite 错误
+// 串、PG 的 SQLSTATE 23505、MySQL 错误码 1062 都认。代价是理论上可能把某个
+// 库的其它 23505 误判为重名——但 23505 在 PG 里就是 unique_violation 的语义。
+func IsUniqueErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "UNIQUE constraint failed") ||
+		strings.Contains(msg, "constraint failed: PRIMARY KEY") ||
+		strings.Contains(msg, "SQLSTATE 23505") ||
+		regexp.MustCompile(`(?i)(Error 1062|Duplicate entry)`).MatchString(msg)
 }
 
-// IsUniqueErr 是 isUniqueErr 的导出形态：web 层用它区分"用户可见的
-// 重名冲突"（400）与基础设施错误（500 脱敏，理由见 bizErr 注释）。
-func IsUniqueErr(err error) bool { return isUniqueErr(err) }
-
-// dupErr 把 SQLite 唯一约束错误翻译为可读的"已存在"语义（业务校验类，
-// 经 Bizf 标记——web 层原样回 400 而非脱敏 500）。
-func dupErr(err error, what, name string) error {
-	if isUniqueErr(err) {
+// dupErr 把唯一约束冲突翻译为可读的"已存在"语义（业务校验类，经 Bizf 标记
+// ——web 层原样回 400 而非脱敏 500）。判定走方言，三库通用。
+func (s *Store) dupErr(err error, what, name string) error {
+	if s.isUniqueErr(err) {
 		return Bizf("%s %q already exists", what, name)
 	}
 	return err

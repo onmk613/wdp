@@ -61,7 +61,7 @@ func TestCreateRunsExclusiveAtomic(t *testing.T) {
 // createTestApp 建一个应用（含首个版本）返回 ID。
 func createTestApp(t *testing.T, s *Store, name string) int64 {
 	t.Helper()
-	id, err := s.CreateApp(name, "", "{}", nil, nil, "1.0.0", "/tmp/x.tgz", "deadbeef", 1, nil)
+	id, err := s.CreateApp(name, "", "{}", nil, nil, "1.0.0", "/tmp/x.tgz", "deadbeef", 1, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}

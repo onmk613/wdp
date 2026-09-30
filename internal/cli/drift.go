@@ -20,14 +20,33 @@ import (
 	"wdp/internal/conn"
 	"wdp/internal/drift"
 	"wdp/internal/executor"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/report"
 
 	"github.com/spf13/cobra"
 )
 
-const driftHelp = `
-跨主机配置漂移巡检（只读检测与报告，不自动收敛）
+// driftHelp 返回 `wdp drift` 的长帮助（调用时求值）。
+func driftHelp() string {
+	return i18n.T(`Cross-host configuration drift inspection (read-only detection and reporting; never auto-converges)
+
+Reads each host's release marker and classifies it per host against the digest of the current chart + values:
+OK identical / DRIFTED values changed (config edited without deploying, or someone changed the host by
+hand; marker v2 adds field-level differences) / OUTDATED an older chart version is deployed / NOT-DEPLOYED
+no marker / UNREACHABLE connection failed / FAILED task execution failed (become denied etc., distinguished
+from connection problems)
+Failure criteria: DRIFTED / UNREACHABLE / FAILED exit non-zero (CI-ready); NOT-DEPLOYED / OUTDATED are only
+listed and do not count as failures (scaling out and pending upgrades are normal, not drift)
+Convergence: rerun wdp run <chart> for an idempotent redeploy
+An optional positional argument limits the host pattern (default all); --limit narrows it further;
+-f/--set supplies the values for the inspection
+Requires a chart with release markers enabled (no_marker: true is an error)
+
+Examples:
+wdp drift ./myapp -f envs/prod.yaml
+wdp drift ./myapp 'webservers:!canary'
+`, `跨主机配置漂移巡检（只读检测与报告，不自动收敛）
 
 读取各主机 release marker，与当前 chart + values 的摘要逐主机比对分类：
 OK 一致 / DRIFTED values 已变（改配置未部署或有人手改现场；marker v2 附字段级差异）/
@@ -42,7 +61,8 @@ NOT-DEPLOYED / OUTDATED 只列出不判失败（扩容中与待升级是常态�
 示例：
 wdp drift ./myapp -f envs/prod.yaml
 wdp drift ./myapp 'webservers:!canary'
-`
+`)
+}
 
 // newDriftCmd 构造 `wdp drift`。
 func newDriftCmd() *cobra.Command {
@@ -51,10 +71,11 @@ func newDriftCmd() *cobra.Command {
 		valuesFiles, setArgs []string
 	)
 	cmd := &cobra.Command{
-		Use:   "drift <chart-dir|chart.tgz> [host-pattern]",
-		Short: "compare each host's release marker against the current chart values (read-only)",
-		Long:  driftHelp,
-		Args:  cobra.RangeArgs(1, 2),
+		Use: "drift <chart-dir|chart.tgz> [host-pattern]",
+		Short: i18n.T("compare each host's release marker against the current chart values (read-only)",
+			"逐主机比对 release marker 与当前 chart values（只读）"),
+		Long: driftHelp(),
+		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pattern := "all"
 			if len(args) == 2 {
@@ -64,7 +85,9 @@ func newDriftCmd() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&limit, "limit", "", "further limit hosts (group/host/!exclude)")
+	f.StringVar(&limit, "limit", "", i18n.T(
+		"further limit hosts (group/host/!exclude)",
+		"进一步收窄主机（组/主机/!排除）"))
 	chartValueFlags(cmd, &valuesFiles, &setArgs)
 	return cmd
 }

@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -235,6 +236,14 @@ func (s *Server) handleDeleteHost(w http.ResponseWriter, r *http.Request) {
 	}
 	retired, warn := s.retireAgent(r.Context(), h)
 	if err := s.st.DeleteHost(id); err != nil {
+		// 并发删除（确认框双击/批量与单删竞争）时 GetHost 已过、行已被
+		// 另一请求删掉 → ErrNotFound。按 404「已删除」回给前端而非 500
+		// internal server error（GetHost 与 DeleteHost 之间无事务，这条
+		// 路径真实可达——日志曾见 internal error err="not found"）
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "host already deleted")
+			return
+		}
 		s.writeInternal(w, err)
 		return
 	}
@@ -395,7 +404,7 @@ func (s *Server) batchProbeHosts(p *userPerms, needVerb string, req *BatchReques
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			pr := probeHost(ctx, h, s.probeClientFor(h))
-			_ = s.st.SetHostStatus(h.ID, pr.Status)
+			_ = s.st.SetHostStatus(h.ID, pr.Status, pr.Build, probeModulesJSON(pr))
 			res := &results[slots[k]]
 			res.OK = pr.Status == "online"
 			res.Detail = pr.Status + " " + pr.Error
@@ -409,29 +418,58 @@ func (s *Server) batchProbeHosts(p *userPerms, needVerb string, req *BatchReques
 // 台账 → 回收差分快照与闸门锁。retireAgent 保持挂请求 ctx 不动（与单删
 // handleDeleteHost 同口径：退役是尽力而为的附带动作，不脱离请求执行）。
 func (s *Server) batchDeleteHosts(r *http.Request, p *userPerms, needVerb string, req *BatchRequest) []BatchResult {
-	results := make([]BatchResult, 0, len(req.IDs))
-	for _, id := range req.IDs {
+	// 有界并发（8）：retire 对不可达主机要等满连接超时，此前逐台串行
+	// 让百台级批量删除卡到分钟级——实测 120 台不可达主机无法在请求
+	// 超时内完成。结果按 ID 声明序回填（并发完成序不影响响应次序）。
+	type slot struct {
+		res BatchResult
+		// resolve 失败的占位（失败行不参与并发，直接落位）
+		failed bool
+	}
+	slots := make([]slot, len(req.IDs))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for k, id := range req.IDs {
 		h, fail, ok := s.batchResolveHost(p, needVerb, id)
 		if !ok {
-			results = append(results, fail)
+			slots[k] = slot{res: fail, failed: true}
 			continue
 		}
-		res := BatchResult{ID: id, Name: h.Name}
-		retired, warn := s.retireAgent(r.Context(), h)
-		if err := s.st.DeleteHost(id); err != nil {
-			res.Detail = err.Error()
-			results = append(results, res)
-			continue
-		}
-		// 同单删：回收差分快照与闸门锁
-		s.monitor.Forget(id)
-		s.gate.Forget(id)
-		res.OK = true
-		res.Retired = retired
-		if warn != "" {
-			res.Detail = "agent 退役失败: " + warn
-		}
-		results = append(results, res)
+		slots[k].res = BatchResult{ID: id, Name: h.Name}
+		wg.Add(1)
+		go func(k int, id int64, h *store.Host) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			res := slots[k].res
+			// 单台退役限时 10s：不可达不该拖垮整批（退役本就是尽力而为）
+			rctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+			defer cancel()
+			retired, warn := s.retireAgent(rctx, h)
+			if err := s.st.DeleteHost(id); err != nil {
+				// 同单删：并发把行删掉时 ErrNotFound 不算失败，「已被删除」
+				if errors.Is(err, store.ErrNotFound) {
+					slots[k].res = BatchResult{ID: id, Name: h.Name, OK: true, Detail: "已被其他请求删除"}
+					return
+				}
+				slots[k].res = BatchResult{ID: id, Name: h.Name, Detail: err.Error()}
+				return
+			}
+			// 同单删：回收差分快照与闸门锁
+			s.monitor.Forget(id)
+			s.gate.Forget(id)
+			res.OK = true
+			res.Retired = retired
+			if warn != "" {
+				res.Detail = "agent 退役失败: " + warn
+			}
+			slots[k].res = res
+		}(k, id, h)
+	}
+	wg.Wait()
+	results := make([]BatchResult, 0, len(req.IDs))
+	for k := range slots {
+		results = append(results, slots[k].res)
 	}
 	return results
 }

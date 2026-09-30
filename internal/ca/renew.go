@@ -17,11 +17,16 @@ import (
 type RenewOptions struct {
 	CertPath   string // 旧证书路径（必填）
 	KeyPath    string // 旧私钥路径（保留私钥模式必填；--new-key 时可省）
-	OutPath    string // 新证书输出路径（空 = ./<旧证书文件名>）
+	OutPath    string // 新证书输出路径（空 = ./<旧证书文件名>；新私钥固定为同目录同名 .key）
 	CACertPath string // 重签用根 CA 证书（空 = <新证书目录>/ca.crt）
 	CAKeyPath  string // 根 CA 私钥（空 = <新证书目录>/ca.key）
 	NewKey     bool   // 换新私钥（算法沿用原证书；旧证书立即失效）
 	Days       int    // 在原到期时刻上**增加**的天数（<=0 = 默认 30）
+	// Keyless 无私钥续期：server 侧 CSR 纳管后不再持有逐主机叶子私钥，
+	// 而重签本就只需要旧证书的公钥（签名用 CA 私钥）。此模式身份与
+	// 公钥全部从旧证书继承，只写新证书、不产生/不改名任何 .key。
+	// 与 NewKey/KeyPath 互斥。
+	Keyless bool
 }
 
 // restoreRenamed 逆序恢复已改名的备份（备份/签发失败路径专用）。
@@ -44,6 +49,9 @@ func restoreRenamed(renamed []string) error {
 // 配对，不配对直接拒绝（防拿错钥匙静默换身份）。
 // 返回 (newCert, newKey, 指纹)。
 func Renew(o RenewOptions) (string, string, string, error) {
+	if o.Keyless && (o.NewKey || o.KeyPath != "") {
+		return "", "", "", errors.New("keyless renew cannot combine with --key/--new-key")
+	}
 	old, err := loadRenewTarget(o)
 	if err != nil {
 		return "", "", "", err
@@ -52,9 +60,12 @@ func Renew(o RenewOptions) (string, string, string, error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	key, err := renewKey(o, old)
-	if err != nil {
-		return "", "", "", err
+	// 读旧钥必须在备份改名**之前**（备份会把 .key 改名为 .old.<ts>）
+	var key crypto.Signer
+	if !o.Keyless {
+		if key, err = renewKey(o, old); err != nil {
+			return "", "", "", err
+		}
 	}
 
 	outPath := o.OutPath
@@ -66,13 +77,30 @@ func Renew(o RenewOptions) (string, string, string, error) {
 	if err != nil {
 		return "", "", "", err
 	}
-	newCrt, newKey, newFP, err := signAndWrite(filepath.Dir(outPath), o.CACertPath, o.CAKeyPath,
-		strings.TrimSuffix(filepath.Base(outPath), ".crt"), tpl, key)
-	if err != nil {
+	restore := func(err error) (string, string, string, error) {
 		// 签发失败时恢复此前的改名备份：旧证书/私钥不能因重签失败而丢失。
 		// 恢复失败同样上报（join 而非覆盖）：静默丢弃会让旧件只存在于
 		// .old.<时间戳> 备份名下，调用方无从得知
 		return "", "", "", errors.Join(err, restoreRenamed(renamed))
+	}
+	if o.Keyless {
+		crt, _, fp, err := signCert(filepath.Dir(outPath), o.CACertPath, o.CAKeyPath,
+			strings.TrimSuffix(filepath.Base(outPath), ".crt"), tpl, old.PublicKey)
+		if err != nil {
+			return restore(err)
+		}
+		if crt != outPath {
+			if err := os.Rename(crt, outPath); err != nil {
+				return restore(err)
+			}
+			crt = outPath
+		}
+		return crt, "", fp, nil
+	}
+	newCrt, newKey, newFP, err := signAndWrite(filepath.Dir(outPath), o.CACertPath, o.CAKeyPath,
+		strings.TrimSuffix(filepath.Base(outPath), ".crt"), tpl, key)
+	if err != nil {
+		return restore(err)
 	}
 	newCrt, newKey, err = placeRenewOutputs(outPath, newCrt, newKey)
 	if err != nil {

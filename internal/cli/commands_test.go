@@ -9,6 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"wdp/internal/agentcmd"
 	"wdp/internal/config"
 	"wdp/internal/model"
 )
@@ -175,7 +176,7 @@ func TestAdhocCmdFlags(t *testing.T) {
 
 // TestAgentPinClientFpRepeatable 断言 agent 的 --pin-client-fp 可重复。
 func TestAgentPinClientFpRepeatable(t *testing.T) {
-	fl := newAgentCmd().Flags().Lookup("pin-client-fp")
+	fl := agentcmd.New().Flags().Lookup("pin-client-fp")
 	if fl == nil || fl.Value.Type() != "stringArray" {
 		t.Fatalf("--pin-client-fp 应为可重复 stringArray, flag=%v", fl)
 	}

@@ -21,8 +21,13 @@ import (
 
 // Options 是执行选项。
 type Options struct {
-	Forks       int    // 并发上限，缺省 5
-	Limit       string // --limit，进一步收窄主机范围
+	Forks int    // 并发上限，缺省 5
+	Limit string // --limit，进一步收窄主机范围
+	// FailFast 任一主机失败即中止：当前批次在途主机会执行完（不截断
+	// 运行中的命令），随后不再推进后续批次与后续 play（ansible
+	// max_fail_percentage=0 语义；strategy 配置自带该行为，此开关覆盖
+	// 无 strategy 的传统模式）。大批量灰度时避免明知会全盘失败还打满全量
+	FailFast    bool
 	Tags        []string
 	SkipTags    []string
 	ListHosts   bool
@@ -266,13 +271,19 @@ func (e *Executor) Run(ctx context.Context, plays []*model.Play) bool {
 		defer e.saveFactCache(e.Opts.FactCachePath)
 	}
 	anyFail := false
-	for _, p := range plays {
+	for i, p := range plays {
 		if ctx.Err() != nil {
 			e.Rep.PlayMsg("execution cancelled (%v), terminating remaining plays", ctx.Err())
 			return true
 		}
 		if e.runPlay(ctx, p) {
 			anyFail = true
+			if e.Opts.FailFast {
+				if rest := len(plays) - i - 1; rest > 0 {
+					e.Rep.PlayMsg("fail-fast: failed hosts detected, aborting remaining %d play(s)", rest)
+				}
+				break
+			}
 		}
 	}
 	return anyFail
@@ -329,5 +340,6 @@ func (e *Executor) mergeStats(stats map[string]*model.Stats) {
 		total.Unreachable += s.Unreachable
 		total.Skipped += s.Skipped
 		total.Ignored += s.Ignored
+		total.ElapsedMs += s.ElapsedMs
 	}
 }

@@ -114,7 +114,7 @@ func TestProberCancelledCtxKeepsStatus(t *testing.T) {
 			cancel() // 关停先于结论落库
 			return ProbeResult{Status: "offline", Error: "context canceled"}
 		}}
-	if err := st.SetHostStatus(id, "online"); err != nil { // 预置在线，观察是否被覆盖
+	if err := st.SetHostStatus(id, "online", "test-build", ""); err != nil { // 预置在线，观察是否被覆盖
 		t.Fatal(err)
 	}
 	done2 := make(chan struct{})

@@ -11,6 +11,8 @@ func syncDir(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer d.Close()
+	defer func(d *os.File) {
+		_ = d.Close()
+	}(d)
 	return d.Sync()
 }

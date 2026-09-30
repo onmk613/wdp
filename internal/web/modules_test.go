@@ -39,8 +39,10 @@ func TestModulesEndpoint(t *testing.T) {
 	if st, ok := byName["setup"]; !ok || !st.ReadOnly {
 		t.Fatalf("setup 应只读: %+v", byName["setup"])
 	}
-	if _, ok := byName["debug"]; ok && len(byName["debug"].Params) > 0 {
-		t.Fatal("debug 无参数模块不应带参数表")
+	// debug 补齐 Example() 后满足 UsageProvider（Params+Example），
+	// var/msg 参数表进入端点与编辑器补全
+	if dbg, ok := byName["debug"]; ok && len(dbg.Params) != 2 {
+		t.Fatalf("debug 应带 var/msg 两个参数: %+v", dbg.Params)
 	}
 	// 枚举值域透出契约：编辑器值补全读 ParamDoc.enum（与解析白名单同源），
 	// file.state 与 user.shell 是两类代表（硬校验值域 / 建议值）

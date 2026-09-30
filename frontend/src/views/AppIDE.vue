@@ -64,6 +64,8 @@ const existingVersions = ref<string[]>([])
 
 // 问题与面板
 const problems = ref<ProblemItem[]>([])
+// 跑过至少一次整体校验（问题面板空态据此区分「还没跑」与「跑过且干净」）
+const validated = ref(false)
 const panel = ref<'none' | 'problems' | 'doc'>('none')
 const cursorModule = ref<ModuleMeta | null>(null)
 
@@ -245,6 +247,7 @@ async function doValidate(): Promise<ProblemItem[] | null> {
     const body = fs.toSaveBody(version)
     const ps = await runValidate(body, isCreate.value ? 0 : props.appId)
     problems.value = ps
+    validated.value = true
     applyMarkers(monacoRef.value!, models, ps)
     if (ps.length) panel.value = 'problems'
     return ps
@@ -261,6 +264,16 @@ function currentChartVersion(): string {
   const v = chartYAMLVersion(c)
   if (v && (isCreate.value || !existingVersions.value.includes(v))) return v
   return nextVersion(fs.baseVersion, existingVersions.value)
+}
+
+// 工具栏「校验」入口：校验本体（doValidate）同时被保存门禁复用，那边
+// 自带错误提示——口头反馈只挂在按钮上，避免一次保存弹两轮 toast。
+// 此前校验通过零反馈，用户无法区分「跑过了且干净」与「根本没跑」。
+async function doValidateReport() {
+  const ps = await doValidate()
+  if (ps === null) return // 请求失败：doValidate 已报错
+  if (ps.length) ElMessage.warning(`校验发现 ${ps.length} 个问题，见下方「问题」面板`)
+  else ElMessage.success('校验通过，未发现问题')
 }
 
 // ---- 光标联动文档面板 ----
@@ -452,7 +465,10 @@ const defaultDescription = computed(() => {
       <el-button text :icon="ArrowLeft" @click="back">返回</el-button>
       <b class="ide-title">{{ title }}</b>
       <span class="muted">{{ subtitle }}</span>
-      <span v-if="dirtyCount" class="dirty">● {{ dirtyCount }} 处未保存</span>
+      <!-- 新建模式整个应用都未入库，逐文件计数没有意义（脚手架 3 个文件
+           一进来就"未保存"徒增困惑）；编辑模式才数改动文件 -->
+      <span v-if="isCreate" class="dirty">● 新建未保存</span>
+      <span v-else-if="dirtyCount" class="dirty">● {{ dirtyCount }} 处未保存</span>
       <span v-else class="saved muted">内容与底本一致</span>
       <div style="flex: 1" />
       <span class="muted draft-state">{{ draftStatus }}</span>
@@ -460,7 +476,7 @@ const defaultDescription = computed(() => {
         <el-button :icon="RefreshLeft" :disabled="!fileOps.length" @click="undoFileOp" />
       </el-tooltip>
       <el-button @click="manualDraft">暂存</el-button>
-      <el-button :loading="validating" @click="doValidate">校验</el-button>
+      <el-button :loading="validating" @click="doValidateReport">校验</el-button>
       <el-button type="primary" :loading="saving" @click="openSave">保存</el-button>
     </div>
 
@@ -507,6 +523,7 @@ const defaultDescription = computed(() => {
             v-model:panel="panel"
             :problems="problems"
             :module="cursorModule"
+            :validated="validated"
             @jump="jumpTo"
           />
         </div>

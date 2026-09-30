@@ -94,6 +94,13 @@ async function submitSSHInstall() {
     ElMessage.warning('没有可安装的主机行（先按模版格式填写）')
     return
   }
+  // 软前置提示（不阻断）：无密码无显式私钥的行走 server 本机 ssh-agent/
+  // 默认密钥认证，这是合法路径；只是失败前先打好招呼，避免用户以为
+  // 共享凭据已生效
+  const noCred = rows.filter((r) => !r.value!.password && !sshShared.password && !sshShared.key_path)
+  if (noCred.length) {
+    ElMessage.warning(`${noCred.length} 行未配置密码/私钥，将尝试 server 本机 ssh-agent 或默认密钥（~/.ssh/id_*）认证`)
+  }
   sshJobs.value = rows.map((r) => ({ line: r.line, host: r.value!, status: 'queued' as const }))
   await runSSHJobs()
 }

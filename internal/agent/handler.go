@@ -3,7 +3,6 @@ package agent
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -11,15 +10,22 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"time"
 
+	"wdp/internal/buildinfo"
 	"wdp/internal/fsatomic"
+	"wdp/internal/module"
+	"wdp/internal/plan"
 )
 
 // Handler 返回最终 HTTP 处理器。
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.handleHealth)
+	// 能力自描述（分层方案 P2）：控制端探活顺带抓取，受理执行前对账
+	// agent 的模块集——老 agent 无此端点，控制端按「未知 = 放行」兼容
+	mux.HandleFunc("GET /info", s.handleInfo)
 	// 主机指标（Prometheus 文本格式，对齐 node_exporter 命名）
 	mux.HandleFunc("GET /metrics", s.handleMetrics)
 	mux.HandleFunc("POST /exec", s.handleExec)
@@ -94,6 +100,28 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// infoResp 是能力自描述（GET /info）。模块集从注册表实时派生——增删
+// 模块文件后 /info 自动跟随，agent 侧无需维护清单（分层方案 P2 的
+// 能力握手：agent 逻辑冻结后唯一需要演进的接口）。敏感性与 /health
+// 同级（build/tier/模块名，无主机数据），与 /health 一样免认证供探测。
+type infoResp struct {
+	Build   string   `json:"build"` // 发布版本（BuildVersion，与 /health 同源）
+	Tier    string   `json:"tier,omitempty"`
+	Proto   int      `json:"proto"`       // 能力协议版本（新增字段只增不改）
+	PlanSch int      `json:"plan_schema"` // 支持的 plan.json 结构版本（控制端按此门控派发）
+	Modules []string `json:"modules"`
+}
+
+func (s *Server) handleInfo(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, infoResp{
+		Build:   BuildVersion(),
+		Tier:    buildinfo.Tier,
+		Proto:   1,
+		PlanSch: plan.SchemaVer,
+		Modules: module.Names(),
+	})
+}
+
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	var req ExecReq
 	if err := json.NewDecoder(io.LimitReader(r.Body, s.maxRequestBodyLimit())).Decode(&req); err != nil {
@@ -105,14 +133,21 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// info 只记脚本摘要（字节数 + sha256 前 8 位）：脚本内容常含密码/令牌
-	//（no_log 只遮蔽控制端结果输出，不影响下发脚本），日志会落 stderr /
-	// --log-file / 环形缓冲并可经 /logs 拉取，不得记明文。
-	s.logInfo("exec: %d bytes sha256=%s", len(req.Script), scriptDigest(req.Script))
-	s.logDebug("exec detail: user=%q cwd=%q timeout_ms=%d env=%d", req.BecomeUser, req.Cwd, req.TimeoutMs, len(req.Env))
+	// 日志分级：info 记任务标签 + 脚本首行截断（日志要能直接看出"执行了
+	// 什么"——只有字节数+sha256 的摘要定位不了问题）；debug 记完整脚本与
+	// 执行细节；trace 走 httpdump（敏感字段遮蔽）。首行通常是命令本身，
+	// 深行的令牌不会露出；确有敏感内容时用 --log-level warn 收敛
+	scope := ""
+	if req.Label != "" {
+		scope = "[" + req.Label + "] "
+	}
+	s.logInfo("exec: %s%s (%d bytes, sha256=%s)", scope, scriptPreview(req.Script), len(req.Script), scriptDigest(req.Script))
+	s.logDebug("exec detail: user=%q cwd=%q timeout_ms=%d env=%d\nscript:\n%s", req.BecomeUser, req.Cwd, req.TimeoutMs, len(req.Env), req.Script)
 
+	start := time.Now()
 	resp := RunScript(r.Context(), req)
-	s.logDebug("exec done: code=%d timed_out=%v cancelled=%v stdout=%dB stderr=%dB", resp.Code, resp.TimedOut, resp.Cancelled, len(resp.Stdout), len(resp.Stderr))
+	s.logInfo("exec done: %src=%d in %.1fs (timed_out=%v cancelled=%v)", scope, resp.Code, time.Since(start).Seconds(), resp.TimedOut, resp.Cancelled)
+	s.logDebug("exec done detail: stdout=%dB stderr=%dB", len(resp.Stdout), len(resp.Stderr))
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -122,12 +157,19 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing path parameter", http.StatusBadRequest)
 		return
 	}
+	// mode 严格按八进制权限位解析（与模块层 argMode 同口径）：
+	// Sscanf("%o") 会接受尾随垃圾（"0755abc" 静默按 0755），且无上界，
+	// setgid 等（2755）会被 Perm() 静默剥成错误权限。这里显式拒绝
+	// （400）而非静默改错——mode 经 mTLS 通道下发，合法客户端
+	// （agentc transfer）只发 [0-7]+ 纯八进制数字。
 	mode := fs.FileMode(0o644)
 	if m := r.URL.Query().Get("mode"); m != "" {
-		var n int64
-		if _, err := fmt.Sscanf(m, "%o", &n); err == nil {
-			mode = fs.FileMode(n).Perm()
+		n, err := strconv.ParseUint(m, 8, 32)
+		if err != nil || n > 0o777 {
+			http.Error(w, "invalid mode parameter", http.StatusBadRequest)
+			return
 		}
+		mode = fs.FileMode(n)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		http.Error(w, "failed to create directory: "+err.Error(), http.StatusInternalServerError)

@@ -719,16 +719,20 @@ func TestExecAndRunMTLS(t *testing.T) {
 		t.Fatalf("mTLS 探活应 online/https: %+v", pr)
 	}
 
-	// 远程执行（曾因明文 HTTP 对 TLS 监听返回 400）
+	// 远程执行（曾因明文 HTTP 对 TLS 监听返回 400）。POST 立即返回
+	// run_id，结果在后台落库——等待收尾后核对任务明细
 	rec = do(t, h, "POST", "/api/exec", map[string]any{"host_ids": []int64{1}, "script": "echo mtls-exec-ok"}, &token)
 	var er struct {
-		OK      int              `json:"ok"`
-		Failed  int              `json:"failed"`
-		Results []ExecHostResult `json:"results"`
+		RunID int64 `json:"run_id"`
 	}
 	json.Unmarshal(rec.Body.Bytes(), &er)
-	if er.OK != 1 || er.Results[0].Err != "" || !strings.Contains(er.Results[0].Stdout, "mtls-exec-ok") {
-		t.Fatalf("mTLS 远程执行应成功: %s", rec.Body)
+	erun := waitExecRun(t, st, er.RunID)
+	if erun.Status != "succeeded" {
+		t.Fatalf("mTLS 远程执行应成功: %+v (%s)", erun, rec.Body)
+	}
+	etasks, _ := st.RunTasks(er.RunID)
+	if len(etasks) != 1 || etasks[0].Status != "ok" || !strings.Contains(etasks[0].Detail, "mtls-exec-ok") {
+		t.Fatalf("mTLS 远程执行输出异常: %+v", etasks)
 	}
 
 	// 应用执行（曾经报 agent health check failed: HTTP 400）
@@ -774,6 +778,25 @@ func TestExecAndRunMTLS(t *testing.T) {
 	}
 }
 
+// waitExecRun 等待后台 exec run 收尾（POST /api/exec 立即返回 run_id，
+// 结果经 SSE 流与 run_tasks 落库交付），返回终态 run。
+func waitExecRun(t *testing.T, st *store.Store, runID int64) *store.Run {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		run, err := st.GetRun(runID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.Status != "running" && run.Status != "queued" {
+			return run
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("exec run 未在期限内收尾")
+	return nil
+}
+
 // TestExecAPIE2E 远程命令执行（进程内 agent）。
 func TestExecAPIE2E(t *testing.T) {
 	s, st := newAppServer(t, 18762)
@@ -789,17 +812,19 @@ func TestExecAPIE2E(t *testing.T) {
 		t.Fatalf("exec 应 200: %d %s", rec.Code, rec.Body)
 	}
 	var resp struct {
-		RunID   int64            `json:"run_id"`
-		OK      int              `json:"ok"`
-		Results []ExecHostResult `json:"results"`
+		RunID int64 `json:"run_id"`
 	}
 	json.Unmarshal(rec.Body.Bytes(), &resp)
-	if resp.OK != 1 || len(resp.Results) != 1 || resp.Results[0].Code != 0 || !strings.Contains(resp.Results[0].Stdout, "remote-ok") {
-		t.Fatalf("exec 结果异常: %s", rec.Body)
+	if resp.RunID <= 0 {
+		t.Fatalf("exec 应返回 run_id: %s", rec.Body)
 	}
-	run, _ := st.GetRun(resp.RunID)
+	run := waitExecRun(t, st, resp.RunID)
 	if run == nil || run.Status != "succeeded" || run.Kind != "exec" {
 		t.Fatalf("exec run 记录异常: %+v", run)
+	}
+	tasks, _ := st.RunTasks(resp.RunID)
+	if len(tasks) != 1 || tasks[0].Status != "ok" || !strings.Contains(tasks[0].Detail, "remote-ok") {
+		t.Fatalf("exec 任务明细异常: %+v", tasks)
 	}
 	// 空 script 拒绝
 	req = httptest.NewRequest("POST", "/api/exec", strings.NewReader(`{"host_ids":[1],"script":""}`))

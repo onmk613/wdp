@@ -122,6 +122,8 @@ type RunContext struct {
 	// 无法保证预演安全），避免 --check 意外执行第三方脚本造成变更。
 	CheckScriptAllowed bool
 	Rollback           *RollbackCtx // auto_rollback 时的变更日志（nil = 不记录）
+	// TaskLabel 任务名（agent 日志呈现用；executor 从 task.Label() 注入）
+	TaskLabel string
 }
 
 // engine 返回渲染引擎：Engine 为 nil 时回退默认引擎（template/systemd_unit/
@@ -140,7 +142,7 @@ func (rc *RunContext) exec(script string) (conn.ExecResult, *Result) {
 
 // execWithEnv 在 exec 基础上追加/覆盖环境变量（脚本模块注入 WDP_* 变量用）。
 func (rc *RunContext) execWithEnv(script string, extra map[string]string) (conn.ExecResult, *Result) {
-	req := conn.ExecRequest{Script: script, TimeoutMs: rc.TimeoutMs}
+	req := conn.ExecRequest{Script: script, TimeoutMs: rc.TimeoutMs, Label: rc.TaskLabel}
 	if len(rc.Env)+len(extra) > 0 {
 		env := map[string]string{}
 		maps.Copy(env, rc.Env)

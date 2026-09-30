@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"wdp/internal/i18n"
 )
 
 func init() {
@@ -17,7 +18,7 @@ type FetchModule struct{}
 func (m *FetchModule) Name() string { return "fetch" }
 
 func (m *FetchModule) Desc() string {
-	return "fetch remote files to the local side"
+	return i18n.T("Pull remote files back to the local machine (written inside the chart/playbook directory)", "拉取远端文件回本地（落盘在 chart/playbook 目录内）")
 }
 
 // Run 拉取远端文件到本地（sha256 幂等：本地已是同内容则跳过下载）。
@@ -129,16 +130,20 @@ func isDirLocal(p string) bool {
 
 func (m *FetchModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "src", Type: "string", Desc: "remote source file path (required)"},
-		{Name: "dest", Type: "string", Desc: "local destination directory (required; resolved within the chart/playbook dir — absolute paths and .. escapes are refused)"},
-		{Name: "flat", Type: "bool", Default: "false", Desc: "false stores under dest/<host>/<path>; true flattens to dest/<filename>"},
+		{Name: "src", Type: "string", Desc: i18n.T("remote source file path (required)", "远端源文件路径（必填）")},
+		{Name: "dest", Type: "string", Desc: i18n.T("local destination directory (required; confined to the chart/playbook directory — absolute paths and .. escapes are rejected)", "本地目标目录（必填；限 chart/playbook 目录内——绝对路径与 .. 逃逸均拒绝）")},
+		{Name: "flat", Type: "bool", Default: "false", Desc: i18n.T("false stores as dest/<host>/<path>; true flattens to dest/<file name>", "false 按 dest/<主机>/<路径> 存放；true 拍平为 dest/<文件名>")},
 	}
 }
 
 func (m *FetchModule) Example() string {
-	return `- name: collect logs from each host
+	return i18n.T(`- name: Collect logs from every host
   fetch:
     src: /var/log/app/error.log
     dest: ./logs
-`
+`, `- name: 收集各主机日志
+  fetch:
+    src: /var/log/app/error.log
+    dest: ./logs
+`)
 }

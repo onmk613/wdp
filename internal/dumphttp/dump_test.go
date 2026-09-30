@@ -102,10 +102,9 @@ func TestRequestRedactsSensitiveHeaders(t *testing.T) {
 		}
 	}
 
-	resp := Response(http.StatusOK, r.Header.Clone(), []byte(`{"ok":true}`), false)
 	h := http.Header{}
 	h.Add("Set-Cookie", "token=resp-session-token; Path=/")
-	resp = Response(http.StatusOK, h, []byte(`{}`), false)
+	resp := Response(http.StatusOK, h, []byte(`{}`), false)
 	if strings.Contains(resp, "resp-session-token") {
 		t.Fatalf("Set-Cookie 值应被遮蔽: %s", resp)
 	}

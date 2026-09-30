@@ -168,6 +168,30 @@ func argMode(args map[string]any, key string) (fs.FileMode, bool) {
 	}
 }
 
+// LintBareCall 校验「模块键下没有任何参数」的任务写法（lint 期，参数未
+// 渲染）：声明了参数元数据的内置模块，空调用在运行期必然失败（set_fact
+// 至少一对键值、copy 缺 path、shell 缺命令……），提前到保存/校验期报出，
+// 而不是等 run 在全部主机上失败后才暴露。
+//
+// 豁免：参数表声明 "(no arguments)" 的模块（setup 显式声明合法裸调用）；
+// 无参数元数据的模块（未实现完整 UsageProvider，如 debug）与脚本模块
+// （调用方拿到 nil Module）不判定。
+func LintBareCall(m Module, args map[string]any, free string) error {
+	params := Usage(m)
+	if params == nil || len(args) > 0 || free != "" {
+		return nil
+	}
+	for _, p := range params {
+		switch p.Name {
+		case "(no arguments)":
+			return nil
+		case "(any)":
+			return fmt.Errorf("module %s requires at least one key/value pair", m.Name())
+		}
+	}
+	return fmt.Errorf("module %s is called with no parameters (see module docs)", m.Name())
+}
+
 // ValidateArgs 在模块派发前校验任务参数（executor 调用）：
 //   - 未知键直接报错（附相似键建议）——杜绝 moed/ownerr 之类拼写错误静默失效；
 //   - bool 类型参数拒绝无法解析的值（如 "maybe"）；

@@ -14,6 +14,26 @@ import (
 // ---- 应用 CRUD ----
 
 func (s *Server) handleListApps(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Has("page") || r.URL.Query().Has("page_size") {
+		pp := parsePage(r)
+		items, total, err := s.st.ListAppsPage(r.URL.Query().Get("q"), pp.Page, pp.PageSize)
+		if err != nil {
+			s.writeInternal(w, err)
+			return
+		}
+		p := s.permsOf(permUser(r))
+		if !p.global[verbAppView] {
+			out := items[:0]
+			for _, a := range items {
+				if p.canApp(verbAppView, a.Pools, a.Groups, a.Labels) {
+					out = append(out, a)
+				}
+			}
+			items = out
+		}
+		writeJSON(w, http.StatusOK, pagedResp[*store.App]{Items: items, Total: total, Page: pp.Page, PageSize: pp.PageSize})
+		return
+	}
 	apps, err := s.st.ListApps()
 	if err != nil {
 		s.writeInternal(w, err)

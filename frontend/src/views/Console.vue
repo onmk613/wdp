@@ -57,6 +57,7 @@ const titleMap: Record<string, string> = {
   groups: '组管理',
   labels: '标签管理',
   users: '用户与权限',
+  settings: '系统设置',
 }
 const pageTitle = computed(() => titleMap[String(route.name)] || activeMenu.value)
 
@@ -123,6 +124,9 @@ async function logout() {
           <el-menu-item index="groups">组管理</el-menu-item>
           <el-menu-item index="labels">标签管理</el-menu-item>
         </el-sub-menu>
+        <el-menu-item v-if="authPerms.role === 'admin'" index="settings">
+          系统设置
+        </el-menu-item>
         <el-menu-item v-if="can('user:manage')" index="users">
           <el-icon><UserFilled /></el-icon><span>用户与权限</span>
         </el-menu-item>

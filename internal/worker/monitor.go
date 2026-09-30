@@ -161,14 +161,43 @@ type Monitor struct {
 	Logger *slog.Logger
 	Fetch  func(ctx context.Context, h *store.Host) (string, error)
 
+	// Thresholds 告警阈值回调（warn/crit 百分比），设置页在线可改：
+	// 返回 (0,0) 或 nil 回落内置默认。fs 的 warn 按既有口径放宽 3 个
+	// 百分点（88 对 85），联动由 thresholds() 统一推导。
+	Thresholds func() (warn, crit int)
+	// RetainDays 指标保留天数回调（<=0 = 默认 30 天），同上可在线改。
+	RetainDays func() int
+
 	states sync.Map // hostID → *scrapeState
+}
+
+// thresholds 生效阈值：回调给出合法值（0 < warn < crit）用之，否则默认。
+func (m *Monitor) thresholds() (warn, crit, warnFS int) {
+	if m.Thresholds != nil {
+		if w, c := m.Thresholds(); w > 0 && c > w {
+			if fs := w + 3; fs < c {
+				return w, c, fs
+			}
+			return w, c, c // 放宽后越界（warn+3 ≥ crit）：fs 与 crit 对齐
+		}
+	}
+	return warnPct, critPct, warnFsPct
+}
+
+func (m *Monitor) retainDays() int {
+	if m.RetainDays != nil {
+		if d := m.RetainDays(); d > 0 {
+			return d
+		}
+	}
+	return 30
 }
 
 // Forget 主机删除时清理差分快照（防下一台同 ID 主机拿到旧计数器算出
 // 负速率）。
 func (m *Monitor) Forget(hostID int64) { m.states.Delete(hostID) }
 
-// Run 阻塞执行采样循环：每分钟采样一轮，每小时清理 30 天前的桶。
+// Run 阻塞执行采样循环：每分钟采样一轮，每小时按保留天数清桶。
 func (m *Monitor) Run(ctx context.Context) {
 	m.scrapeOnce(ctx) // 启动即先采一轮
 	t := time.NewTicker(time.Minute)
@@ -182,7 +211,7 @@ func (m *Monitor) Run(ctx context.Context) {
 		case <-t.C:
 			m.scrapeOnce(ctx)
 		case <-prune.C:
-			if err := m.Store.PruneMetrics(time.Now().Add(-30 * 24 * time.Hour).Unix()); err != nil {
+			if err := m.Store.PruneMetrics(time.Now().AddDate(0, 0, -m.retainDays()).Unix()); err != nil {
 				m.Logger.Warn("metrics prune failed", "err", err)
 			}
 		}
@@ -388,24 +417,25 @@ const (
 // pctLabel 生成告警文案里的阈值表示（如 "≥95%"）。
 func pctLabel(p int) string { return fmt.Sprintf("≥%d%%", p) }
 
-// alarm 评估阈值并写/清告警（crit ≥critPct、warn ≥warnPct）。
+// alarm 评估阈值并写/清告警（crit ≥crit、warn ≥warn）。
 func (m *Monitor) alarm(hostID int64, kind string, v float64, what, human string) {
+	warn, crit, _ := m.thresholds()
 	set := func(level string) {
-		if err := m.Store.SetHostAlert(hostID, kind, level, fmt.Sprintf("%s %s（阈值 %s）", what, human, map[string]string{"crit": pctLabel(critPct), "warn": pctLabel(warnPct)}[level]), v); err != nil {
+		if err := m.Store.SetHostAlert(hostID, kind, level, fmt.Sprintf("%s %s（阈值 %s）", what, human, map[string]string{"crit": pctLabel(crit), "warn": pctLabel(warn)}[level]), v); err != nil {
 			m.Logger.Warn("alert set failed", "err", err)
 		}
 	}
 	switch {
-	case v >= critPct:
+	case v >= float64(crit):
 		set("crit")
-	case v >= warnPct:
+	case v >= float64(warn):
 		set("warn")
 	default:
 		_ = m.Store.ClearHostAlert(hostID, kind)
 	}
 }
 
-// alarmFS 文件系统阈值（crit ≥critPct、warn ≥warnFsPct）：任一挂载点超
+// alarmFS 文件系统阈值（crit ≥crit、warn ≥warnFS）：任一挂载点超
 // 阈值即告警（detail 取最严重挂载点——alert 粒度按主机），全部正常才清。
 func (m *Monitor) alarmFS(hostID int64, mounts []fsUsage) {
 	var worst fsUsage
@@ -414,15 +444,16 @@ func (m *Monitor) alarmFS(hostID int64, mounts []fsUsage) {
 			worst = mnt
 		}
 	}
+	_, crit, warnFS := m.thresholds()
 	set := func(level string) {
-		if err := m.Store.SetHostAlert(hostID, "fs", level, fmt.Sprintf("挂载点 %s 使用率 %.1f%%（阈值 %s）", worst.mount, worst.pct, map[string]string{"crit": pctLabel(critPct), "warn": pctLabel(warnFsPct)}[level]), worst.pct); err != nil {
+		if err := m.Store.SetHostAlert(hostID, "fs", level, fmt.Sprintf("挂载点 %s 使用率 %.1f%%（阈值 %s）", worst.mount, worst.pct, map[string]string{"crit": pctLabel(crit), "warn": pctLabel(warnFS)}[level]), worst.pct); err != nil {
 			m.Logger.Warn("alert set failed", "err", err)
 		}
 	}
 	switch {
-	case worst.pct >= critPct:
+	case worst.pct >= float64(crit):
 		set("crit")
-	case worst.pct >= warnFsPct:
+	case worst.pct >= float64(warnFS):
 		set("warn")
 	default:
 		_ = m.Store.ClearHostAlert(hostID, "fs")

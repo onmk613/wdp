@@ -75,6 +75,10 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 
 	ch := s.runs.subscribe()
 	defer s.runs.unsubscribe(ch)
+	// 可见性上下文在订阅期解析一次（run:view 作用域裁剪，与列表/详情
+	// 同口径）；授权变更在客户端重连后生效——SSE 事件只带 id/status/
+	// summary，粒度上没有比详情端点更多的泄露面
+	vc := s.runViewCtxOf(r)
 	enc := json.NewEncoder(w)
 	heartbeat := time.NewTicker(15 * time.Second)
 	defer heartbeat.Stop()
@@ -88,6 +92,12 @@ func (s *Server) handleRunStream(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case e := <-ch:
+			if !vc.unrestricted {
+				run, err := s.st.GetRun(e.ID)
+				if err != nil || !vc.runVisible(run) {
+					continue // 作用域外的 run 不推送（拉取兜底同受裁剪）
+				}
+			}
 			if _, err := w.Write([]byte("event: run\ndata: ")); err != nil {
 				return
 			}

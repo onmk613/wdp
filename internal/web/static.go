@@ -73,7 +73,9 @@ func indexAsset() ([]byte, string) {
 // 单页必须每次协商（no-cache + ETag）：它引用带哈希的资源文件名，允许
 // 被缓存会让升级后的浏览器继续跑旧 bundle。
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	if p := r.URL.Path; strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/enroll/") {
+	// /charts/* 同样不回退：仓库路径拼错时 SPA 的 index.html 会以 200
+	// 返回，CLI 拿到 HTML 还当成功下载（digest 必错），错误面目全非
+	if p := r.URL.Path; strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/enroll/") || strings.HasPrefix(p, "/charts/") {
 		http.NotFound(w, r)
 		return
 	}

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -28,26 +29,26 @@ type UserModule struct{}
 func (m *UserModule) Name() string { return "user" }
 
 func (m *UserModule) Desc() string {
-	return "manage system users (create/delete/attribute correction)"
+	return i18n.T("Manage system users (create/remove/correct attribute drift)", "管理系统用户（创建/删除/属性漂移校正）")
 }
 
 func (m *UserModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "name", Type: "string", Desc: "user name"},
-		{Name: "state", Type: "string", Default: "present", Enum: userStates, Desc: "present creates/fixes drift; absent removes (including home)"},
-		{Name: "uid", Type: "int", Desc: "UID (drift on existing users is fixed via usermod -u)"},
-		{Name: "group", Type: "string", Desc: "primary group (drift fixed via usermod -g)"},
-		{Name: "groups", Type: "list", Desc: "supplementary groups (drift replaced via usermod -G; append: true uses -aG to add only)"},
-		{Name: "append", Type: "bool", Default: "false", Desc: "append to groups only, never remove existing membership (usermod -aG)"},
-		{Name: "shell", Type: "string", Enum: commonShells, Desc: "login shell (drift fixed via usermod -s; enum values are suggestions, any path accepted)"},
-		{Name: "home", Type: "string", Desc: "home directory (drift migrated via usermod -d -m)"},
-		{Name: "system", Type: "bool", Default: "false", Desc: "create as a system account (useradd -r, only at creation)"},
-		{Name: "password", Type: "string", Desc: "crypt hash (useradd -p, only at creation; change an existing user's password via the shell module)"},
+		{Name: "name", Type: "string", Desc: i18n.T("user name", "用户名")},
+		{Name: "state", Type: "string", Default: "present", Enum: userStates, Desc: i18n.T("present creates/corrects drift; absent removes the user (together with its home directory)", "present 创建/校正漂移；absent 删除（连主目录一起）")},
+		{Name: "uid", Type: "int", Desc: i18n.T("UID (drift on an existing user is corrected via usermod -u)", "UID（已有用户的漂移经 usermod -u 校正）")},
+		{Name: "group", Type: "string", Desc: i18n.T("primary group (drift corrected via usermod -g)", "主组（漂移经 usermod -g 校正）")},
+		{Name: "groups", Type: "list", Desc: i18n.T("supplementary groups (drift replaces the whole set via usermod -G; with append: true, -aG only adds)", "附加组（漂移经 usermod -G 整体替换；append: true 时用 -aG 只增不减）")},
+		{Name: "append", Type: "bool", Default: "false", Desc: i18n.T("append supplementary groups only, without removing existing memberships (usermod -aG)", "只追加附加组，不移除既有成员关系（usermod -aG）")},
+		{Name: "shell", Type: "string", Enum: commonShells, Desc: i18n.T("login shell (drift corrected via usermod -s; the enum is only a suggestion, any path is accepted)", "登录 shell（漂移经 usermod -s 校正；枚举仅为建议值，任意路径都接受）")},
+		{Name: "home", Type: "string", Desc: i18n.T("home directory (drift migrated via usermod -d -m)", "主目录（漂移经 usermod -d -m 迁移）")},
+		{Name: "system", Type: "bool", Default: "false", Desc: i18n.T("create as a system account (useradd -r, applies on creation only)", "创建为系统账号（useradd -r，仅创建时生效）")},
+		{Name: "password", Type: "string", Desc: i18n.T("crypt hash (useradd -p, applies on creation only; use the shell module to change an existing user's password)", "crypt 哈希（useradd -p，仅创建时生效；改已有用户口令请用 shell 模块）")},
 	}
 }
 
 func (m *UserModule) Example() string {
-	return `# create a deploy user and add it to the docker group
+	return i18n.T(`# create the deploy user and add it to the docker group
 - name: create the deploy user
   become: true
   user:
@@ -56,19 +57,40 @@ func (m *UserModule) Example() string {
     home: /home/deploy
     groups: [docker]
 
-# fix drift (usermod only runs when uid/shell/groups changed)
-- name: fix the app user shell
+# correct drift (usermod runs only when uid/shell/groups change)
+- name: correct the app user's shell
   become: true
   user:
     name: app
     shell: /bin/bash
 
-# remove a user (including home; not rollback-able)
-- name: remove a departed account
+# remove the user (together with the home directory; no automatic rollback)
+- name: remove the departed account
   become: true
   user:
     name: leaver
-    state: absent`
+    state: absent`, `# 创建部署用户并加入 docker 组
+- name: 创建 deploy 用户
+  become: true
+  user:
+    name: deploy
+    shell: /sbin/nologin
+    home: /home/deploy
+    groups: [docker]
+
+# 校正漂移（uid/shell/groups 变化时才跑 usermod）
+- name: 校正 app 用户的 shell
+  become: true
+  user:
+    name: app
+    shell: /bin/bash
+
+# 删除用户（连主目录；不可自动回滚）
+- name: 删除离职账号
+  become: true
+  user:
+    name: leaver
+    state: absent`)
 }
 
 // userReq 是 user 模块解析后的参数。

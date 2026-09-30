@@ -28,3 +28,25 @@ func darwinBootSecs() (uint64, bool) {
 	}
 	return binary.LittleEndian.Uint64([]byte(b[:8])), true
 }
+
+// darwinLoadavg 解 vm.loadavg 的二进制 struct loadavg：3×fixpt_t
+// （uint32 LE，1/5/15 分钟）+ 对齐填充 + long fscale。实测 arm64 返回
+// 23 字节（int64 fscale 的末位零被截去）：fscale 从偏移 16 起零填充读
+// （小端缺的是高位零，补零无损）。fscale 非正/长度不足按未支持处理，
+// 采集器输出空集不报错。
+func darwinLoadavg() (l1, l5, l15 float64, ok bool) {
+	s, err := unix.Sysctl("vm.loadavg")
+	if err != nil || len(s) < 20 {
+		return 0, 0, 0, false
+	}
+	b := []byte(s)
+	var fsb [8]byte
+	copy(fsb[:], b[16:])
+	fscale := float64(binary.LittleEndian.Uint64(fsb[:]))
+	if fscale <= 0 {
+		return 0, 0, 0, false
+	}
+	return float64(binary.LittleEndian.Uint32(b[0:4])) / fscale,
+		float64(binary.LittleEndian.Uint32(b[4:8])) / fscale,
+		float64(binary.LittleEndian.Uint32(b[8:12])) / fscale, true
+}

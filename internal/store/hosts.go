@@ -22,9 +22,14 @@ type Host struct {
 	Groups     []string // 多值：同上
 	Labels     string   // JSON 对象（天然多值）
 	Status     string
-	LastSeenAt string
-	CreatedAt  string
-	UpdatedAt  string
+	AgentBuild string // 最近一次在线探活上报的 build（升级门控用；离线不清空=保留最后已知）
+	// AgentModules 是 agent /info 上报的内置模块集（JSON 数组串；'' = 未知
+	// ——老 agent 无该端点或尚未探活。执行受理期与应用版本的模块清单对账，
+	// 缺模块在受理期拒绝，未知按放行兼容存量）。
+	AgentModules string
+	LastSeenAt   string
+	CreatedAt    string
+	UpdatedAt    string
 	// AllowPlaintext 声明该主机的 agent 未启用 mTLS（明文 HTTP，仅限可信
 	// 内网）。默认 false：CA 启用时一律按 mTLS 建连，避免"探测失败即降级
 	// 明文"这种可被中间人触发的通道降级。
@@ -49,13 +54,11 @@ func (s *Store) CreateHost(h *Host) (int64, error) {
 	var id int64
 	// 台账行与池/组归属同事务：中途失败不留无归属（或归属半截）的行
 	err := s.tx(func(q execer) error {
-		res, err := q.Exec(`INSERT INTO hosts (name, address, agent_port, labels, status, created_at, updated_at, allow_plaintext)
+		var err error
+		id, err = s.lastInsertID(q, `INSERT INTO hosts (name, address, agent_port, labels, status, created_at, updated_at, allow_plaintext)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			h.Name, h.Address, h.AgentPort, h.Labels, h.Status, h.CreatedAt, h.UpdatedAt, boolInt(h.AllowPlaintext))
 		if err != nil {
-			return err
-		}
-		if id, err = res.LastInsertId(); err != nil {
 			return err
 		}
 		if err := setHostPools(q, id, h.Pools); err != nil {
@@ -134,7 +137,9 @@ func (s *Store) UpdateHost(id int64, h *Host) error {
 	})
 }
 
-// DeleteHost 删除主机（连同池/组归属映射同事务清理）。
+// DeleteHost 删除主机（连同池/组归属、告警与指标同事务清理——
+// host_alerts/metrics_5m 无时间清理通道，残留行会以空 HostName 永久
+// 留在告警面板并持续膨胀指标表）。
 func (s *Store) DeleteHost(id int64) error {
 	return s.tx(func(q execer) error {
 		res, err := q.Exec(`DELETE FROM hosts WHERE id = ?`, id)
@@ -148,14 +153,20 @@ func (s *Store) DeleteHost(id int64) error {
 		if _, err := q.Exec(`DELETE FROM host_pools WHERE host_id = ?`, id); err != nil {
 			return err
 		}
-		_, err = q.Exec(`DELETE FROM host_group_map WHERE host_id = ?`, id)
+		if _, err := q.Exec(`DELETE FROM host_group_map WHERE host_id = ?`, id); err != nil {
+			return err
+		}
+		if _, err := q.Exec(`DELETE FROM host_alerts WHERE host_id = ?`, id); err != nil {
+			return err
+		}
+		_, err = q.Exec(`DELETE FROM metrics_5m WHERE host_id = ?`, id)
 		return err
 	})
 }
 
 // GetHost 按 id 查询。
 func (s *Store) GetHost(id int64) (*Host, error) {
-	row := s.db.QueryRow(`SELECT id, name, address, agent_port, labels, status, last_seen_at, created_at, updated_at, allow_plaintext,
+	row := s.queryRow(`SELECT id, name, address, agent_port, labels, status, agent_build, agent_modules, last_seen_at, created_at, updated_at, allow_plaintext,
 		(SELECT COALESCE(group_concat(pool, ','), '') FROM host_pools WHERE host_id = hosts.id),
 		(SELECT COALESCE(group_concat(group_name, ','), '') FROM host_group_map WHERE host_id = hosts.id)
 		FROM hosts WHERE id = ?`, id)
@@ -175,6 +186,41 @@ func (s *Store) ListHosts(q string) ([]*Host, error) {
 		like, like, like, like, like)
 }
 
+// ListHostsPage 分页台账（q 过滤在全量上生效后分页；返回条目与过滤后
+// 总数——搜索面向全部数据，total 是命中总数而非当前页行数）。
+func (s *Store) ListHostsPage(q string, page, size int) ([]*Host, int64, error) {
+	where, args := "", []any{}
+	if q = strings.TrimSpace(q); q != "" {
+		like := "%" + escapeLike(q) + "%"
+		where = ` WHERE name LIKE ? ESCAPE '\' OR address LIKE ? ESCAPE '\' OR labels LIKE ? ESCAPE '\'
+		OR EXISTS (SELECT 1 FROM host_pools hp WHERE hp.host_id = hosts.id AND hp.pool LIKE ? ESCAPE '\')
+		OR EXISTS (SELECT 1 FROM host_group_map hg WHERE hg.host_id = hosts.id AND hg.group_name LIKE ? ESCAPE '\')`
+		args = append(args, like, like, like, like, like)
+	}
+	var total int64
+	if err := s.queryRow(`SELECT COUNT(*) FROM hosts`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	sqlStr := `SELECT id, name, address, agent_port, labels, status, agent_build, agent_modules, last_seen_at, created_at, updated_at, allow_plaintext,
+		(SELECT COALESCE(group_concat(pool, ','), '') FROM host_pools WHERE host_id = hosts.id),
+		(SELECT COALESCE(group_concat(group_name, ','), '') FROM host_group_map WHERE host_id = hosts.id)
+		FROM hosts` + where + ` ORDER BY name LIMIT ? OFFSET ?`
+	rows, err := s.query(sqlStr, append(args, size, (page-1)*size)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []*Host{}
+	for rows.Next() {
+		h, err := scanHostMulti(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, h)
+	}
+	return out, total, rows.Err()
+}
+
 // escapeLike 转义 LIKE 通配符（%/_/\），配合 ESCAPE '\' 使用：不转义时
 // 搜索串里的元字符会意外全匹配/单字符通配。
 func escapeLike(s string) string {
@@ -185,7 +231,7 @@ func escapeLike(s string) string {
 // （后者把 pool/group/hosts 选择器下推到 SQL，避免"全表扫 + Go 侧逐行
 // 过滤"——权限解析每个请求都会走这里，主机上千台后是热点）。
 func (s *Store) listHostsWhere(where string, args ...any) ([]*Host, error) {
-	sqlStr := `SELECT id, name, address, agent_port, labels, status, last_seen_at, created_at, updated_at, allow_plaintext,
+	sqlStr := `SELECT id, name, address, agent_port, labels, status, agent_build, agent_modules, last_seen_at, created_at, updated_at, allow_plaintext,
 		(SELECT COALESCE(group_concat(pool, ','), '') FROM host_pools WHERE host_id = hosts.id),
 		(SELECT COALESCE(group_concat(group_name, ','), '') FROM host_group_map WHERE host_id = hosts.id)
 		FROM hosts`
@@ -193,7 +239,7 @@ func (s *Store) listHostsWhere(where string, args ...any) ([]*Host, error) {
 		sqlStr += " WHERE " + where
 	}
 	sqlStr += ` ORDER BY name`
-	rows, err := s.db.Query(sqlStr, args...)
+	rows, err := s.query(sqlStr, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -209,21 +255,27 @@ func (s *Store) listHostsWhere(where string, args ...any) ([]*Host, error) {
 	return out, rows.Err()
 }
 
-// SetHostStatus 探活循环写回状态与最近在线时刻。
-func (s *Store) SetHostStatus(id int64, status string) error {
+// SetHostStatus 探活写回状态/最近在线/agent 版本。build 为空 = 旧版
+// agent 未上报（保留库内最后已知值，不清空——离线主机的版本仍有意义）。
+func (s *Store) SetHostStatus(id int64, status, build, modules string) error {
 	lastSeen := ""
 	if status == "online" {
 		lastSeen = nowUTC()
 	}
-	_, err := s.db.Exec(`UPDATE hosts SET status = ?, last_seen_at = CASE WHEN ? = 'online' THEN ? ELSE last_seen_at END, updated_at = ? WHERE id = ?`,
-		status, status, lastSeen, nowUTC(), id)
+	// modules 为空串 = agent 未上报 /info（老版本或抓取失败）：保留库内
+	// 最后已知值，与 build 同口径（离线不清空，最后已知集仍有意义）
+	_, err := s.exec(`UPDATE hosts SET status = ?,
+			agent_build = CASE WHEN ? != '' THEN ? ELSE agent_build END,
+			agent_modules = CASE WHEN ? != '' THEN ? ELSE agent_modules END,
+			last_seen_at = CASE WHEN ? = 'online' THEN ? ELSE last_seen_at END, updated_at = ? WHERE id = ?`,
+		status, build, build, modules, modules, status, lastSeen, nowUTC(), id)
 	return err
 }
 
 // GetHostByName 按台账名查主机（不存在返回 ErrNotFound）。纳管 claim 的
 // 主机名碰撞校验用。
 func (s *Store) GetHostByName(name string) (*Host, error) {
-	row := s.db.QueryRow(`SELECT id, name, address, agent_port, labels, status, last_seen_at, created_at, updated_at, allow_plaintext,
+	row := s.queryRow(`SELECT id, name, address, agent_port, labels, status, agent_build, agent_modules, last_seen_at, created_at, updated_at, allow_plaintext,
 		(SELECT COALESCE(group_concat(pool, ','), '') FROM host_pools WHERE host_id = hosts.id),
 		(SELECT COALESCE(group_concat(group_name, ','), '') FROM host_group_map WHERE host_id = hosts.id)
 		FROM hosts WHERE name = ?`, name)
@@ -240,27 +292,28 @@ func (s *Store) UpsertHostByName(name, address string, agentPort int) (int64, er
 		agentPort = 7602
 	}
 	var id int64
-	err := s.db.QueryRow(`SELECT id FROM hosts WHERE name = ?`, name).Scan(&id)
+	err := s.queryRow(`SELECT id FROM hosts WHERE name = ?`, name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		res, ierr := s.db.Exec(`INSERT INTO hosts (name, address, agent_port, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+		// 自增回读走方言：PG 驱动不支持 LastInsertId，用 RETURNING id
+		id, ierr := s.lastInsertID(s.rawExecer(), `INSERT INTO hosts (name, address, agent_port, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
 			name, address, agentPort, nowUTC(), nowUTC())
 		if ierr != nil {
 			// SELECT 与 INSERT 之间被并发同名纳管抢先：重读既有行返回
 			// （幂等语义），不把裸唯一约束错抛给调用方
-			if !isUniqueErr(ierr) {
+			if !s.isUniqueErr(ierr) {
 				return 0, ierr
 			}
-			if rerr := s.db.QueryRow(`SELECT id FROM hosts WHERE name = ?`, name).Scan(&id); rerr != nil {
+			if rerr := s.queryRow(`SELECT id FROM hosts WHERE name = ?`, name).Scan(&id); rerr != nil {
 				return 0, ierr
 			}
 			return id, nil
 		}
-		return res.LastInsertId()
+		return id, nil
 	}
 	if err != nil {
 		return 0, err
 	}
-	res, err := s.db.Exec(`UPDATE hosts SET address = ?, agent_port = ?, updated_at = ? WHERE id = ?`, address, agentPort, nowUTC(), id)
+	res, err := s.exec(`UPDATE hosts SET address = ?, agent_port = ?, updated_at = ? WHERE id = ?`, address, agentPort, nowUTC(), id)
 	if err != nil {
 		return 0, err
 	}
@@ -274,7 +327,7 @@ func (s *Store) UpsertHostByName(name, address string, agentPort int) (int64, er
 
 // HostIDs 返回全部主机 id（探活遍历）。
 func (s *Store) HostIDs() ([]int64, error) {
-	rows, err := s.db.Query(`SELECT id FROM hosts`)
+	rows, err := s.query(`SELECT id FROM hosts`)
 	if err != nil {
 		return nil, err
 	}
@@ -305,7 +358,7 @@ func scanHostMulti(row rowScanner) (*Host, error) {
 	h := &Host{}
 	var pools, groups string
 	var plaintext int
-	err := row.Scan(&h.ID, &h.Name, &h.Address, &h.AgentPort, &h.Labels, &h.Status, &h.LastSeenAt, &h.CreatedAt, &h.UpdatedAt, &plaintext, &pools, &groups)
+	err := row.Scan(&h.ID, &h.Name, &h.Address, &h.AgentPort, &h.Labels, &h.Status, &h.AgentBuild, &h.AgentModules, &h.LastSeenAt, &h.CreatedAt, &h.UpdatedAt, &plaintext, &pools, &groups)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

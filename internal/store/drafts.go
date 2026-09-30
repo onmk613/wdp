@@ -21,7 +21,7 @@ type AppDraft struct {
 
 // GetAppDraft 取草稿（不存在返回 ErrNotFound）。
 func (s *Store) GetAppDraft(userID int64, appKey string) (*AppDraft, error) {
-	row := s.db.QueryRow(`SELECT user_id, app_key, base_version, payload, updated_at
+	row := s.queryRow(`SELECT user_id, app_key, base_version, payload, updated_at
 		FROM app_drafts WHERE user_id = ? AND app_key = ?`, userID, appKey)
 	d := &AppDraft{}
 	err := row.Scan(&d.UserID, &d.AppKey, &d.BaseVersion, &d.Payload, &d.UpdatedAt)
@@ -36,7 +36,7 @@ func (s *Store) GetAppDraft(userID int64, appKey string) (*AppDraft, error) {
 
 // PutAppDraft 写草稿（同键覆盖）。
 func (s *Store) PutAppDraft(d *AppDraft) error {
-	_, err := s.db.Exec(`INSERT INTO app_drafts (user_id, app_key, base_version, payload, updated_at)
+	_, err := s.exec(`INSERT INTO app_drafts (user_id, app_key, base_version, payload, updated_at)
 		VALUES (?, ?, ?, ?, ?)
 		ON CONFLICT(user_id, app_key) DO UPDATE SET
 		  base_version = excluded.base_version,
@@ -49,7 +49,7 @@ func (s *Store) PutAppDraft(d *AppDraft) error {
 // ListAppDrafts 列用户的全部草稿（不含 payload 正文，草稿箱列表用），
 // 按暂存时间倒序。
 func (s *Store) ListAppDrafts(userID int64) ([]*AppDraft, error) {
-	rows, err := s.db.Query(`SELECT user_id, app_key, base_version, updated_at
+	rows, err := s.query(`SELECT user_id, app_key, base_version, updated_at
 		FROM app_drafts WHERE user_id = ? ORDER BY updated_at DESC`, userID)
 	if err != nil {
 		return nil, err
@@ -68,6 +68,18 @@ func (s *Store) ListAppDrafts(userID int64) ([]*AppDraft, error) {
 
 // DeleteAppDraft 删草稿（不存在不报错——"清掉"是幂等语义）。
 func (s *Store) DeleteAppDraft(userID int64, appKey string) error {
-	_, err := s.db.Exec(`DELETE FROM app_drafts WHERE user_id = ? AND app_key = ?`, userID, appKey)
+	_, err := s.exec(`DELETE FROM app_drafts WHERE user_id = ? AND app_key = ?`, userID, appKey)
 	return err
+}
+
+// PruneAppDrafts 保留策略：删除 updated_at 早于 cutoff 的草稿，返回删除
+// 数。草稿 payload 是含口令的 chart 全文（几十 KiB 级），长期弃置既是
+// 体积也是敏感数据残留。
+func (s *Store) PruneAppDrafts(cutoff string) (int64, error) {
+	res, err := s.exec(`DELETE FROM app_drafts WHERE updated_at < ?`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }

@@ -59,10 +59,13 @@ type Server struct {
 
 	// 日志内核（initLogger 装配）：stderr + 可选文件 + 内存环形缓冲，
 	// 控制端经 GET /logs 拉取近期日志（详见 log.go）
-	logger   *slog.Logger
-	logRing  *ringWriter
-	sink     *logSink
-	levelVar *slog.LevelVar
+	logger  *slog.Logger
+	logRing *ringWriter
+	sink    *logSink
+	// logFilePath 已挂载的日志文件路径（SetLogFile 防重挂：重复挂同一
+	// 文件会让每行日志写两遍）
+	logFilePath string
+	levelVar    *slog.LevelVar
 
 	// 自治执行（POST /plan）：同刻至多一个 running run；running 期间抑制
 	// 空闲退出（没有请求到达不应导致收敛被杀，§7.5 必查项）
@@ -95,10 +98,13 @@ func New(listen string) *Server {
 	return s
 }
 
-// SetMaxRequestBody 设置请求体上限（MiB；<=0 回退内置默认 64MiB）
+// SetMaxRequestBody 设置请求体上限（MiB；<=0 回退内置默认 512MiB）。
+// 默认档覆盖常见离线制品（docker 静态包 ~80MB、JDK ~200MB）——上传是
+// 流式原子落盘（fsatomic），不整包进内存，上限防的是磁盘被无界 body
+// 写满，512MiB 是「够大而有界」的折中
 func (s *Server) SetMaxRequestBody(mb int64) {
 	if mb <= 0 {
-		mb = 64
+		mb = 512
 	}
 	s.maxRequestBody = mb << 20
 }
@@ -108,7 +114,7 @@ func (s *Server) maxRequestBodyLimit() int64 {
 	if s.maxRequestBody > 0 {
 		return s.maxRequestBody
 	}
-	return 64 << 20
+	return 512 << 20
 }
 
 // Use 追加 middleware
@@ -140,10 +146,10 @@ func (s *Server) SetSystemdUnit(unit string) {
 }
 
 // trackActivity 维护空闲判定的两个信号：请求开始/完成时间戳与在途计数。
-// 仅已通过外层认证的请求会走到这里（/health 直接放行不计时）。
+// 仅已通过外层认证的请求会走到这里（探测端点直接放行不计时）。
 func (s *Server) trackActivity(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.idleTimeout <= 0 || r.URL.Path == "/health" {
+		if s.idleTimeout <= 0 || isProbePath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -160,9 +166,9 @@ func (s *Server) trackActivity(next http.Handler) http.Handler {
 // pinMiddleware 校验客户端证书指纹在准许名单内（mTLS 模式生效）。
 func (s *Server) pinMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// /health 仅含非敏感探测信息，放行
+		// /health 与 /info 仅含非敏感探测/能力信息，放行
 		if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
-			if r.URL.Path == "/health" {
+			if isProbePath(r.URL.Path) {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -179,13 +185,20 @@ func (s *Server) pinMiddleware(next http.Handler) http.Handler {
 		if pins := s.material.Load().pins; pins != nil {
 			_, certOK := pins[fp]
 			_, keyOK := pins[spkiFP]
-			if !certOK && !keyOK && r.URL.Path != "/health" {
+			if !certOK && !keyOK && !isProbePath(r.URL.Path) {
 				http.Error(w, "client certificate not pinned", http.StatusForbidden)
 				return
 			}
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isProbePath 报告路径是否为免认证探测端点（/health 存活探测与 /info
+// 能力自描述——两者都只暴露版本/模块名级信息，且探活链路在明文回退
+// 场景下无客户端证书可用）。
+func isProbePath(p string) bool {
+	return p == "/health" || p == "/info"
 }
 
 // ListenAndServe 启动服务（阻塞）。mTLS 配置后以 TLS 启动（证书对经

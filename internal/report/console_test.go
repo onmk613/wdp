@@ -133,16 +133,20 @@ func TestConsoleRecapTable(t *testing.T) {
 	c := NewConsole(&buf, false, 0)
 
 	stats := map[string]*model.Stats{
-		"h1": {Ok: 2, Changed: 10},
-		"h2": {Ok: 100, Failed: 1},
+		"h1": {Ok: 2, Changed: 10, ElapsedMs: 2_400},
+		"h2": {Ok: 100, Failed: 1, ElapsedMs: 8_100},
 	}
-	c.Recap("p", stats)
+	c.Recap("p", stats, 12_300)
 
 	out := buf.String()
-	for _, want := range []string{"HOST", "CHANGED", "UNREACHABLE", "h1", "h2"} {
+	for _, want := range []string{"HOST", "CHANGED", "UNREACHABLE", "h1", "h2", "ELAPSED"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("RECAP 表格缺少 %q:\n%s", want, out)
 		}
+	}
+	// 耗时汇总：wall 列与最慢主机（h2 8.1s）
+	if !strings.Contains(out, "wall=12.30s") || !strings.Contains(out, "slowest=h2(8.10s)") {
+		t.Fatalf("RECAP 应附 wall 与最慢主机:\n%s", out)
 	}
 	// 右对齐：OK 列的 "2" 与 "100" 结束列位置一致
 	var l1, l2 string
@@ -164,10 +168,28 @@ func TestConsoleRecapTable(t *testing.T) {
 	// quiet 行式 RECAP
 	buf.Reset()
 	q := NewConsole(&buf, false, -1)
-	q.Recap("p", stats)
+	q.Recap("p", stats, 12_300)
 	legacy := buf.String()
 	if !strings.Contains(legacy, "h1:") || !strings.Contains(legacy, "ok=2 changed=10") {
 		t.Fatalf("quiet RECAP 应保持行式:\n%s", legacy)
+	}
+	if !strings.Contains(legacy, "elapsed=2.40s") || !strings.Contains(legacy, "wall=12.30s") {
+		t.Fatalf("quiet RECAP 应带耗时与 wall:\n%s", legacy)
+	}
+}
+
+// TestFormatMs RECAP 耗时列的人读格式分档。
+func TestFormatMs(t *testing.T) {
+	for _, tc := range []struct {
+		ms   int64
+		want string
+	}{
+		{0, "0"}, {350, "350ms"}, {1_240, "1.24s"},
+		{12_300, "12.30s"}, {123_456, "2m03s"}, {3_723_456, "1h02m03s"},
+	} {
+		if got := FormatMs(tc.ms); got != tc.want {
+			t.Errorf("FormatMs(%d) = %q, want %q", tc.ms, got, tc.want)
+		}
 	}
 }
 

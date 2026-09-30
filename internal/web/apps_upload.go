@@ -102,9 +102,9 @@ func (s *Server) handleUploadChart(w http.ResponseWriter, r *http.Request) {
 				appID = app.ID
 				// chart 上传不带 scope：继承应用当前 scope
 				return s.st.AddVersion(app.ID, version, final, sha, size, "uploaded chart",
-					app.Pools, app.Groups, app.Labels, up.phases)
+					app.Pools, app.Groups, app.Labels, up.phases, chartModulesOf(final))
 			}
-			id, cerr := s.st.CreateApp(name, up.description, "{}", nil, nil, version, final, sha, size, up.phases)
+			id, cerr := s.st.CreateApp(name, up.description, "{}", nil, nil, version, final, sha, size, up.phases, chartModulesOf(final))
 			appID, created = id, true
 			return cerr
 		},
@@ -160,7 +160,7 @@ func (s *Server) handleAddVersion(w http.ResponseWriter, r *http.Request) {
 		func(_ *store.App, final, sha string, size int64) error {
 			// chart 上传不带 scope：继承应用当前 scope
 			return s.st.AddVersion(app.ID, up.version, final, sha, size, r.FormValue("note"),
-				app.Pools, app.Groups, app.Labels, up.phases)
+				app.Pools, app.Groups, app.Labels, up.phases, chartModulesOf(final))
 		},
 	) {
 		return

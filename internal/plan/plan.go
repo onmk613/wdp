@@ -20,26 +20,11 @@ import (
 	"sort"
 	"strings"
 
-	"wdp/internal/chart"
 	"wdp/internal/model"
 )
 
 // SchemaVer 是当前 plan 结构版本。
 const SchemaVer = 1
-
-// 文件嵌入上限：chart 是配置载体（模板/清单/小文件），大负载走 artifact
-// 模块按 URL 分发——超限即编译报错，避免 plan 变成制品分发通道。
-const (
-	MaxFileBytes  int64 = 32 << 20  // 单文件 32MiB
-	MaxTotalBytes int64 = 256 << 20 // 全部文件合计 256MiB
-)
-
-// 阈值以变量形式参与判定：测试用小型临时文件即可覆盖"超限转 payload /
-// 总量超限报错"两条分支，无需真的写出 32MiB 制品。生产路径恒等于上面的常量。
-var (
-	maxFileBytes  = MaxFileBytes
-	maxTotalBytes = MaxTotalBytes
-)
 
 // Plan 是一次执行的完全解析产物。
 type Plan struct {
@@ -50,7 +35,7 @@ type Plan struct {
 	Phase      string            `json:"phase"`       // 生命周期相位（空串按 deploy）
 	WdpVersion string            `json:"wdp_version"` // 编译端 wdp 版本
 	Values     map[string]any    `json:"values"`      // 全局合并 values（不含 inventory_override；HostPlan.Values 才是每主机实际生效值）
-	Meta       chart.Meta        `json:"meta"`        // chart.yaml 快照（marker 处置/相位属性/敏感键口径）
+	Meta       Meta              `json:"meta"`        // chart.yaml 快照（marker 处置/相位属性/敏感键口径）
 	Helpers    string            `json:"helpers"`     // CollectHelpers 合并结果（含子 chart，渲染可复现）
 	Files      map[string]string `json:"files"`       // chart 树快照：相对路径 → base64 内容（仅小文件，apply 侧物化后按原结构加载）
 	Payloads   []PayloadRef      `json:"payloads"`    // 超限大文件引用（不进 plan 本体；apply 时经 --chart-dir 补齐）

@@ -16,6 +16,7 @@ import (
 	"wdp/internal/config"
 	"wdp/internal/conn"
 	"wdp/internal/executor"
+	"wdp/internal/i18n"
 	"wdp/internal/inventory"
 	"wdp/internal/markerread"
 	"wdp/internal/model"
@@ -24,8 +25,32 @@ import (
 	"wdp/internal/render"
 )
 
-const runHelp = `
-执行 playbook 或 chart（编译 + 执行一条龙；拆开用 wdp plan + wdp apply）
+// runHelp 返回 `wdp run` 的长帮助（延迟到调用时求值：语言在 i18n 包
+// init 期定死，包级 const 求值会早于它）。
+func runHelp() string {
+	return i18n.T(`Run a playbook or a chart (compile + execute in one go; split it with wdp plan + wdp apply)
+
+The target may be a bare playbook (site.yaml), a chart directory or a packaged chart.tgz
+Charts run by lifecycle phase: --phase selects <phase>.yaml at the chart root (built-in deploy/uninstall/status, plus custom phases)
+Host sources: -i inventory files (repeatable, later merges over earlier) or --hosts inline specs
+(IP/host[:port], ranges like 10.55.2.101-104; every play targets these hosts) — the two are mutually exclusive
+The connection channel comes from each inventory host's conn (agent/local), defaulting to wdp.cfg [run].conn
+
+Execution control: --limit narrows the play targets further; --tags/--skip-tags filter tasks by tag;
+--start-at-task resumes from the given task; --list-hosts prints the hosts that would run, then exits
+Dry run: --check is zero-risk read-only probing plus change estimation; --diff adds a content-level
+before/after comparison on top of check
+-f/--values-file and --set override chart defaults (deep-merged in order, like Helm); --fact-cache persists facts across runs
+Irreversible phases (Destructive) require confirmation before running; -y skips it (recommended for CI)
+Deployment records and release markers are written per the phase declarations (review with wdp release show,
+inspect drift with wdp drift)
+
+Examples:
+wdp run site.yaml -i inv.yaml                      # bare playbook
+wdp run ./myapp -f envs/prod.yaml                  # chart + environment values
+wdp run ./myapp --phase uninstall --check          # uninstall dry run
+wdp run ./myapp --start-at-task "push config"      # resume from a given task
+`, `执行 playbook 或 chart（编译 + 执行一条龙；拆开用 wdp plan + wdp apply）
 
 目标可为裸 playbook（site.yaml）、chart 目录或打包的 chart.tgz
 chart 按生命周期相位执行：--phase 选择 chart 根部的 <phase>.yaml（内置 deploy/uninstall/status，可自定义）
@@ -45,35 +70,50 @@ wdp run site.yaml -i inv.yaml                      # 裸 playbook
 wdp run ./myapp -f envs/prod.yaml                  # chart + 环境 values
 wdp run ./myapp --phase uninstall --check          # 卸载预演
 wdp run ./myapp --start-at-task "下发配置"          # 从指定任务续跑
-`
+`)
+}
 
 // newRunCmd 构造 `wdp run`。
 func newRunCmd() *cobra.Command {
 	opts := runOptions{}
 	cmd := &cobra.Command{
 		Use:   "run <playbook.yaml|chart-dir|chart.tgz>",
-		Short: "run a playbook or chart",
-		Long:  runHelp,
+		Short: i18n.T("run a playbook or chart", "执行 playbook 或 chart"),
+		Long:  runHelp(),
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runTarget(cmd.Context(), args[0], opts)
 		},
 	}
 	f := cmd.Flags()
-	f.StringVar(&opts.limit, "limit", "", "further limit hosts (group/host/!exclude)")
-	f.StringSliceVar(&opts.hostsInline, "hosts", nil,
-		"inline host specs instead of an inventory file (IP/host[:port], ranges like 10.8.2.101-104); every play targets these hosts")
+	f.StringVar(&opts.limit, "limit", "", i18n.T(
+		"further limit hosts (group/host/!exclude)",
+		"进一步收窄主机（组/主机/!排除）"))
+	f.StringSliceVar(&opts.hostsInline, "hosts", nil, i18n.T(
+		"inline host specs instead of an inventory file (IP/host[:port], ranges like 10.8.2.101-104); every play targets these hosts",
+		"内联主机表达式，替代 inventory 清单文件（IP/主机[:port]，支持 10.8.2.101-104 区间）；每个 play 都以这些主机为目标"))
 	f.StringSliceVarP(&opts.tags, "tags", "t", nil, "run only tasks with these tags (comma-separated)")
 	f.StringSliceVar(&opts.skipTags, "skip-tags", nil, "skip tasks with these tags")
 	f.BoolVar(&opts.listHosts, "list-hosts", false, "list hosts that would run, then exit")
 	f.StringVar(&opts.startAtTask, "start-at-task", "", "start execution at the given task")
 	f.BoolVar(&opts.check, "check", false, "check mode: dry-run without applying changes")
 	f.BoolVar(&opts.diff, "diff", false, "diff mode: content-level diff with --check (copy/template/file)")
-	f.StringVar(&opts.phase, "phase", "deploy",
-		"chart lifecycle phase: any <phase>.yaml at the chart root (built-in: deploy/uninstall/status; custom e.g. update/stop/download)")
+	f.BoolVar(&opts.failFast, "fail-fast", false, i18n.T(
+		"abort remaining batches and plays as soon as any host fails (in-flight hosts finish first)",
+		"任一主机失败即中止后续批次与 play（在途主机先跑完）"))
+	f.StringVar(&opts.phase, "phase", "deploy", i18n.T(
+		"chart lifecycle phase: any <phase>.yaml at the chart root (built-in: deploy/uninstall/status; custom e.g. update/stop/download)",
+		"chart 生命周期相位：chart 根部的任意 <phase>.yaml（内置 deploy/uninstall/status；可自定义如 update/stop/download）"))
 	f.BoolVarP(&opts.yes, "yes", "y", false, "skip confirmation of irreversible operations (recommended for CI)")
-	f.StringVar(&opts.factCache, "fact-cache", "",
-		"persist setup/set_fact facts to this JSON file across runs (loaded at start, saved atomically at end)")
+	f.StringVar(&opts.factCache, "fact-cache", "", i18n.T(
+		"persist setup/set_fact facts to this JSON file across runs (loaded at start, saved atomically at end)",
+		"把 setup/set_fact 的 facts 跨运行持久化到此 JSON 文件（启动时加载，结束时原子落盘）"))
+	cmd.Flags().StringVar(&opts.repo, "repo", "", i18n.T(
+		"chart repository base URL: chart refs missing from the local charts/ directory are fetched from here (cached to charts/<name>/)",
+		"chart 仓库基址：本地 charts/ 目录缺失的 chart 引用从这里拉取（缓存到 charts/<name>/）"))
+	cmd.Flags().StringVar(&opts.repoAuth, "repo-auth", "", i18n.T(
+		"chart repository credentials user:password (env WDP_REPO_AUTH)",
+		"chart 仓库凭据 user:password（环境变量 WDP_REPO_AUTH）"))
 	chartValueFlags(cmd, &opts.valuesFiles, &opts.setArgs)
 	return cmd
 }
@@ -86,12 +126,15 @@ type runOptions struct {
 	startAtTask string
 	check       bool
 	diff        bool
+	failFast    bool
 	phase       string
 	yes         bool
 	factCache   string
 	hostsInline []string
 	valuesFiles []string
 	setArgs     []string
+	repo        string
+	repoAuth    string
 }
 
 // runTarget 加载目标（chart 或裸 playbook）并执行，返回错误由 cobra 呈现。
@@ -160,6 +203,7 @@ func runExecutorOptions(opts runOptions) executor.Options {
 		StartAtTask:      opts.startAtTask,
 		CheckMode:        opts.check,
 		DiffMode:         opts.diff,
+		FailFast:         opts.failFast,
 		TaskTimeout:      config.Current().Run.TaskTimeout,
 		WdpVersion:       Version,
 		FactCachePath:    opts.factCache,
@@ -189,8 +233,9 @@ func loadBarePlaybook(target string, opts runOptions, eopts *executor.Options) (
 	eopts.BaseDir = filepath.Dir(target)
 	// chart 引用预扫描：裸 playbook 的引用解析根是同级 charts/ 目录，
 	// 启动期加载（缺引用/坏 chart 立即失败，而非首个主机执行期报错），
-	// 并把各被引用 chart 的 _helpers.tpl 聚合进渲染引擎
-	refs, eng, rerr := preloadChartRefs(eopts.BaseDir, plays)
+	// 并把各被引用 chart 的 _helpers.tpl 聚合进渲染引擎。给了 --repo
+	// 时本地缺失的引用自动从仓库拉取（digest 校验后落盘缓存，离线可复用）
+	refs, eng, rerr := preloadChartRefs(eopts.BaseDir, plays, &repoFetch{base: opts.repo, auth: opts.repoAuth})
 	if rerr != nil {
 		return "", nil, rerr
 	}
@@ -411,7 +456,13 @@ func loadChartRun(ctx context.Context, target string, inv *inventory.Inventory, 
 // 执行到引用任务时才报错；引用名去 @版本约束后作为目录名，同名只加载
 // 一次。目录模式 chart 无临时资源（Close 恒空），无需生命周期管理。
 // 任一被引用 chart 带 _helpers.tpl 时聚合构建渲染引擎（覆盖默认引擎）。
-func preloadChartRefs(baseDir string, plays []*model.Play) (map[string]*chart.Chart, *render.Engine, error) {
+// preloadChartRefsFake 旧签名包装（本地目录 only）：既有 chartrefs 测试
+// 不关心仓库路径。
+func preloadChartRefsFake(baseDir string, plays []*model.Play) (map[string]*chart.Chart, *render.Engine, error) {
+	return preloadChartRefs(baseDir, plays, nil)
+}
+
+func preloadChartRefs(baseDir string, plays []*model.Play, rf *repoFetch) (map[string]*chart.Chart, *render.Engine, error) {
 	refs := playbook.CollectChartRefs(plays)
 	if len(refs) == 0 {
 		return nil, nil, nil
@@ -419,13 +470,21 @@ func preloadChartRefs(baseDir string, plays []*model.Play) (map[string]*chart.Ch
 	out := map[string]*chart.Chart{}
 	var helpers []string
 	for _, ref := range refs {
-		name, _, _ := strings.Cut(ref, "@")
+		name, atVer, _ := strings.Cut(ref, "@")
 		if _, dup := out[name]; dup {
 			continue
 		}
-		sub, err := chart.Load(filepath.Join(baseDir, "charts", name))
+		local := filepath.Join(baseDir, "charts", name)
+		if _, err := os.Stat(local); err != nil && rf != nil && rf.base != "" {
+			// 本地缺失且给了 --repo：从仓库拉取（@version 约束优先，
+			// 未约束取最新），digest 校验后解包到 charts/<name>/ 缓存
+			if ferr := rf.fetchInto(name, atVer, local); ferr != nil {
+				return nil, nil, fmt.Errorf("chart ref %q: %w", ref, ferr)
+			}
+		}
+		sub, err := chart.Load(local)
 		if err != nil {
-			return nil, nil, fmt.Errorf("chart ref %q: %w (bare playbooks resolve refs from the charts/ directory next to the playbook)", ref, err)
+			return nil, nil, fmt.Errorf("chart ref %q: %w (bare playbooks resolve refs from the charts/ directory next to the playbook, or pass --repo)", ref, err)
 		}
 		out[name] = sub
 		if h := sub.CollectHelpers(); h != "" {

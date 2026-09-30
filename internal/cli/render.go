@@ -13,12 +13,28 @@ import (
 
 	"wdp/internal/chart"
 	"wdp/internal/config"
+	"wdp/internal/i18n"
 	"wdp/internal/model"
 	"wdp/internal/render"
 )
 
-const renderHelp = `
-chart 静态渲染预览（不执行、不连主机）
+// renderHelp 返回 `wdp render` 的长帮助（调用时求值）。
+func renderHelp() string {
+	return i18n.T(`Static chart render preview (no execution, no host connection)
+
+Prints three sections: the merged values (defaults + -f/--set deep-merged), the rendered result of every
+template file, and the task list of the selected phase (chart refs expanded one level, same as execution)
+Sample domain used for rendering: merged values + the --hostname placeholder host name (default preview-host)
+--phase selects the phase to preview (default deploy; uninstall/status/custom phases follow chart semantics)
+The preview does not load an inventory: keys declared in inventory_override may in fact be overridden by
+same-named inventory variables, so this reflects the chart values view only
+To see "what would change against the live hosts" use wdp run --check (connects, read-only probing + change estimation)
+
+Examples:
+wdp render ./myapp
+wdp render ./myapp -f envs/prod.yaml --hostname web1
+wdp render ./myapp --phase uninstall
+`, `chart 静态渲染预览（不执行、不连主机）
 
 输出三段：合并后的 values（defaults + -f/--set 深合并）、全部模板文件的渲染
 结果、指定相位的任务清单（chart 引用展开一层，与执行侧同口径）
@@ -32,7 +48,8 @@ chart 静态渲染预览（不执行、不连主机）
 wdp render ./myapp
 wdp render ./myapp -f envs/prod.yaml --hostname web1
 wdp render ./myapp --phase uninstall
-`
+`)
+}
 
 // newRenderCmd 构造 `wdp render`：chart 静态渲染预览（不执行；执行侧
 // 预演用 wdp run --check）。
@@ -43,10 +60,11 @@ func newRenderCmd() *cobra.Command {
 		valuesFiles, setArgs []string
 	)
 	cmd := &cobra.Command{
-		Use:   "render <chart-dir|tgz>",
-		Short: "preview merged values, rendered templates and the task list (no execution)",
-		Long:  renderHelp,
-		Args:  cobra.ExactArgs(1),
+		Use: "render <chart-dir|tgz>",
+		Short: i18n.T("preview merged values, rendered templates and the task list (no execution)",
+			"预览合并后的 values、模板渲染结果与任务清单（不执行）"),
+		Long: renderHelp(),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ch, values, eng, err := chart.OpenWithLimits(args[0], valuesFiles, setArgs, chart.Limits{MaxExtractBytes: config.Current().MaxExtractBytes()})
 			if err != nil {
@@ -98,10 +116,12 @@ func newRenderCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&hostname, "hostname", "preview-host",
-		"inventory_hostname placeholder for preview")
-	cmd.Flags().StringVar(&phase, "phase", "",
-		"lifecycle phase to preview (default deploy; any <phase>.yaml at the chart root)")
+	cmd.Flags().StringVar(&hostname, "hostname", "preview-host", i18n.T(
+		"inventory_hostname placeholder for preview",
+		"预览用的 inventory_hostname 占位主机名"))
+	cmd.Flags().StringVar(&phase, "phase", "", i18n.T(
+		"lifecycle phase to preview (default deploy; any <phase>.yaml at the chart root)",
+		"要预览的生命周期相位（默认 deploy；chart 根部的任意 <phase>.yaml）"))
 	chartValueFlags(cmd, &valuesFiles, &setArgs)
 	return cmd
 }

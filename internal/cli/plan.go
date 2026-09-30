@@ -20,11 +20,33 @@ import (
 
 	"wdp/internal/chart"
 	"wdp/internal/config"
-	"wdp/internal/plan"
+	"wdp/internal/i18n"
+	"wdp/internal/planbuild"
 )
 
-const planHelp = `
-把 chart + inventory + values 编译为完全解析的执行计划（离线产物）
+// planHelp 返回 `wdp plan` 的长帮助（调用时求值）。
+func planHelp() string {
+	return i18n.T(`Compile chart + inventory + values into a fully-resolved execution plan (an offline artifact)
+
+The deploy phase (and any phase declaring release) compiles without connecting to any host; non-deploy
+phases take their values from each host's marker, so compilation must connect to read them
+Cross-host information (groups/hosts/hostvars) is frozen into literals; when/loop/template rendering stays
+on the execution side (it may depend on runtime registers)
+Deterministic: the same chart + the same values compile to a byte-identical plan.json; the PlanID is the
+content-addressed sha256 — a tampered file is refused at load time
+The plan embeds a chart tree snapshot (self-contained: apply does not need the chart/inventory on site);
+large files are only referenced by sha256 (supplied locally via --chart-dir at apply time, or distributed
+by URL through the artifact module)
+
+Subcommands: show inspects per-host values and task lists; diff compares two plans task-by-task and value-by-value
+Common flags: -o writes plan.json (default stdout); --phase picks the phase; --limit narrows hosts;
+--fact-cache freezes facts into the plan; -f/--set overrides values
+
+Examples:
+wdp plan ./myapp -f envs/prod.yaml -o plan.json     # compile (offline)
+wdp plan show plan.json --host web1                 # what will happen on this machine
+wdp plan diff plan-a.json plan-b.json               # task-level + values-level differences
+`, `把 chart + inventory + values 编译为完全解析的执行计划（离线产物）
 
 deploy 相位（及声明 release 的相位）编译全程不连接任何主机；非部署相位的 values
 来自各主机 marker，编译期需连接读取
@@ -42,7 +64,8 @@ sha256 引用（apply 时 --chart-dir 本地补齐，或由 artifact 模块按 U
 wdp plan ./myapp -f envs/prod.yaml -o plan.json     # 编译（离线）
 wdp plan show plan.json --host web1                 # 这台机器会发生什么
 wdp plan diff plan-a.json plan-b.json               # 任务级 + values 级差异
-`
+`)
+}
 
 // newPlanCmd 构造 `wdp plan`。
 func newPlanCmd() *cobra.Command {
@@ -51,10 +74,11 @@ func newPlanCmd() *cobra.Command {
 	var out string
 	var opts planCompileOptions
 	cmd := &cobra.Command{
-		Use:   "plan <chart-dir|chart.tgz>",
-		Short: "compile a fully-resolved execution plan (offline) for review and `wdp apply`",
-		Long:  planHelp,
-		Args:  cobra.ExactArgs(1),
+		Use: "plan <chart-dir|chart.tgz>",
+		Short: i18n.T("compile a fully-resolved execution plan (offline) for review and `wdp apply`",
+			"把 chart + inventory + values 编译为完全解析的执行计划（离线产物，供评审与 wdp apply 执行）"),
+		Long: planHelp(),
+		Args: cobra.ExactArgs(1),
 		// 位置参数是本地 chart 路径，但有子命令（show/diff）时 cobra
 		// 默认 NoFileComp，本地路径无法补全——回落文件补全，子命令仍可补全
 		ValidArgsFunction: completePathArgs,
@@ -63,11 +87,18 @@ func newPlanCmd() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.StringVarP(&out, "output-file", "o", "",
-		"write the plan to this file (default: stdout)")
-	f.StringVar(&opts.limit, "limit", "", "further limit hosts (group/host/!exclude)")
-	f.StringVar(&opts.phase, "phase", "deploy", "chart lifecycle phase")
-	f.StringVar(&opts.factCache, "fact-cache", "", "freeze facts from this JSON cache into the plan")
+	f.StringVarP(&out, "output-file", "o", "", i18n.T(
+		"write the plan to this file (default: stdout)",
+		"把计划写入此文件（默认输出到 stdout）"))
+	f.StringVar(&opts.limit, "limit", "", i18n.T(
+		"further limit hosts (group/host/!exclude)",
+		"进一步收窄主机（组/主机/!排除）"))
+	f.StringVar(&opts.phase, "phase", "deploy", i18n.T(
+		"chart lifecycle phase",
+		"chart 生命周期相位"))
+	f.StringVar(&opts.factCache, "fact-cache", "", i18n.T(
+		"freeze facts from this JSON cache into the plan",
+		"从此 JSON 缓存把 facts 冻结进计划"))
 	chartValueFlags(cmd, &opts.valuesFiles, &opts.setArgs)
 
 	cmd.AddCommand(newPlanShowCmd())
@@ -92,7 +123,7 @@ func runPlanCompile(ctx context.Context, target, out string, opts planCompileOpt
 		return err
 	}
 	limits := chart.Limits{MaxExtractBytes: config.Current().MaxExtractBytes()}
-	copts := plan.CompileOptions{
+	copts := planbuild.CompileOptions{
 		Phase:      opts.phase,
 		Limit:      opts.limit,
 		WdpVersion: Version,
@@ -125,7 +156,7 @@ func runPlanCompile(ctx context.Context, target, out string, opts planCompileOpt
 		copts.HostValues = hostValues
 	}
 
-	p, err := plan.CompileChart(probe, inv, opts.valuesFiles, opts.setArgs, copts)
+	p, err := planbuild.CompileChart(probe, inv, opts.valuesFiles, opts.setArgs, copts)
 	if err != nil {
 		return err
 	}

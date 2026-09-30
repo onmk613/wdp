@@ -30,7 +30,7 @@ func TestGetURLDownloadAndIdempotent(t *testing.T) {
 	mod := &GetURLModule{}
 	sum := sha256hex([]byte(body))
 
-	r1 := mod.Run(rc, map[string]any{"url": srv.URL + "/app.tgz", "dest": "/opt/app.tgz", "sha256": sum}, "")
+	r1 := mod.Run(rc, map[string]any{"url": srv.URL + "/app.tgz", "dest": "/opt/app.tgz", "sha256": sum, "via": "local"}, "")
 	if r1.Failed {
 		t.Fatalf("首次下载失败: %s", r1.Msg)
 	}
@@ -42,7 +42,7 @@ func TestGetURLDownloadAndIdempotent(t *testing.T) {
 	}
 
 	// 幂等：远端 sha256 已匹配 → 跳过下载、不变更
-	r2 := mod.Run(rc, map[string]any{"url": srv.URL + "/app.tgz", "dest": "/opt/app.tgz", "sha256": sum}, "")
+	r2 := mod.Run(rc, map[string]any{"url": srv.URL + "/app.tgz", "dest": "/opt/app.tgz", "sha256": sum, "via": "local"}, "")
 	if r2.Failed {
 		t.Fatalf("二次执行失败: %s", r2.Msg)
 	}
@@ -53,7 +53,7 @@ func TestGetURLDownloadAndIdempotent(t *testing.T) {
 	// 内容漂移：远端无该内容 → 实际下载后校验失败、不落盘
 	srv2 := newHTTPServer(t, "artifact-bytes-v2")
 	defer srv2.Close()
-	r3 := mod.Run(rc, map[string]any{"url": srv2.URL + "/app.tgz", "dest": "/opt/fresh.tgz", "sha256": sum}, "")
+	r3 := mod.Run(rc, map[string]any{"url": srv2.URL + "/app.tgz", "dest": "/opt/fresh.tgz", "sha256": sum, "via": "local"}, "")
 	if !r3.Failed || !strings.Contains(r3.Msg, "checksum mismatch") {
 		t.Fatalf("内容漂移应校验失败: %+v", r3)
 	}
@@ -79,6 +79,7 @@ func TestGetURLHeaderArg(t *testing.T) {
 		"url":     srv.URL,
 		"dest":    "/opt/secret",
 		"headers": map[string]any{"Authorization": "Bearer tok-1"},
+		"via":     "local",
 	}, "")
 	if r.Failed {
 		t.Fatalf("带 header 下载失败: %s", r.Msg)
@@ -90,7 +91,7 @@ func TestGetURLHeaderArg(t *testing.T) {
 		t.Fatalf("远端内容 %q", got)
 	}
 	// headers 类型非法
-	if r := mod.Run(rc, map[string]any{"url": srv.URL, "dest": "/x", "headers": "nope"}, ""); !r.Failed {
+	if r := mod.Run(rc, map[string]any{"url": srv.URL, "dest": "/x", "headers": "nope", "via": "local"}, ""); !r.Failed {
 		t.Fatal("headers 非 map 应失败")
 	}
 }
@@ -101,20 +102,20 @@ func TestGetURLHTTPStatusAndArgs(t *testing.T) {
 	rc, _ := newTestRC(t)
 	mod := &GetURLModule{}
 
-	r := mod.Run(rc, map[string]any{"url": srv.URL + "/missing", "dest": "/opt/x"}, "")
+	r := mod.Run(rc, map[string]any{"url": srv.URL + "/missing", "dest": "/opt/x", "via": "local"}, "")
 	if !r.Failed || !strings.Contains(r.Msg, "404") {
 		t.Fatalf("非 200 应失败: %+v", r)
 	}
 	if r := mod.Run(rc, map[string]any{"dest": "/x"}, ""); !r.Failed {
 		t.Fatal("缺 url 应失败")
 	}
-	if r := mod.Run(rc, map[string]any{"url": srv.URL}, ""); !r.Failed {
+	if r := mod.Run(rc, map[string]any{"url": srv.URL, "via": "local"}, ""); !r.Failed {
 		t.Fatal("缺 dest 应失败")
 	}
-	if r := mod.Run(rc, map[string]any{"url": srv.URL, "dest": "/x", "sha256": "zz"}, ""); !r.Failed {
+	if r := mod.Run(rc, map[string]any{"url": srv.URL, "dest": "/x", "sha256": "zz", "via": "local"}, ""); !r.Failed {
 		t.Fatal("非法 sha256 应失败")
 	}
-	if r := mod.Run(rc, map[string]any{"url": srv.URL, "dest": "/x", "timeout_secs": 0}, ""); !r.Failed {
+	if r := mod.Run(rc, map[string]any{"url": srv.URL, "dest": "/x", "timeout_secs": 0, "via": "local"}, ""); !r.Failed {
 		t.Fatal("非法 timeout_secs 应失败")
 	}
 }
@@ -129,7 +130,7 @@ func TestGetURLDownloadSizeLimit(t *testing.T) {
 	}))
 	defer srv.Close()
 	rc, _ := newTestRC(t)
-	r := (&GetURLModule{}).Run(rc, map[string]any{"url": srv.URL, "dest": "/opt/big"}, "")
+	r := (&GetURLModule{}).Run(rc, map[string]any{"url": srv.URL, "dest": "/opt/big", "via": "local"}, "")
 	// 断言用上限数字（语言无关）：中英文案均含该值
 	if !r.Failed || !strings.Contains(r.Msg, "2147483648") {
 		t.Fatalf("超限下载应失败: %+v", r)
@@ -144,7 +145,7 @@ func TestGetURLDownloadLimitOverride(t *testing.T) {
 
 	rc, _ := newTestRC(t)
 	rc.MaxDownloadBytes = 10 // 自定义上限 10 字节
-	r := (&GetURLModule{}).Run(rc, map[string]any{"url": srv.URL, "dest": "/opt/x"}, "")
+	r := (&GetURLModule{}).Run(rc, map[string]any{"url": srv.URL, "dest": "/opt/x", "via": "local"}, "")
 	if !r.Failed {
 		t.Fatal("超过自定义上限应失败")
 	}
@@ -156,7 +157,7 @@ func TestGetURLDownloadLimitOverride(t *testing.T) {
 	// 上限内正常下载不受影响
 	rc2, fake := newTestRC(t)
 	rc2.MaxDownloadBytes = 1 << 20
-	r2 := (&GetURLModule{}).Run(rc2, map[string]any{"url": srv.URL, "dest": "/opt/y"}, "")
+	r2 := (&GetURLModule{}).Run(rc2, map[string]any{"url": srv.URL, "dest": "/opt/y", "via": "local"}, "")
 	if r2.Failed {
 		t.Fatalf("限额内下载不应失败: %s", r2.Msg)
 	}
@@ -173,7 +174,7 @@ func TestGetURLCheckMode(t *testing.T) {
 	rc.CheckMode = true
 	rc.DiffMode = true
 	mod := &GetURLModule{}
-	r := mod.Run(rc, map[string]any{"url": srv.URL + "/cfg", "dest": "/opt/cfg"}, "")
+	r := mod.Run(rc, map[string]any{"url": srv.URL + "/cfg", "dest": "/opt/cfg", "via": "local"}, "")
 	if r.Failed {
 		t.Fatalf("check 失败: %s", r.Msg)
 	}
@@ -189,7 +190,7 @@ func TestGetURLCheckMode(t *testing.T) {
 
 	// 远端已有同内容 → check 结论为一致
 	fake.Files["/opt/cfg"] = []byte("new-content")
-	r = mod.Run(rc, map[string]any{"url": srv.URL + "/cfg", "dest": "/opt/cfg"}, "")
+	r = mod.Run(rc, map[string]any{"url": srv.URL + "/cfg", "dest": "/opt/cfg", "via": "local"}, "")
 	if r.Failed || r.Changed {
 		t.Fatalf("内容一致 check 不应变更: %+v", r)
 	}

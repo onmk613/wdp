@@ -85,6 +85,30 @@ func TestRunScriptEnv(t *testing.T) {
 	}
 }
 
+// TestPrepareScriptEnvBecomeKeyWhitelist 回归：become 路径的 env 键白名单
+// 曾与 sshc/local 各自为政（selfrun 漏下划线续位），FOO_BAR 经 agent 通道
+// become 时被静默丢弃而 SSH 通道正常——同名任务跨通道行为分叉。白名单
+// 已收敛到 conn.EnvKeyAllowed 单一实现，本测试锁定 become 路径的口径。
+func TestPrepareScriptEnvBecomeKeyWhitelist(t *testing.T) {
+	script, env := prepareScriptEnv(ExecReq{
+		Script:     ":",
+		BecomeUser: "root",
+		Env:        map[string]string{"FOO_BAR": "v1", "_LEAD": "v2", "bad-key": "x", "A B": "y"},
+	})
+	if !strings.Contains(script, "export FOO_BAR='v1'") {
+		t.Fatalf("下划线键在 become 路径不得丢弃: %q", script)
+	}
+	if !strings.Contains(script, "export _LEAD='v2'") {
+		t.Fatalf("下划线前导键合法: %q", script)
+	}
+	if strings.Contains(script, "bad-key") || strings.Contains(script, "A B") {
+		t.Fatalf("越白名单的键必须丢弃: %q", script)
+	}
+	if strings.Contains(strings.Join(env, "\n"), "FOO_BAR") {
+		t.Fatalf("become 时 env 应写进脚本体而非进程环境: %v", env)
+	}
+}
+
 // TestRunScriptTimeout 超时必须整组击杀并标记 TimedOut。
 func TestRunScriptTimeout(t *testing.T) {
 	start := time.Now()

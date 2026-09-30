@@ -57,6 +57,11 @@ func (s *Server) handleValidateSpec(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden: requires "+verbAppCreate)
 		return
 	}
+	// 校验与保存同口径：保存时版本号会被 patch 进 chart.yaml 再提交，
+	// 校验请求里 chart.yaml 还是底本版本（已被占用，前端按"下一个可用
+	// 版本"发起）——这里做同样的虚拟改写，校验看到的就是保存将产生的
+	// 形态。版本对账在保存路径仍是硬约束（ApplySpec）
+	console.PatchSpecChartVersion(&req.specReq, req.Version)
 	workDir, err := s.apps.PrepareWorkspace(req.AppID, baseVersion, name, &req.specReq)
 	if err != nil {
 		var be *console.BizError

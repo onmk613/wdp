@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -17,7 +18,7 @@ type ScriptModule struct{}
 func (m *ScriptModule) Name() string { return "script" }
 
 func (m *ScriptModule) Desc() string {
-	return "upload and execute a local script"
+	return i18n.T("Upload a local script to the target host and run it (arguments allowed)", "上传本地脚本到目标机执行（可带参数）")
 }
 
 // Run 上传脚本（0755）到远端临时路径执行，结束自删。
@@ -76,13 +77,15 @@ func (m *ScriptModule) Run(rc *RunContext, args map[string]any, free string) *Re
 
 func (m *ScriptModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "src", Type: "string", Desc: "local script path (chart/playbook-relative)"},
-		{Name: "(free-form)", Type: "string", Desc: "arguments passed to the script"},
+		{Name: "src", Type: "string", Desc: i18n.T("local script path (relative to the chart/playbook)", "本地脚本路径（chart/playbook 内相对路径）")},
+		{Name: "(free-form)", Type: "string", Desc: i18n.T("arguments passed to the script, written inline in the module value", "传给脚本的参数，写在模块键本位")},
 	}
 }
 
 func (m *ScriptModule) Example() string {
-	return `- name: upload and run the migration script
+	return i18n.T(`- name: upload and run the migration script
   script: scripts/migrate.sh --verbose
-`
+`, `- name: 上传并执行迁移脚本
+  script: scripts/migrate.sh --verbose
+`)
 }

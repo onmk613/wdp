@@ -92,9 +92,12 @@ export class ChartFS {
 
   loadFromScaffold(name: string, version: string, desc: string) {
     this.files.clear()
+    // original 取脚手架内容：新建模式以脚手架为「上次」基线，未编辑时
+    // isDirty() 为 false（离开不再弹未保存确认）。fromBase 仍为 false，
+    // toSaveBody 照样全量回传（新建本就要落全部文件）。
     const mk = (path: string, content: string) => {
       this.files.set(path, reactive({
-        path, content, original: '', binary: false, size: content.length,
+        path, content, original: content, binary: false, size: content.length,
         deleted: false, fromBase: false,
       }))
     }

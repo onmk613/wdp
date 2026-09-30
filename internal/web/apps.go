@@ -9,6 +9,7 @@ package web
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -179,6 +180,22 @@ func chartPhasesOf(tgzPath string) ([]string, error) {
 	}
 	defer ch.Close()
 	return ch.PhaseNames(), nil
+}
+
+// chartModulesOf 提取制品各相位使用的内置模块清单（相位 → 名单的 JSON
+// 对象串；” = 提取失败，执行受理期对账按放行处理——模块清单缺失不该
+// 阻塞版本创建）。子 chart 引用与 block 组都已展开（chart.ModuleNames）。
+func chartModulesOf(tgzPath string) string {
+	ch, err := chart.LoadWithLimits(tgzPath, chart.Limits{})
+	if err != nil {
+		return ""
+	}
+	defer ch.Close()
+	b, err := json.Marshal(ch.ModuleNames())
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // ---- 工具 ----

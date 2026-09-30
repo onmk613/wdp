@@ -26,6 +26,10 @@ type Run struct {
 	User       string // 触发者（会话用户；历史行为空）
 	StartedAt  string
 	FinishedAt string
+	// exec 的执行证据：截断快照 + 完整脚本的 sha256（列表不回传——
+	// 50 行 × 16 KiB 会撑爆列表响应，只有详情端点显式带出）。
+	Script    string `json:"-"`
+	ScriptSHA string `json:"-"`
 }
 
 // RunTask 是执行中的一条任务结果（reporter 回调写入）。
@@ -41,46 +45,71 @@ type RunTask struct {
 	Detail  string
 }
 
-// CreateRun 建执行记录（phase：应用执行的相位，exec 传空；status 初始
-// 状态：'queued'（等执行闸门）或 'running'）。
-func (s *Store) CreateRun(kind string, appID int64, appName, version, phase string, seq int, selector, user, status string) (int64, error) {
-	if status == "" {
-		status = "running"
+// CreateRun 建单条执行记录（status 空时按 running；exec 传入 Script/
+// ScriptSHA 作执行证据，应用执行留空）。
+func (s *Store) CreateRun(in RunInput) (int64, error) {
+	if in.Status == "" {
+		in.Status = "running"
 	}
-	res, err := s.db.Exec(`INSERT INTO runs (kind, app_id, app_name, version, phase, seq, status, selector, user, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		kind, appID, appName, version, phase, seq, status, selector, user, nowUTC())
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
+	id, err := s.lastInsertID(s.rawExecer(), `INSERT INTO runs (kind, app_id, app_name, version, phase, seq, status, selector, user, script, script_sha256, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.Kind, in.AppID, in.AppName, in.Version, in.Phase, in.Seq, in.Status, in.Selector, in.User, in.Script, in.ScriptSHA, nowUTC())
 	return id, err
 }
 
 // SetRunStatus 仅改状态（queued → running）。
 func (s *Store) SetRunStatus(id int64, status string) error {
-	_, err := s.db.Exec(`UPDATE runs SET status = ? WHERE id = ?`, status, id)
+	_, err := s.exec(`UPDATE runs SET status = ? WHERE id = ?`, status, id)
 	return err
 }
 
 // FinishRun 收尾。
 func (s *Store) FinishRun(id int64, status, summary string) error {
-	_, err := s.db.Exec(`UPDATE runs SET status = ?, summary = ?, finished_at = ? WHERE id = ?`, status, summary, nowUTC(), id)
+	_, err := s.exec(`UPDATE runs SET status = ?, summary = ?, finished_at = ? WHERE id = ?`, status, summary, nowUTC(), id)
 	return err
 }
 
 // AddRunTask 记一条任务结果。
 func (s *Store) AddRunTask(t *RunTask) error {
-	_, err := s.db.Exec(`INSERT INTO run_tasks (run_id, play, task, module, host, status, changed, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+	_, err := s.exec(`INSERT INTO run_tasks (run_id, play, task, module, host, status, changed, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.RunID, t.Play, t.Task, t.Module, t.Host, t.Status, t.Changed, t.Detail)
 	return err
 }
 
-// ListRuns 最近执行（limit 上限 100）。
+// ListRuns 最近执行（limit 上限 100）。script/script_sha256 不取——
+// 列表不回传执行证据（体积），详情端点（GetRun）才需要。
+// ListRunsPage 分页执行记录（新→旧；kind 过滤可选）。
+func (s *Store) ListRunsPage(kind string, page, size int) ([]*Run, int64, error) {
+	where, args := "", []any{}
+	if kind != "" {
+		where = " WHERE kind = ?"
+		args = append(args, kind)
+	}
+	var total int64
+	if err := s.queryRow(`SELECT COUNT(*) FROM runs`+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.query(`SELECT id, kind, app_id, app_name, version, phase, seq, status, selector, summary, user, started_at, finished_at FROM runs`+where+` ORDER BY id DESC LIMIT ? OFFSET ?`,
+		append(args, size, (page-1)*size)...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	out := []*Run{}
+	for rows.Next() {
+		var r Run
+		if err := rows.Scan(&r.ID, &r.Kind, &r.AppID, &r.AppName, &r.Version, &r.Phase, &r.Seq, &r.Status, &r.Selector, &r.Summary, &r.User, &r.StartedAt, &r.FinishedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, &r)
+	}
+	return out, total, rows.Err()
+}
+
 func (s *Store) ListRuns(limit int) ([]*Run, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	rows, err := s.db.Query(`SELECT id, kind, app_id, app_name, version, phase, seq, status, selector, summary, user, started_at, finished_at FROM runs ORDER BY id DESC LIMIT ?`, limit)
+	rows, err := s.query(`SELECT id, kind, app_id, app_name, version, phase, seq, status, selector, summary, user, started_at, finished_at FROM runs ORDER BY id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -96,11 +125,11 @@ func (s *Store) ListRuns(limit int) ([]*Run, error) {
 	return out, rows.Err()
 }
 
-// GetRun 单条执行。
+// GetRun 单条执行（含 exec 的脚本快照与哈希）。
 func (s *Store) GetRun(id int64) (*Run, error) {
 	r := &Run{}
-	err := s.db.QueryRow(`SELECT id, kind, app_id, app_name, version, phase, seq, status, selector, summary, user, started_at, finished_at FROM runs WHERE id = ?`, id).
-		Scan(&r.ID, &r.Kind, &r.AppID, &r.AppName, &r.Version, &r.Phase, &r.Seq, &r.Status, &r.Selector, &r.Summary, &r.User, &r.StartedAt, &r.FinishedAt)
+	err := s.queryRow(`SELECT id, kind, app_id, app_name, version, phase, seq, status, selector, summary, user, started_at, finished_at, script, script_sha256 FROM runs WHERE id = ?`, id).
+		Scan(&r.ID, &r.Kind, &r.AppID, &r.AppName, &r.Version, &r.Phase, &r.Seq, &r.Status, &r.Selector, &r.Summary, &r.User, &r.StartedAt, &r.FinishedAt, &r.Script, &r.ScriptSHA)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -109,7 +138,7 @@ func (s *Store) GetRun(id int64) (*Run, error) {
 
 // RunTasks 执行的任务明细。
 func (s *Store) RunTasks(runID int64) ([]*RunTask, error) {
-	rows, err := s.db.Query(`SELECT id, run_id, play, task, module, host, status, changed, detail FROM run_tasks WHERE run_id = ? ORDER BY id`, runID)
+	rows, err := s.query(`SELECT id, run_id, play, task, module, host, status, changed, detail FROM run_tasks WHERE run_id = ? ORDER BY id`, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +168,27 @@ func (s *Store) DeleteRun(id int64) error {
 		_, err = q.Exec(`DELETE FROM run_tasks WHERE run_id = ?`, id)
 		return err
 	})
+}
+
+// PruneRuns 保留策略：删除 started_at 早于 cutoff 的**已终结** run 及其
+// 任务明细，返回删除的 run 数。queued/running 恒不删——在途执行可能正被
+// 任何进程推进，删了会让闸门与 SSE 对着幽灵 run 工作。runs 随执行历史
+// 线性增长且任务明细/脚本快照是体积大头，无清理通道则库无界膨胀。
+func (s *Store) PruneRuns(cutoff string) (int64, error) {
+	var n int64
+	err := s.tx(func(q execer) error {
+		if _, err := q.Exec(`DELETE FROM run_tasks WHERE run_id IN
+			(SELECT id FROM runs WHERE started_at < ? AND status NOT IN ('queued','running'))`, cutoff); err != nil {
+			return err
+		}
+		res, err := q.Exec(`DELETE FROM runs WHERE started_at < ? AND status NOT IN ('queued','running')`, cutoff)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
+	return n, err
 }
 
 // ---- 执行状态对账与准入 ----
@@ -188,7 +238,7 @@ func (s *Store) ActiveRunsByApp(appIDs []int64) ([]ActiveRun, error) {
 	for _, id := range appIDs {
 		args = append(args, id)
 	}
-	rows, err := s.db.Query(`SELECT id, app_id, app_name, phase, status, user FROM runs WHERE status IN ('queued','running') AND app_id IN (`+ph+`) ORDER BY id`, args...)
+	rows, err := s.query(`SELECT id, app_id, app_name, phase, status, user FROM runs WHERE status IN ('queued','running') AND app_id IN (`+ph+`) ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -239,12 +289,8 @@ func (s *Store) CreateRunsExclusive(items []RunInput) (ids []int64, err error) {
 		}
 		ids = make([]int64, 0, len(items))
 		for _, it := range items {
-			res, err := q.Exec(`INSERT INTO runs (kind, app_id, app_name, version, phase, seq, status, selector, user, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				it.Kind, it.AppID, it.AppName, it.Version, it.Phase, it.Seq, it.Status, it.Selector, it.User, nowUTC())
-			if err != nil {
-				return err
-			}
-			id, err := res.LastInsertId()
+			id, err := s.lastInsertID(q, `INSERT INTO runs (kind, app_id, app_name, version, phase, seq, status, selector, user, script, script_sha256, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				it.Kind, it.AppID, it.AppName, it.Version, it.Phase, it.Seq, it.Status, it.Selector, it.User, it.Script, it.ScriptSHA, nowUTC())
 			if err != nil {
 				return err
 			}
@@ -265,7 +311,7 @@ func (s *Store) CreateRunsExclusive(items []RunInput) (ids []int64, err error) {
 // errConflict 是事务内部 sentinel：回滚插入并以 RunConflictError 对外交付。
 var errConflict = errors.New("active run exists")
 
-// RunInput 是 CreateRunsExclusive 的入参（CreateRun 的结构化形态）。
+// RunInput 是 CreateRun/CreateRunsExclusive 的入参。
 type RunInput struct {
 	Kind     string
 	AppID    int64
@@ -276,6 +322,10 @@ type RunInput struct {
 	Status   string
 	Selector string
 	User     string
+	// exec 的执行证据（应用执行留空）：Script 为截断快照，ScriptSHA 为
+	// 完整脚本的 sha256 十六进制。
+	Script    string
+	ScriptSHA string
 }
 
 // activeRunsByApp 是 ActiveRunsByApp 的事务内版本（复用准入查询口径）。
@@ -319,7 +369,7 @@ func (s *Store) HostTasksByName(host string, limit int) ([]*HostTaskItem, error)
 	if limit <= 0 || limit > 100 {
 		limit = 20
 	}
-	rows, err := s.db.Query(`SELECT rt.run_id, COALESCE(r.app_name, ''), r.kind, rt.task, rt.module, rt.status, rt.changed, rt.detail, r.started_at
+	rows, err := s.query(`SELECT rt.run_id, COALESCE(r.app_name, ''), r.kind, rt.task, rt.module, rt.status, rt.changed, rt.detail, r.started_at
 		FROM run_tasks rt JOIN runs r ON r.id = rt.run_id
 		WHERE rt.host = ? ORDER BY rt.id DESC LIMIT ?`, host, limit)
 	if err != nil {

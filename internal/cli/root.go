@@ -8,6 +8,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"wdp/internal/config"
+	"wdp/internal/i18n"
+	"wdp/internal/i18nhelp"
 )
 
 // cmd --version Printf（值经 buildinfo 别名——ldflags 注入点在 buildinfo，
@@ -20,7 +22,7 @@ var (
 )
 
 func version() string {
-	return fmt.Sprintf("%s\ngolang %s\ncommit %s\nbuilt %s", Version, GoVersion, Commit, BuildDate)
+	return fmt.Sprintf("%s\ngolang %s\ncommit %s\nbuilt %s\ntier %s", Version, GoVersion, Commit, BuildDate, buildinfo.Tier)
 }
 
 // 命令分组
@@ -55,7 +57,7 @@ func NewRootCmd() *cobra.Command {
 	cobra.EnableCommandSorting = false
 	root := &cobra.Command{
 		Use:           "wdp",
-		Short:         "wdp — an automation & deployment tool",
+		Short:         i18n.T("wdp — an automation & deployment tool", "wdp — 自动化与部署工具"),
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Version:       version(),
@@ -69,15 +71,25 @@ func NewRootCmd() *cobra.Command {
 
 	pf := root.PersistentFlags()
 	pf.StringVar(&cfgPath, "config", config.DefaultPath, "config file path (TOML, default "+config.DefaultPath+" in current dir)")
-	pf.StringArrayVarP(&gInventories, "inventory", "i", nil, "inventory file path (repeatable, later merges over earlier; default inventory.yaml)")
+	pf.StringArrayVarP(&gInventories, "inventory", "i", nil, i18n.T(
+		"inventory file path (repeatable, later merges over earlier; default inventory.yaml)",
+		"清单文件路径（可重复，后者覆盖前者合并；默认 inventory.yaml）"))
 	pf.IntVar(&flForks, "forks", 5, "host concurrency")
-	pf.IntVar(&flTimeout, "timeout", 0, "global timeout in seconds, 0 = unlimited")
-	pf.IntVar(&flTaskTimeout, "task-timeout", 0, "default task timeout in seconds, 0 = unlimited; overridable per task")
-	pf.CountVarP(&gVerbosity, "verbose", "v", "verbosity (repeatable): -v per-host / -vv full stdout/stderr & loop items / -vvv debug")
+	pf.IntVar(&flTimeout, "timeout", 0, i18n.T(
+		"global timeout in seconds, 0 = unlimited",
+		"全局超时（秒），0 = 不限制"))
+	pf.IntVar(&flTaskTimeout, "task-timeout", 0, i18n.T(
+		"default task timeout in seconds, 0 = unlimited; overridable per task",
+		"任务默认超时（秒），0 = 不限制；可按任务单独覆盖"))
+	pf.CountVarP(&gVerbosity, "verbose", "v", i18n.T(
+		"verbosity (repeatable): -v per-host / -vv full stdout/stderr & loop items / -vvv debug",
+		"输出详细度（可重复）：-v 逐主机 / -vv 全量 stdout/stderr 与循环项 / -vvv 调试"))
 	pf.BoolVarP(&gQuiet, "quiet", "q", false, "quiet: only failed hosts and RECAP")
 	pf.BoolVar(&flNoColor, "no-color", false, "disable colored output")
 	pf.StringVar(&gOutput, "output", "console", "output format: console | json (machine-readable; applies to run/apply/adhoc/drift, other commands print plain tables)")
-	pf.Int64Var(&flMaxDown, "max-download-mb", 0, "get_url download body size limit in MiB (0 = follow wdp.cfg [transfer], default 2048)")
+	pf.Int64Var(&flMaxDown, "max-download-mb", 0, i18n.T(
+		"get_url download body size limit in MiB (0 = follow wdp.cfg [transfer], default 2048)",
+		"get_url 下载体积上限（MiB，0 = 跟随 wdp.cfg [transfer]，默认 2048）"))
 
 	// 子命令 RunE 前统一加载 wdp.cfg，再把显式指定的 flag 覆盖进当前配置
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
@@ -117,36 +129,8 @@ func NewRootCmd() *cobra.Command {
 		return nil
 	}
 
-	addCommandGroups(root,
-		commandGroup{"deploy", "Deployment", []*cobra.Command{
-			newRunCmd(),
-			newPlanCmd(),
-			newApplyCmd(),
-			newAdhocCmd(),
-		}},
-		commandGroup{"chart", "Package", []*cobra.Command{
-			newSchemaCmd(),
-			newModuleCmd(),
-			newRenderCmd(),
-			newLintCmd(),
-			newPackageCmd(),
-		}},
-		commandGroup{"security", "Security", []*cobra.Command{
-			newCACmd(),
-		}},
-		commandGroup{"agent", "Agent", []*cobra.Command{
-			newAgentCmd(),
-			newAgentCtlCmd(),
-		}},
-		commandGroup{"console", "Console", []*cobra.Command{
-			newServerCmd(),
-		}},
-		commandGroup{"ops", "Operations", []*cobra.Command{
-			newDriftCmd(),
-			newReleaseCmd(),
-			newInventoryCmd(),
-		}},
-	)
+	registerCommandGroups(root)
+	i18nhelp.Setup(root)
 
 	return root
 }

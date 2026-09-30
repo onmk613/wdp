@@ -353,16 +353,18 @@ curl -fsSL --cacert "$TMP/ca.crt" -X POST -H 'Content-Type: application/json' \
   -d "{\"hostname\":\"$(uname -n)\",\"platform\":\"$PLATFORM\"}" \
   "$BASE/enroll/$TOKEN/claim" >/dev/null
 
-# 4. 证书三件套
-curl -fsSL --cacert "$TMP/ca.crt" "$BASE/enroll/$TOKEN/host-cert" -o "$TMP/agent.crt"
-curl -fsSL --cacert "$TMP/ca.crt" "$BASE/enroll/$TOKEN/host-key" -o "$TMP/agent.key"
+# 4. 证书：目标机本地生成密钥并出 CSR（私钥永不离开本机），server 只
+#    回签证书——server 不持有也不传输任何逐主机私钥（docs/20）
+"$TMP/wdp" agent gencsr --key "$ETC_DIR/agent.key" --csr "$TMP/agent.csr"
+curl -fsSL --cacert "$TMP/ca.crt" -X POST --data-binary @"$TMP/agent.csr" \
+  -H 'Content-Type: application/pem-certificate-request' \
+  "$BASE/enroll/$TOKEN/csr" -o "$TMP/agent.crt"
 
-# 5. 落盘 + systemd 常驻
+# 5. 落盘 + systemd 常驻（agent.key 已由 gencsr 写入最终位置）
 install -m 0755 "$TMP/wdp" "$BIN_DIR/wdp"
 mkdir -p "$ETC_DIR"
 install -m 0644 "$TMP/ca.crt" "$ETC_DIR/ca.crt"
 install -m 0644 "$TMP/agent.crt" "$ETC_DIR/agent.crt"
-install -m 0600 "$TMP/agent.key" "$ETC_DIR/agent.key"
 
 cat > "/etc/systemd/system/$UNIT.service" <<UNIT_EOF
 {{ .UnitBody }}UNIT_EOF
@@ -387,8 +389,7 @@ func (s *Server) routesEnroll() {
 	s.mux.HandleFunc("GET /enroll/{token}/binary/{platform}", s.handleEnrollBinary)
 	s.mux.HandleFunc("GET /enroll/{token}/binary-sha256/{platform}", s.handleEnrollBinarySHA256)
 	s.mux.HandleFunc("POST /enroll/{token}/claim", s.handleEnrollClaim)
-	s.mux.HandleFunc("GET /enroll/{token}/host-cert", s.handleEnrollHostCert)
-	s.mux.HandleFunc("GET /enroll/{token}/host-key", s.handleEnrollHostKey)
+	s.mux.HandleFunc("POST /enroll/{token}/csr", s.handleEnrollCSR)
 	s.mux.HandleFunc("POST /enroll/{token}/done", s.handleEnrollDone)
 }
 
@@ -453,7 +454,7 @@ var hostHeaderNameRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 func (s *Server) advertiseBase(r *http.Request) (string, error) {
 	if s.opts.AdvertiseURL != "" {
 		base := strings.TrimRight(s.opts.AdvertiseURL, "/")
-		if !s.opts.AllowPlaintextEnroll && !strings.HasPrefix(base, "https://") {
+		if !s.allowPlaintextEnroll() && !strings.HasPrefix(base, "https://") {
 			return "", errors.New("advertise URL must be https:// (set --allow-plaintext-enroll to override on a trusted network)")
 		}
 		return base, nil
@@ -471,7 +472,7 @@ func (s *Server) advertiseBase(r *http.Request) (string, error) {
 		return "", errors.New("invalid Host header")
 	}
 	// 采信可信反代的 X-Forwarded-Proto（TLS 终止在反代时 r.TLS 为空）
-	if !s.requestIsHTTPS(r) && !s.opts.AllowPlaintextEnroll {
+	if !s.requestIsHTTPS(r) && !s.allowPlaintextEnroll() {
 		return "", errors.New("refusing to hand out an enroll command over plaintext HTTP: " +
 			"enable --tls-cert/--tls-key, terminate TLS at a trusted proxy (--trust-proxy), " +
 			"set --advertise https://…, or explicitly opt in with --allow-plaintext-enroll on a trusted network")
@@ -654,14 +655,15 @@ func (s *Server) handleEnrollClaim(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	t, err := s.st.ClaimEnrollToken(tok, req.Hostname, s.remoteIP(r))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "unknown enroll token")
-		return
-	}
-	if err != nil {
+	// claim 只登记身份；证书在 CSR 阶段签发（私钥在目标机本地生成，
+	// server 不经手——见 handleEnrollCSR）
+	if _, err := s.st.ClaimEnrollToken(tok, req.Hostname, s.remoteIP(r)); err != nil {
 		// 业务错误（过期/已用/被他人 claim）是合法 410；其余是 DB 故障，
 		// 不得按 410 透出原始错误串（err.Error() 常带内部细节，见 httpx 口径）
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "unknown enroll token")
+			return
+		}
 		if errors.Is(err, store.ErrTokenUsed) || errors.Is(err, store.ErrTokenExpired) || store.IsBizErr(err) {
 			writeError(w, http.StatusGone, err.Error())
 			return
@@ -669,43 +671,22 @@ func (s *Server) handleEnrollClaim(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, err)
 		return
 	}
-	// claim 首次到达时签发逐主机证书（SAN：来源 IP + hostname + 绑定名）
-	if err := s.issueHostCert(t); err != nil {
-		s.writeInternal(w, err)
-		return
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
-// hostCertPaths 逐主机证书落盘路径（<caDir>/hosts/<name>.crt|.key）。
-func (s *Server) hostCertPaths(name string) (string, string) {
-	safe := safeName(name)
-	return filepath.Join(s.cam.dir, "hosts", safe+".crt"), filepath.Join(s.cam.dir, "hosts", safe+".key")
+// tokenHostName 凭证对应的主机名（优先级：绑定名 → claim hostname → 来源地址）。
+func tokenHostName(t *store.EnrollToken) string {
+	if t.HostName != "" {
+		return t.HostName
+	}
+	if t.ClaimHost != "" {
+		return t.ClaimHost
+	}
+	return t.ClaimAddress
 }
 
-// issueHostCert 为凭证对应主机签发服务端证书。已存在的同名证书只有在
-// 其 SAN 覆盖本次 claim 身份（来源 IP 或 hostname）时才跳过——那才是
-// 真正的"同机重装"幂等；不覆盖则按孤儿证书处理，重新签发覆盖。不做
-// 归属校验的一刀切跳过会把既有主机的证书/私钥交付给撞名的 claim 方。
-func (s *Server) issueHostCert(t *store.EnrollToken) error {
-	name := t.HostName
-	if name == "" {
-		name = t.ClaimHost
-	}
-	if name == "" {
-		name = t.ClaimAddress
-	}
-	crt, _ := s.hostCertPaths(name)
-	if _, err := os.Stat(crt); err == nil {
-		if certCoversClaim(crt, t) {
-			return nil
-		}
-		// 孤儿证书（台账主机已删/改名残留）：覆盖重签，匹配本次 claim 身份
-		s.logger.Warn("enroll: reissuing host cert (existing cert does not cover claim identity)",
-			"name", safeName(name), "claim_address", t.ClaimAddress, "claim_host", t.ClaimHost)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
+// hostSANsOf 逐主机证书的 SAN（来源 IP + claim hostname + 绑定名）。
+func hostSANsOf(t *store.EnrollToken) ([]string, error) {
 	sans := []string{}
 	if ip := net.ParseIP(t.ClaimAddress); ip != nil {
 		sans = append(sans, t.ClaimAddress)
@@ -717,13 +698,124 @@ func (s *Server) issueHostCert(t *store.EnrollToken) error {
 		sans = append(sans, t.HostName)
 	}
 	if len(sans) == 0 {
-		return fmt.Errorf("no SAN available for host cert (claim info empty)")
+		return nil, fmt.Errorf("no SAN available for host cert (claim info empty)")
 	}
-	_, _, _, err := ca.Issue(ca.IssueOptions{
+	return sans, nil
+}
+
+// hostCertPaths 逐主机证书落盘路径（<caDir>/hosts/<name>.crt|.key）。
+func (s *Server) hostCertPaths(name string) (string, string) {
+	safe := safeName(name)
+	return filepath.Join(s.cam.dir, "hosts", safe+".crt"), filepath.Join(s.cam.dir, "hosts", safe+".key")
+}
+
+// handleEnrollCSR 目标机提交 CSR、换取逐主机证书（CSR 纳管核心端点，
+// docs/20）：私钥在目标机本地生成、永不离开——server 只见过公钥。
+// 门禁与幂等：
+//   - token 未用未过期且已 claim（与旧交付端点同口径 410）；
+//   - 提交必须来自 claim 的同一来源（token 会经 URL 进反代日志与
+//     shell 历史，来源绑定 + 验签确保"持有私钥的那台机器"才能拿到证书）；
+//   - token 首次接受 CSR 即锁定到该公钥：同钥重试幂等（脚本可重跑），
+//     异钥 410（token 泄露后换钥匙冒名）；
+//   - 证书 SAN 全部由 server 侧 claim 身份重建，CSR 自报身份一律忽略。
+func (s *Server) handleEnrollCSR(w http.ResponseWriter, r *http.Request) {
+	t, err := s.st.GetEnrollToken(r.PathValue("token"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "unknown enroll token")
+		return
+	}
+	if err != nil {
+		s.writeInternal(w, err)
+		return
+	}
+	if t.UsedAt != "" || timeNowUTC().After(mustTime(t.ExpiresAt)) || t.ClaimHost == "" {
+		writeError(w, http.StatusGone, "claim the token first")
+		return
+	}
+	if t.ClaimAddress != "" && t.ClaimAddress != s.remoteIP(r) {
+		s.logger.Warn("enroll csr refused: source mismatch",
+			"token", shortToken(t.Token), "claim", t.ClaimAddress, "from", s.remoteIP(r))
+		writeError(w, http.StatusForbidden, "enroll certificate must be requested from the claiming host")
+		return
+	}
+	body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+	if err != nil {
+		s.writeInternal(w, err)
+		return
+	}
+	csr, err := ca.ParseCSR(body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid CSR: "+err.Error())
+		return
+	}
+	pubSHA, err := ca.PubkeySHA(csr.PublicKey)
+	if err != nil {
+		s.writeInternal(w, err)
+		return
+	}
+	if err := s.st.LockEnrollCSRKey(t.Token, pubSHA); err != nil {
+		if store.IsBizErr(err) {
+			writeError(w, http.StatusGone, err.Error())
+			return
+		}
+		if errors.Is(err, store.ErrTokenUsed) || errors.Is(err, store.ErrTokenExpired) {
+			writeError(w, http.StatusGone, err.Error())
+			return
+		}
+		s.writeInternal(w, err)
+		return
+	}
+	name := tokenHostName(t)
+	sans, err := hostSANsOf(t)
+	if err != nil {
+		s.writeInternal(w, err)
+		return
+	}
+	crtPath := filepath.Join(s.cam.dir, "hosts", safeName(name)+".crt")
+
+	// 幂等：既有证书覆盖本次 claim 身份**且**公钥与本 CSR 一致 → 原样
+	// 返回（脚本重跑不换证书）。覆盖但异钥 = 同机丢钥重装，换新公钥
+	// 重签；不覆盖 = 孤儿证书（台账主机已删/改名残留），重签覆盖。
+	if certCoversClaim(crtPath, t) {
+		if certPubkeySHA, perr := certPubkeySHAOf(crtPath); perr == nil && certPubkeySHA == pubSHA {
+			serveHostCert(w, crtPath)
+			return
+		}
+		s.logger.Warn("enroll: reissuing host cert (claim identity holds a different key — host reinstall)",
+			"name", safeName(name), "claim_address", t.ClaimAddress)
+	} else if _, statErr := os.Stat(crtPath); statErr == nil {
+		s.logger.Warn("enroll: reissuing host cert (existing cert does not cover claim identity)",
+			"name", safeName(name), "claim_address", t.ClaimAddress, "claim_host", t.ClaimHost)
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		s.writeInternal(w, statErr)
+		return
+	}
+	if _, _, err := ca.SignCSR(ca.SignCSROptions{
 		Dir: filepath.Join(s.cam.dir, "hosts"), CACertPath: s.cam.caPath, CAKeyPath: s.cam.caKeyPath,
 		SANs: sans, Profile: ca.ProfileServer, Days: DefaultAgentCertDays,
-	}, safeName(name))
-	return err
+	}, csr, safeName(name)); err != nil {
+		s.writeInternal(w, err)
+		return
+	}
+	s.auditEntry(name, s.remoteIP(r), "enroll", "host", safeName(name), "CSR 签发证书（私钥留目标机）")
+	serveHostCert(w, crtPath)
+}
+
+// serveHostCert 回证书 PEM（同一 MIME 口径）。
+func serveHostCert(w http.ResponseWriter, crtPath string) {
+	b, err := os.ReadFile(crtPath)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/x-pem-file")
+	_, _ = w.Write(b)
+}
+
+// certPubkeySHAOf 证书公钥的 sha256（SPKI DER；与 ca.PubkeySHA 同口径，
+// 幂等判定"既有证书 == 本次 CSR 同钥"用）。
+func certPubkeySHAOf(crtPath string) (string, error) {
+	return ca.CertPubkeySHA(crtPath)
 }
 
 // certCoversClaim 报告既有证书的 SAN 是否覆盖本次 claim 身份（来源 IP
@@ -743,67 +835,6 @@ func certCoversClaim(crtPath string, t *store.EnrollToken) bool {
 		}
 	}
 	return false
-}
-
-func (s *Server) handleEnrollHostCert(w http.ResponseWriter, r *http.Request) {
-	s.serveHostCertFile(w, r, ".crt", "application/x-pem-file")
-}
-
-func (s *Server) handleEnrollHostKey(w http.ResponseWriter, r *http.Request) {
-	s.serveHostCertFile(w, r, ".key", "application/x-pem-file")
-}
-
-func (s *Server) serveHostCertFile(w http.ResponseWriter, r *http.Request, ext, ctype string) {
-	t, err := s.st.GetEnrollToken(r.PathValue("token"))
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "unknown enroll token")
-		return
-	}
-	if err != nil {
-		s.writeInternal(w, err)
-		return
-	}
-	if t.UsedAt != "" || timeNowUTC().After(mustTime(t.ExpiresAt)) || t.ClaimHost == "" {
-		writeError(w, http.StatusGone, "claim the token first")
-		return
-	}
-	// 交付物必须回到 claim 的同一来源：token 会经 URL 出现在反代/网关
-	// 访问日志与 shell 历史里，不绑定来源就等于"拿到日志即可取走逐主机
-	// 私钥"（私钥能冒充该 agent，也能解开控制台与它的 mTLS 会话）。
-	if t.ClaimAddress != "" && t.ClaimAddress != s.remoteIP(r) {
-		s.logger.Warn("enroll delivery refused: source mismatch",
-			"token", shortToken(t.Token), "claim", t.ClaimAddress, "from", s.remoteIP(r))
-		writeError(w, http.StatusForbidden, "enroll delivery must come from the claiming host")
-		return
-	}
-	// 私钥只在"证书尚未交付"的窗口内可取：done 之前任意次重试都可以拿到
-	// 证书（安装可重跑），但私钥一旦被取走就不该再由 URL 里的 token 换出。
-	if ext == ".key" && t.KeyDeliveredAt != "" {
-		writeError(w, http.StatusGone, "host key already delivered; re-enroll with a fresh token")
-		return
-	}
-	name := t.HostName
-	if name == "" {
-		name = t.ClaimHost
-	}
-	if name == "" {
-		name = t.ClaimAddress
-	}
-	b, err := os.ReadFile(filepath.Join(s.cam.dir, "hosts", safeName(name)+ext))
-	if err != nil {
-		s.writeInternal(w, err)
-		return
-	}
-	w.Header().Set("Content-Type", ctype)
-	_, _ = w.Write(b)
-	if ext == ".key" {
-		// 私钥一旦交付即作废该路径：token 会留在访问日志与 shell 历史里，
-		// 只靠 TTL 与来源绑定仍嫌宽（重装请重新生成 token）
-		if err := s.st.MarkEnrollKeyDelivered(t.ID); err != nil {
-			s.logger.Warn("enroll: mark key delivered", "token", shortToken(t.Token), "err", err)
-		}
-		s.auditEntry(name, s.remoteIP(r), "enroll", "host", safeName(name), "逐主机私钥已交付（一次性）")
-	}
 }
 
 // handleEnrollDone 消费 token、落账，返回台账名。
@@ -832,17 +863,20 @@ func (s *Server) handleEnrollDone(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusGone, "claim the token first")
 		return
 	}
+	// 落账名：显式绑定优先，claim 身份兜底。HostName 创建后不可变、
+	// claim 身份首次锁定（store 层异值拒绝），消费前后取值一致——故
+	// 在消费前的快照上算一次即可。
+	name := pre.HostName
+	if name == "" {
+		name = pre.ClaimHost
+	}
+	if name == "" {
+		name = pre.ClaimAddress
+	}
 	// 落账前的最后一道同名异址守卫（claim 与 done 之间台账可能变化）：
 	// 未绑定主机名的 token 不允许改写既有主机的地址。显式绑定的 token
 	// 是管理员对该主机的重装/迁移授权，放行。
 	if pre.HostName == "" {
-		name := pre.HostName
-		if name == "" {
-			name = pre.ClaimHost
-		}
-		if name == "" {
-			name = pre.ClaimAddress
-		}
 		if existing, gerr := s.st.GetHostByName(safeName(name)); gerr == nil && existing.Address != pre.ClaimAddress {
 			s.logger.Warn("enroll done refused: would hijack ledger address",
 				"name", safeName(name), "ledger_address", existing.Address, "claim_address", pre.ClaimAddress)
@@ -864,35 +898,12 @@ func (s *Server) handleEnrollDone(w http.ResponseWriter, r *http.Request) {
 		s.writeInternal(w, err)
 		return
 	}
-	name := t.HostName
-	if name == "" {
-		name = t.ClaimHost
-	}
-	if name == "" {
-		name = t.ClaimAddress
-	}
 	port := req.AgentPort
 	if port <= 0 {
 		port = t.AgentPort
 	}
-	// 从未 claim 过的 token 没有 claim 身份，落账既无名字也无地址——
-	// 与证书交付同口径 410（被拒的撞名 claim 不会落 ClaimHost）。
-	if t.ClaimHost == "" && t.ClaimAddress == "" {
-		writeError(w, http.StatusGone, "claim the token first")
-		return
-	}
-	// 落账前的最后一道同名异址守卫（claim 与 done 之间台账可能变化）：
-	// 未绑定主机名的 token 不允许改写既有主机的地址。显式绑定的 token
-	// 是管理员对该主机的重装/迁移授权，放行。
-	if t.HostName == "" {
-		if existing, gerr := s.st.GetHostByName(safeName(name)); gerr == nil && existing.Address != t.ClaimAddress {
-			s.logger.Warn("enroll done refused: would hijack ledger address",
-				"name", safeName(name), "ledger_address", existing.Address, "claim_address", t.ClaimAddress)
-			writeError(w, http.StatusConflict,
-				"host name already exists with a different address; re-enroll with a token bound to this host name")
-			return
-		}
-	}
+	// claim 身份与 HostName 消费前后不可变（见上方 name 的论证），上面的
+	// 守卫结论对消费后的 t 同样成立，不再重复检查。
 	id, err := s.st.UpsertHostByName(safeName(name), t.ClaimAddress, port)
 	if err != nil {
 		s.writeInternal(w, err)

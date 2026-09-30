@@ -1,4 +1,4 @@
-package plan
+package planbuild
 
 // chart 引用任务的 hosts:/values_from: 必须在计划镜像中保留——执行侧展开
 // 子 chart 时消费这两个字段（expand.go），丢失会导致 run 与 apply 行为
@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"wdp/internal/inventory"
+	"wdp/internal/plan"
 )
 
 // TestChartRefHostsAndValuesFromSurviveCompile 验证 hosts/values_from 进入
@@ -45,7 +46,7 @@ func TestChartRefHostsAndValuesFromSurviveCompile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var rt *ResolvedTask
+	var rt *plan.ResolvedTask
 	for _, hp := range p.Hosts {
 		for _, task := range hp.Tasks {
 			if task.ChartRef == "jdk" {
@@ -68,7 +69,7 @@ func TestChartRefHostsAndValuesFromSurviveCompile(t *testing.T) {
 	if err := p.Write(out); err != nil {
 		t.Fatal(err)
 	}
-	p2, err := Load(out)
+	p2, err := plan.Load(out)
 	if err != nil {
 		t.Fatal(err)
 	}

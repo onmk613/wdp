@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"wdp/internal/agentbin"
@@ -49,6 +50,13 @@ type Options struct {
 	// 脚本内嵌的 CA 指纹与脚本同源同通道、对主动 MITM 无价值。仅在
 	// 可信内网/离线演示时显式打开。
 	AllowPlaintextEnroll bool
+	// 保留策略（天；0 = 永久保留）。runs/run_tasks/audit_logs/app_drafts
+	// 随历史线性增长且无时间清理通道（metrics_5m 另有 30 天桶清理），
+	// 长期运行的库膨胀与敏感数据残留（草稿/exec 脚本快照）都靠这里收口。
+	// 清理每日一轮，只动早于 cutoff 的行；queued/running 恒不删。
+	RunsRetentionDays   int // 已终结 run（含任务明细与脚本快照）
+	AuditRetentionDays  int // 操作审计
+	DraftsRetentionDays int // 编辑器草稿（payload 含口令）
 }
 
 // Server 是控制台 HTTP 服务。
@@ -60,20 +68,27 @@ type Server struct {
 	logger         *slog.Logger
 	cam            *caMaterial
 	binResolver    func(platform string) (string, bool)
-	gate           *hostGate            // per-host 执行闸门（run/exec/升级互斥）
-	monitor        *worker.Monitor      // 指标采样器（差分快照归它持有；主机删除时 Forget）
-	apps           *console.AppService  // 应用领域服务（spec 物化/打包；见 internal/console）
-	runs           *runHub              // 执行事件扇出（SSE 订阅端见 runevents.go）
-	runsvc         *console.RunService  // 应用执行编排（见 internal/console/run.go）
-	execsvc        *console.ExecService // 远程命令执行（见 internal/console/exec.go）
-	bgCtx          context.Context      // Run 注入的生命周期 ctx（后台 run goroutine 挂钩关停；测试直连 Handler 时为 nil）
-	permMu         sync.RWMutex         // 权限视图缓存
+	gate           *hostGate                 // per-host 执行闸门（run/exec/升级互斥）
+	monitor        *worker.Monitor           // 指标采样器（差分快照归它持有；主机删除时 Forget）
+	apps           *console.AppService       // 应用领域服务（spec 物化/打包；见 internal/console）
+	runs           *runHub                   // 执行事件扇出（SSE 订阅端见 runevents.go）
+	runsvc         *console.RunService       // 应用执行编排（见 internal/console/run.go）
+	execsvc        *console.ExecService      // 远程命令执行（见 internal/console/exec.go）
+	execStreams    *execHub                  // exec 逐主机结果流（SSE；见 execstream.go）
+	runCancelsMu   sync.Mutex                // run 取消注册表锁
+	runCancels     map[int64]*runCancelState // run → 取消句柄（POST /api/runs/{id}/cancel）
+	bgCtx          context.Context           // Run 注入的生命周期 ctx（后台 run goroutine 挂钩关停；测试直连 Handler 时为 nil）
+	permMu         sync.RWMutex              // 权限视图缓存
 	permCache      map[string]*userPerms
 	loginMu        sync.Mutex               // 登录失败限速表
 	loginFails     map[string]*loginAttempt // 限速键 → 失败计数/锁定截止；键族含 ip|、user|、basic| 前缀（构造见 authmw.go handleLogin/basicAuthUser）
 	uploadMu       sync.Mutex               // 上传互斥：版本预检→制品归位→入库整体临界区（防 TOCTOU 覆盖/误删）
 	trustedProxies []*net.IPNet             // 可采信 XFF 的对端（含回环；见 Options.TrustedProxies）
 	metrics        httpMetrics              // 请求计数/耗时观测（observability.go）
+	settings       liveSettings             // 运行时设置缓存（设置页在线改；见 settings.go）
+	agentClients   agentClientCache         // 按主机复用的 HTTP 客户端（批量执行省 TLS 握手）
+	proberMu       sync.Mutex               // 探活循环生命周期（设置改周期即停旧起新）
+	proberCancel   context.CancelFunc       // 当前探活循环的取消句柄
 }
 
 // sessionTable 内存会话表：token → {用户, 过期时刻}（滑动窗口，空闲 2h
@@ -81,6 +96,16 @@ type Server struct {
 type sessionTable struct {
 	mu     sync.Mutex
 	sessns map[string]session
+	// idleNS 空闲窗口（纳秒），设置页在线可改；0 = 内置默认 sessionTTL
+	idleNS atomic.Int64
+}
+
+// idleTTL 生效的空闲窗口（登录签发/滑动续期/cookie MaxAge 共用）。
+func (t *sessionTable) idleTTL() time.Duration {
+	if v := t.idleNS.Load(); v > 0 {
+		return time.Duration(v)
+	}
+	return sessionTTL
 }
 
 type session struct {
@@ -139,8 +164,20 @@ func New(st *store.Store, opts Options, logger *slog.Logger) (*Server, error) {
 	s.monitor = &worker.Monitor{Store: st, Logger: logger, Fetch: s.fetchAgentMetrics}
 	s.apps = &console.AppService{Store: st, DataDir: opts.DataDir, Logger: logger}
 	s.runs = newRunHub()
-	s.runsvc = &console.RunService{Store: st, Logger: logger}
-	s.execsvc = &console.ExecService{Store: st, HostModel: s.agentHostModelWithScheme}
+	s.execStreams = newExecHub()
+	s.runCancels = map[int64]*runCancelState{}
+	s.runsvc = &console.RunService{Store: st, Logger: logger, Forks: 25}
+	s.execsvc = &console.ExecService{
+		Store: st, HostModel: s.agentHostModelWithScheme,
+		SharedClient: func(h *store.Host) *http.Client { return s.agentClients.clientFor(s, h) },
+		Forks:        25, // web 批量执行：agent 常驻 HTTP 通道，无 SSH 每任务握手
+	}
+	// 设置加载在 New 尾声：库内设置覆盖 flag 默认（flag 退化为首次引导
+	// 值），周期类 worker 的回调与缓存在此接线
+	if err := s.loadSettingsInto(); err != nil {
+		return nil, fmt.Errorf("load settings: %w", err)
+	}
+	s.applyLiveSettings()
 	if opts.CADir != "" {
 		cam, err := bootstrapCA(opts.CADir, opts.CADays)
 		if err != nil {
@@ -233,10 +270,6 @@ func bootstrapAdmin(st *store.Store, opts *Options, logger *slog.Logger) error {
 // http.Flusher 在生产被中间件吞掉却全量测试绿灯。
 func (s *Server) Handler() http.Handler { return s.securityHeaders(s.metricsMiddleware(s.mux)) }
 
-// muxOnly 返回未包中间件的裸路由（仅供需要观察原始 ResponseWriter 的
-// 极端用例；业务测试一律用 Handler）。
-func (s *Server) muxOnly() http.Handler { return s.mux }
-
 // Addr 返回监听地址。
 func (s *Server) Addr() string { return s.opts.Addr }
 
@@ -246,6 +279,7 @@ func (s *Server) Run(ctx context.Context) error {
 	s.startProber(ctx)
 	s.startMonitor(ctx)
 	go s.sessionSweepLoop(ctx)
+	go s.startRetentionLoop(ctx)
 	// 超时只设读头与空闲：WriteTimeout 必须留 0——远程命令/升级是同步
 	// 长请求（脚本可跑数分钟），写超时会掐断它们；ReadHeaderTimeout 防
 	// 慢速连接攻击（slowloris），IdleTimeout 及时回收空闲连接

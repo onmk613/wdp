@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
-	"regexp"
 	"sync"
 	"time"
 
@@ -90,17 +89,11 @@ func (l *Local) DownloadFile(_ context.Context, src string, w io.Writer) error {
 	return conn.ReadLocalFile(src, w)
 }
 
-// envKeyRe 是允许注入的环境变量键白名单（与 sshc.WrapStdin、
-// selfrun.RunScript 同一纪律：env 键经网络/plan 下发，拼进进程环境前
-// 必须限定字符集，防 LF/空格等利用 K=V 形态的注入）。正则取 sshc 的
-// 形态（允许下划线续位，FOO_BAR 是合法环境变量名）。
-var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
-
 func envList(env map[string]string) []string {
 	out := make([]string, 0, len(env))
 	for k, v := range env {
-		if !envKeyRe.MatchString(k) {
-			continue // 越白名单的键静默丢弃（与 sshc/selfrun 一致）
+		if !conn.EnvKeyAllowed(k) {
+			continue // 越白名单的键静默丢弃（白名单在 conn.EnvKeyAllowed 单一实现）
 		}
 		out = append(out, k+"="+v)
 	}

@@ -56,7 +56,7 @@ func TestHostCRUD(t *testing.T) {
 	}
 
 	// 更新（status 不被覆盖）
-	if err := s.SetHostStatus(id, "online"); err != nil {
+	if err := s.SetHostStatus(id, "online", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateHost(id, &Host{Address: "10.0.0.12", AgentPort: 7700, Groups: []string{"web2"}, Labels: `{"env":"staging"}`}); err != nil {
@@ -73,7 +73,7 @@ func TestHostCRUD(t *testing.T) {
 		t.Fatalf("探活状态不应被更新覆盖: %+v", h)
 	}
 	// 离线不清 last_seen
-	if err := s.SetHostStatus(id, "offline"); err != nil {
+	if err := s.SetHostStatus(id, "offline", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	h, _ = s.GetHost(id)
@@ -374,7 +374,7 @@ func TestUpsertHostByName(t *testing.T) {
 // UpdateAppScopes 同步写默认版本。
 func TestVersionScopes(t *testing.T) {
 	s := openTest(t)
-	id, err := s.CreateApp("scope-app", "", `{"env":"prod"}`, []string{"pool-a"}, []string{"grp-a"}, "1.0.0", "/tmp/x.tgz", "sha", 1, []string{"deploy", "uninstall"})
+	id, err := s.CreateApp("scope-app", "", `{"env":"prod"}`, []string{"pool-a"}, []string{"grp-a"}, "1.0.0", "/tmp/x.tgz", "sha", 1, []string{"deploy", "uninstall"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +390,7 @@ func TestVersionScopes(t *testing.T) {
 	}
 
 	// 旧行（迁移前数据）：列值为空串 → ok=false（上层回退应用级）
-	if _, err := s.db.Exec(`UPDATE app_versions SET pools = '', groups = ''`); err != nil {
+	if _, err := s.exec(`UPDATE app_versions SET pools = '', groups = ''`); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, ok, err := s.VersionScopes(id, "1.0.0"); err != nil || ok {
@@ -398,7 +398,7 @@ func TestVersionScopes(t *testing.T) {
 	}
 
 	// UpdateAppScopes 应同步默认版本行
-	if _, err := s.db.Exec(`UPDATE app_versions SET pools = '[]', groups = '[]'`); err != nil {
+	if _, err := s.exec(`UPDATE app_versions SET pools = '[]', groups = '[]'`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.UpdateAppScopes(id, "n", []string{"pool-z"}, nil, `{}`); err != nil {
@@ -433,7 +433,7 @@ func TestDeleteHostCleansMappings(t *testing.T) {
 		t.Fatalf("删除主机后成员数应为 0: %+v", pools)
 	}
 	var n int
-	if err := s.db.QueryRow(`SELECT (SELECT COUNT(*) FROM host_pools) + (SELECT COUNT(*) FROM host_group_map)`).Scan(&n); err != nil || n != 0 {
+	if err := s.queryRow(`SELECT (SELECT COUNT(*) FROM host_pools) + (SELECT COUNT(*) FROM host_group_map)`).Scan(&n); err != nil || n != 0 {
 		t.Fatalf("映射表应无残留行: n=%d err=%v", n, err)
 	}
 }
@@ -476,10 +476,10 @@ func TestReplaceUserScopesRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	// RAISE(ABORT) 显式指定冲突处理，INSERT OR IGNORE 不吞
-	if _, err := s.db.Exec(`CREATE TRIGGER deny_scope_insert BEFORE INSERT ON user_scopes BEGIN SELECT RAISE(ABORT, 'boom'); END`); err != nil {
+	if _, err := s.raw.Exec(`CREATE TRIGGER deny_scope_insert BEFORE INSERT ON user_scopes BEGIN SELECT RAISE(ABORT, 'boom'); END`); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = s.db.Exec(`DROP TRIGGER deny_scope_insert`) })
+	t.Cleanup(func() { _, _ = s.raw.Exec(`DROP TRIGGER deny_scope_insert`) })
 	if err := s.ReplaceUserScopes(u.ID, []*UserScope{{Verb: "host:edit"}}); err == nil {
 		t.Fatal("INSERT 失败应返回错误")
 	}
@@ -497,10 +497,10 @@ func TestConsumeEnrollTokenDoubleSpend(t *testing.T) {
 		t.Fatal(err)
 	}
 	// RAISE(IGNORE) 让 UPDATE 空过（RowsAffected=0），模拟双花窗口
-	if _, err := s.db.Exec(`CREATE TRIGGER skip_mark_used BEFORE UPDATE ON enroll_tokens BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+	if _, err := s.raw.Exec(`CREATE TRIGGER skip_mark_used BEFORE UPDATE ON enroll_tokens BEGIN SELECT RAISE(IGNORE); END`); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _, _ = s.db.Exec(`DROP TRIGGER skip_mark_used`) })
+	t.Cleanup(func() { _, _ = s.raw.Exec(`DROP TRIGGER skip_mark_used`) })
 	if _, err := s.ConsumeEnrollToken("tok"); err != ErrTokenUsed {
 		t.Fatalf("UPDATE 未命中应报 ErrTokenUsed: %v", err)
 	}
@@ -552,7 +552,7 @@ func TestScopeNameValidation(t *testing.T) {
 	if _, err := s.CreateHost(&Host{Name: "h2", Address: "10.0.0.2", Groups: []string{"a b"}}); err == nil {
 		t.Fatal("主机组归属名含空白应被拒绝")
 	}
-	if _, err := s.CreateApp("app1", "", "{}", []string{"a,b"}, nil, "1.0.0", "/tmp/x", "sha", 1, nil); err == nil {
+	if _, err := s.CreateApp("app1", "", "{}", []string{"a,b"}, nil, "1.0.0", "/tmp/x", "sha", 1, nil, ""); err == nil {
 		t.Fatal("应用池名含逗号应被拒绝")
 	}
 }
@@ -608,12 +608,12 @@ func TestUpsertHostByNameConcurrent(t *testing.T) {
 // 全删清空；制品路径原样返回给调用方清理。
 func TestDeleteVersionRecomputeLatest(t *testing.T) {
 	s := openTest(t)
-	id, err := s.CreateApp("app", "", "{}", nil, nil, "1.0.0", "/tmp/a.tgz", "sha", 1, nil)
+	id, err := s.CreateApp("app", "", "{}", nil, nil, "1.0.0", "/tmp/a.tgz", "sha", 1, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, v := range []struct{ ver, tgz string }{{"2.0.0", "/tmp/b.tgz"}, {"3.0.0", "/tmp/c.tgz"}} {
-		if err := s.AddVersion(id, v.ver, v.tgz, "sha", 1, "", nil, nil, "{}", nil); err != nil {
+		if err := s.AddVersion(id, v.ver, v.tgz, "sha", 1, "", nil, nil, "{}", nil, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -657,7 +657,7 @@ func TestDeleteVersionRecomputeLatest(t *testing.T) {
 // TestDeleteRunCleansTasks store 层删除执行记录级联清理任务明细。
 func TestDeleteRunCleansTasks(t *testing.T) {
 	s := openTest(t)
-	rid, err := s.CreateRun("exec", 0, "", "", "", 0, "all", "admin", "running")
+	rid, err := s.CreateRun(RunInput{Kind: "exec", Selector: "all", User: "admin", Status: "running"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -797,7 +797,7 @@ func TestHotPathIndexes(t *testing.T) {
 	want := []string{"idx_host_pools_pool", "idx_host_group_map_group", "idx_runs_app_status", "idx_runs_status"}
 	for _, name := range want {
 		var n string
-		err := s.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&n)
+		err := s.raw.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&n)
 		if err != nil || n != name {
 			t.Fatalf("索引 %s 应存在: %v", name, err)
 		}
@@ -810,11 +810,11 @@ func TestHotPathIndexes(t *testing.T) {
 // （事务内查询走 q 的口径）。
 func TestUpdateVersionScopesLatestInTx(t *testing.T) {
 	s := openTest(t)
-	id, err := s.CreateApp("app", "", "{}", nil, nil, "1.0.0", "/tmp/a.tgz", "sha", 1, nil)
+	id, err := s.CreateApp("app", "", "{}", nil, nil, "1.0.0", "/tmp/a.tgz", "sha", 1, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AddVersion(id, "2.0.0", "/tmp/b.tgz", "sha", 1, "", nil, nil, "{}", nil); err != nil {
+	if err := s.AddVersion(id, "2.0.0", "/tmp/b.tgz", "sha", 1, "", nil, nil, "{}", nil, ""); err != nil {
 		t.Fatal(err)
 	}
 	// latest=2.0.0：改 1.0.0 非 latest；切默认后同次调用变 latest

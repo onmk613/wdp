@@ -17,6 +17,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"wdp/internal/agent"
+	"wdp/internal/buildinfo"
 	"wdp/internal/conn"
 	"wdp/internal/conn/agentc"
 	"wdp/internal/shellquote"
@@ -110,10 +112,13 @@ func (s *Server) upgradeAgent(ctx context.Context, h *store.Host, force bool) Up
 		return res
 	}
 
-	// 2. 版本相同且未强制 → 幂等成功（无需二进制参与，先于 resolver 判断）
-	if !force && pr.Build == res.To {
+	// 2. 版本相同且未强制 → 幂等成功（无需二进制参与，先于 resolver 判断）。
+	//    未注入构建信息的开发构建（buildinfo.Unversioned）例外：版本串不
+	//    反映二进制内容，同串不能证明同版本——不做短路，直接重推二进制
+	if !force && pr.Build == res.To && !buildinfo.Unversioned() {
 		res.OK = true
 		res.Detail = "已是最新版本 " + res.To
+		_ = s.st.SetHostStatus(h.ID, "online", pr.Build, "")
 		return res
 	}
 
@@ -157,7 +162,7 @@ func (s *Server) upgradeAgent(ctx context.Context, h *store.Host, force bool) Up
 	// 5. 原子替换 + 重启。systemd restart 会杀掉 agent 自身 → 该 exec 的
 	//    HTTP 响应大概率中断，错误是预期，转入探活等待。
 	script := upgradeScript(tmp, dst)
-	out, execErr := ac.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30000})
+	out, execErr := ac.Exec(ctx, conn.ExecRequest{Script: script, TimeoutMs: 30000, Label: "agent-upgrade"})
 	manualRestart := execErr == nil && strings.Contains(out.Stdout, "WDP_NO_SYSTEMD")
 
 	// 6. 等待新版上线（systemd restart 后服务需数秒拉起）
@@ -174,6 +179,8 @@ func (s *Server) upgradeAgent(ctx context.Context, h *store.Host, force bool) Up
 				if p2.Build == res.To {
 					res.OK = true
 					res.Detail = fmt.Sprintf("%s → %s，已重启上线", orUnknown(res.From), res.To)
+					// 即时回写：升级按钮的「已是最新」门控不等下一轮探活
+					_ = s.st.SetHostStatus(h.ID, "online", p2.Build, "")
 					return res
 				}
 				// 上线了但还是旧 build：二进制没换成功（路径不对/权限）
@@ -235,9 +242,17 @@ func (s *Server) handleUpgradeBatch(w http.ResponseWriter, r *http.Request) {
 	}
 	hosts := make([]*store.Host, 0, len(req.IDs))
 	for _, id := range req.IDs {
-		if h, err := s.st.GetHost(id); err == nil {
-			hosts = append(hosts, h)
+		h, err := s.st.GetHost(id)
+		// 台账已删的 ID 跳过（客户端可能持有过期列表）；但 DB 故障必须
+		// fail-loud——静默缩小升级范围会让"部分主机没升级"看起来像成功
+		if errors.Is(err, store.ErrNotFound) {
+			continue
 		}
+		if err != nil {
+			s.writeInternal(w, err)
+			return
+		}
+		hosts = append(hosts, h)
 	}
 	results := make([]UpgradeResult, len(hosts))
 	var (

@@ -22,6 +22,9 @@ type JSONPlay struct {
 	Hosts []string                `json:"hosts"`
 	Tasks []*JSONTask             `json:"tasks"`
 	Recap map[string]*model.Stats `json:"recap"`
+	// WallMs 该 play 的整体墙钟（毫秒），与 Recap 各主机 ElapsedMs 配合
+	// 做耗时对比（wall - Σelapsed ≈ 编排开销）
+	WallMs int64 `json:"wall_ms"`
 }
 
 // JSONReporter 输出机器可读的完整执行记录（--output json，适配 CI/CD）。
@@ -111,12 +114,13 @@ func (r *JSONReporter) TaskDone() {}
 // PlayMsg 忽略进度消息（JSON 仅含结构化结果）。
 func (*JSONReporter) PlayMsg(_ string, _ ...any) {}
 
-// Recap 记录 play 汇总。
-func (r *JSONReporter) Recap(_ string, stats map[string]*model.Stats) {
+// Recap 记录 play 汇总（stats 含耗时列；wallMs 一并入档供脚本消费）。
+func (r *JSONReporter) Recap(_ string, stats map[string]*model.Stats, wallMs int64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.curPlay != nil {
 		r.curPlay.Recap = stats
+		r.curPlay.WallMs = wallMs
 	}
 }
 

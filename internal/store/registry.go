@@ -43,12 +43,10 @@ func (s *Store) CreatePool(name, note string, hostIDs []int64) (int64, error) {
 	var id int64
 	// 注册行与成员划入同事务：中途失败不留"建了池却少划了主机"的半状态
 	err := s.tx(func(q execer) error {
-		res, err := q.Exec(`INSERT INTO pools (name, note, created_at) VALUES (?, ?, ?)`, name, note, nowUTC())
+		var err error
+		id, err = s.lastInsertID(q, `INSERT INTO pools (name, note, created_at) VALUES (?, ?, ?)`, name, note, nowUTC())
 		if err != nil {
-			return dupErr(err, "pool", name)
-		}
-		if id, err = res.LastInsertId(); err != nil {
-			return err
+			return s.dupErr(err, "pool", name)
 		}
 		for _, hid := range hostIDs {
 			// host_pools 无外键约束，INSERT OR IGNORE 对不存在的 hostID
@@ -78,7 +76,7 @@ func (s *Store) CreatePool(name, note string, hostIDs []int64) (int64, error) {
 
 // ListPools 全部池（附成员数）。
 func (s *Store) ListPools() ([]*Pool, error) {
-	rows, err := s.db.Query(`SELECT id, name, note, created_at,
+	rows, err := s.query(`SELECT id, name, note, created_at,
 		(SELECT COUNT(*) FROM host_pools WHERE pool = pools.name) FROM pools ORDER BY name`)
 	if err != nil {
 		return nil, err
@@ -130,12 +128,10 @@ func (s *Store) CreateGroup(name, note string, hostIDs []int64) (int64, error) {
 	var id int64
 	// 与 CreatePool 同理：注册与成员划入同事务
 	err := s.tx(func(q execer) error {
-		res, err := q.Exec(`INSERT INTO host_groups (name, note, created_at) VALUES (?, ?, ?)`, name, note, nowUTC())
+		var err error
+		id, err = s.lastInsertID(q, `INSERT INTO host_groups (name, note, created_at) VALUES (?, ?, ?)`, name, note, nowUTC())
 		if err != nil {
-			return dupErr(err, "group", name)
-		}
-		if id, err = res.LastInsertId(); err != nil {
-			return err
+			return s.dupErr(err, "group", name)
 		}
 		for _, hid := range hostIDs {
 			// host_group_map 同样无外键约束，校验口径同 CreatePool
@@ -164,7 +160,7 @@ func (s *Store) CreateGroup(name, note string, hostIDs []int64) (int64, error) {
 
 // ListGroups 全部组。
 func (s *Store) ListGroups() ([]*GroupEntry, error) {
-	rows, err := s.db.Query(`SELECT id, name, note, created_at FROM host_groups ORDER BY name`)
+	rows, err := s.query(`SELECT id, name, note, created_at FROM host_groups ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -216,12 +212,10 @@ func (s *Store) CreateLabel(key, note string, hostIDs []int64, value string) (in
 	}
 	var id int64
 	err := s.tx(func(q execer) error {
-		res, err := q.Exec(`INSERT INTO label_defs (key, note, created_at) VALUES (?, ?, ?)`, key, note, nowUTC())
+		var err error
+		id, err = s.lastInsertID(q, `INSERT INTO label_defs (key, note, created_at) VALUES (?, ?, ?)`, key, note, nowUTC())
 		if err != nil {
-			return dupErr(err, "label", key)
-		}
-		if id, err = res.LastInsertId(); err != nil {
-			return err
+			return s.dupErr(err, "label", key)
 		}
 		for _, hid := range hostIDs {
 			var labels string
@@ -253,7 +247,7 @@ func (s *Store) CreateLabel(key, note string, hostIDs []int64, value string) (in
 
 // ListLabels 全部标签键。
 func (s *Store) ListLabels() ([]*LabelDef, error) {
-	rows, err := s.db.Query(`SELECT id, key, note, created_at FROM label_defs ORDER BY key`)
+	rows, err := s.query(`SELECT id, key, note, created_at FROM label_defs ORDER BY key`)
 	if err != nil {
 		return nil, err
 	}

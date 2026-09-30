@@ -7,7 +7,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Refresh, WarningFilled } from '@element-plus/icons-vue'
 import { api, type Host, type HostAlert, type HostFactsResponse, type HostTaskItem, type MetricSample, type SeriesPoint } from '../api'
 import Sparkline from '../components/Sparkline.vue'
-import { statusType, taskStatus } from '../lib/format'
+import { statusType, taskStatus, fmtTime } from '../lib/format'
 
 const route = useRoute()
 const router = useRouter()
@@ -66,7 +66,7 @@ const renewing = ref(false)
 async function renewCert() {
   try {
     await ElMessageBox.confirm(
-      `重签 ${host.value?.Name || '该主机'} 的 agent 证书并热更换（保留私钥，新有效期一年）？`,
+      `重签 ${host.value?.Name || '该主机'} 的 agent 证书并热更换（保留私钥，到期日在当前值上延长一年）？`,
       '证书换发',
       { type: 'warning', confirmButtonText: '换证', cancelButtonText: '取消' },
     )
@@ -79,6 +79,11 @@ async function renewCert() {
       'POST', `/api/hosts/${hostId.value}/renew-cert`,
     )
     ElMessage.success(out.pushed ? `证书已换发并生效（新到期 ${out.not_after}）` : out.message)
+    // 系统信息里的「证书到期」来自 facts（探活快照）：换证后先主动探一次
+    // 活再重取 facts，否则页面停留旧到期日，与 toast 里的新到期日矛盾
+    void api('POST', `/api/hosts/${hostId.value}/probe`, {})
+      .catch(() => { /* 探活失败不掩盖换证成功 */ })
+      .then(() => loadFacts())
   } catch (e) {
     ElMessage.error((e as Error).message)
   } finally {
@@ -112,7 +117,9 @@ const live = computed(() => {
   const fsSize = first('node_filesystem_size_bytes', { k: 'mount', v: '/' })
   const fsAvail = first('node_filesystem_avail_bytes', { k: 'mount', v: '/' })
   return {
-    cpus: samples.value.filter((s) => s.name === 'node_cpu_seconds_total' && s.labels?.mode === 'idle').length,
+    // 每核 CPU 秒（Linux）数出核数；darwin 采集器没有 per-core 指标，
+    // 回退 setup facts 的 cpus（两处口径一致：逻辑核数）
+    cpus: samples.value.filter((s) => s.name === 'node_cpu_seconds_total' && s.labels?.mode === 'idle').length || facts.value?.facts?.cpus || 0,
     load1: first('node_load1'),
     load5: first('node_load5'),
     memPct: mt > 0 && ma > 0 ? 100 * (1 - ma / mt) : undefined,
@@ -262,8 +269,8 @@ onUnmounted(() => window.clearInterval(timer))
       <el-descriptions :column="4" size="small" border>
         <el-descriptions-item label="地址">{{ host?.Address }}</el-descriptions-item>
         <el-descriptions-item label="agent 端口">{{ host?.AgentPort }}</el-descriptions-item>
-        <el-descriptions-item label="最近在线">{{ host?.LastSeenAt || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="加入时间">{{ host?.CreatedAt }}</el-descriptions-item>
+        <el-descriptions-item label="最近在线">{{ fmtTime(host?.LastSeenAt) }}</el-descriptions-item>
+        <el-descriptions-item label="加入时间">{{ fmtTime(host?.CreatedAt) }}</el-descriptions-item>
         <el-descriptions-item label="池" :span="2">{{ (host?.Pools || []).join('、') || '-' }}</el-descriptions-item>
         <el-descriptions-item label="组" :span="2">{{ (host?.Groups || []).join('、') || '-' }}</el-descriptions-item>
       </el-descriptions>
@@ -290,7 +297,7 @@ onUnmounted(() => window.clearInterval(timer))
         </el-descriptions-item>
         <el-descriptions-item label="累计接收">{{ fmtBytes(live.netRx) }}</el-descriptions-item>
         <el-descriptions-item label="累计发送">{{ fmtBytes(live.netTx) }}</el-descriptions-item>
-        <el-descriptions-item label="启动时间" :span="2">{{ live.boot ? new Date(live.boot * 1000).toLocaleString() : '-' }}</el-descriptions-item>
+        <el-descriptions-item label="启动时间" :span="2">{{ live.boot ? fmtTime(new Date(live.boot * 1000).toISOString()) : '-' }}</el-descriptions-item>
       </el-descriptions>
       <el-empty v-else description="实时指标不可用（agent 离线或版本过旧）" :image-size="48" />
     </el-card>
@@ -339,8 +346,8 @@ onUnmounted(() => window.clearInterval(timer))
           </el-descriptions-item>
           <el-descriptions-item label="架构">{{ facts.facts.arch || '-' }}</el-descriptions-item>
           <el-descriptions-item label="默认 IPv4">{{ facts.facts.default_ipv4 || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="agent 版本">{{ facts.probe.version || '-' }}</el-descriptions-item>
-          <el-descriptions-item label="证书到期">{{ facts.probe.cert_not_after || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="agent 版本">{{ facts.probe.build || facts.probe.version || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="证书到期">{{ fmtTime(facts.probe.cert_not_after) }}</el-descriptions-item>
         </el-descriptions>
       </template>
       <el-alert v-else type="info" :closable="false" :title="facts?.error || '点击刷新采集 setup facts'" />
@@ -351,7 +358,7 @@ onUnmounted(() => window.clearInterval(timer))
       <template #header><b>该主机的执行历史（最近 30 条任务）</b></template>
       <el-table :data="tasks" size="small">
         <el-table-column label="时间" width="170">
-          <template #default="{ row }"><span class="muted">{{ row.StartAt }}</span></template>
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.StartAt) }}</span></template>
         </el-table-column>
         <el-table-column label="类型" width="70">
           <template #default="{ row }">

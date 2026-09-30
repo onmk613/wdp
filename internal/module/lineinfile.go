@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -24,39 +25,52 @@ type LineinfileModule struct{}
 func (m *LineinfileModule) Name() string { return "lineinfile" }
 
 func (m *LineinfileModule) Desc() string {
-	return "manage single lines in remote files (present/absent/replace)"
+	return i18n.T("Manage a single line in a remote file (ensure present / delete / replace)", "管理远端文件中的单行（确保存在/删除/替换）")
 }
 
 func (m *LineinfileModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "path", Type: "string", Desc: "remote file path"},
-		{Name: "line", Type: "string", Desc: "desired line content (for state=absent, either line or regexp)"},
-		{Name: "regexp", Type: "string", Desc: "regex matching target lines: present replaces the first match; absent removes all matches"},
-		{Name: "state", Type: "string", Default: "present", Enum: lineinfileStates, Desc: "present ensures the line exists / absent ensures it is gone"},
-		{Name: "insertafter", Type: "string", Default: "EOF", Desc: "insertion point when no match: after the last matched line (EOF means end of file)"},
-		{Name: "create", Type: "bool", Default: "false", Desc: "create the file when missing (default is to fail)"},
-		{Name: "backup", Type: "bool", Default: "false", Desc: "back up before modifying (path.bak.<timestamp>)"},
-		{Name: "mode", Type: "mode", Default: "0644", Desc: "mode for newly created files (existing files keep their mode)"},
-		{Name: "owner", Type: "string", Desc: "owner (requires become: true)"},
-		{Name: "group", Type: "string", Desc: "group (requires become: true)"},
+		{Name: "path", Type: "string", Desc: i18n.T("remote file path", "远端文件路径")},
+		{Name: "line", Type: "string", Desc: i18n.T("desired line content (with state=absent, specify either line or regexp)", "期望的行内容（state=absent 时 line 与 regexp 二选一）")},
+		{Name: "regexp", Type: "string", Desc: i18n.T("regex matching the target line: present replaces the first match; absent deletes all matches", "匹配目标行的正则：present 替换首个匹配；absent 删除全部匹配")},
+		{Name: "state", Type: "string", Default: "present", Enum: lineinfileStates, Desc: i18n.T("present ensures the line exists / absent ensures it does not", "present 确保该行存在 / absent 确保该行不存在")},
+		{Name: "insertafter", Type: "string", Default: "EOF", Desc: i18n.T("insert position when nothing matches: after the last matching line (EOF = end of file)", "无匹配时的插入位置：最后一个匹配行之后（EOF = 文件末尾）")},
+		{Name: "create", Type: "bool", Default: "false", Desc: i18n.T("create the file if it does not exist (fails by default)", "文件不存在时创建（缺省直接失败）")},
+		{Name: "backup", Type: "bool", Default: "false", Desc: i18n.T("back up before modifying (path.bak.<timestamp>)", "修改前先备份（path.bak.<时间戳>）")},
+		{Name: "mode", Type: "mode", Default: "0644", Desc: i18n.T("mode for a newly created file (existing files keep their permissions)", "新建文件的权限位（已有文件保持原权限）")},
+		{Name: "owner", Type: "string", Desc: i18n.T("owner (requires become)", "属主（需 become）")},
+		{Name: "group", Type: "string", Desc: i18n.T("group (requires become)", "属组（需 become）")},
 	}
 }
 
 func (m *LineinfileModule) Example() string {
-	return `- name: ensure the grant line exists (create the file if missing)
+	return i18n.T(`- name: Ensure the authorization line exists (create the file if missing)
   lineinfile:
     path: /etc/sudoers.d/deploy
     line: "deploy ALL=(ALL) NOPASSWD: ALL"
     create: true
     mode: "0440"
 
-- name: replace the first matching line (back up first)
+- name: Replace the first matching line (back up first)
   lineinfile:
     path: /etc/selinux/config
     regexp: "^SELINUX="
     line: "SELINUX=disabled"
     backup: true
-`
+`, `- name: 确保授权行存在（文件缺失则创建）
+  lineinfile:
+    path: /etc/sudoers.d/deploy
+    line: "deploy ALL=(ALL) NOPASSWD: ALL"
+    create: true
+    mode: "0440"
+
+- name: 替换首个匹配行（先备份）
+  lineinfile:
+    path: /etc/selinux/config
+    regexp: "^SELINUX="
+    line: "SELINUX=disabled"
+    backup: true
+`)
 }
 
 // lineinfileReq 是 lineinfile 解析后的参数（正则已预编译）。

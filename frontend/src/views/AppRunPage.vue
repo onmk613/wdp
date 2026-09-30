@@ -3,6 +3,7 @@
 // （SSE 事件驱动刷新，未收到事件前 2s 轮询兜底，任务随执行逐条出现）。
 // 完整历史见「执行记录」菜单。
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, ArrowUp, CaretRight, Delete, InfoFilled, Refresh } from '@element-plus/icons-vue'
 import { api, subscribeRuns, type App, type AppVersion, type Host, type Run, type RunTask } from '../api'
@@ -21,6 +22,27 @@ const targetsRestricted = ref(false)
 const selKind = ref('all')
 const selValue = ref('')
 const selHostIDs = ref<number[]>([])
+// 自定义目标（kind=inline）：粘贴 inventory YAML，针对未纳管主机执行
+//（conn: ssh 直连或自带证书材料的 agent）。作用域受限用户不可用
+const inlineInv = ref('')
+// 示例模板：真实可编辑文本（placeholder 半透明不可复制）——一键插入后
+// 按实际环境改地址/凭据；密码建议用 password_env 引环境变量
+const INLINE_EXAMPLE = `# conn: ssh 直连（密码走环境变量，避免明文落 chart/草稿）
+webservers:
+  hosts:
+    node1: {host: 192.0.2.11, conn: ssh, user: root, password_env: NODE_PW}
+    node2: {host: 192.0.2.12, conn: ssh, user: root, key_path: ~/.ssh/id_rsa}
+# 已装 agent 的未纳管主机（自带证书材料）
+agents:
+  hosts:
+    node3: {host: 192.0.2.13, conn: agent, agent_port: 7602}
+`
+function insertExample() {
+  inlineInv.value = INLINE_EXAMPLE
+}
+function clearInline() {
+  inlineInv.value = ''
+}
 
 // 行级相位：加入清单的每个条目独立选相位（默认 deploy），同一应用可
 // 多次出现——组合执行中各条目真正执行的动作由各自的相位决定
@@ -137,6 +159,12 @@ async function run() {
   } else if (kind === 'hosts' && !selHostIDs.value.length) {
     ElMessage.warning('请勾选主机')
     return
+  } else if (kind === 'inline') {
+    if (!inlineInv.value.trim()) {
+      ElMessage.warning('请粘贴 inventory 主机清单')
+      return
+    }
+    label = '自定义目标（粘贴 inventory）'
   }
   try {
     // 逐条目摘要（app@版本[相位]，同应用多次出现时也一目了然）
@@ -151,10 +179,11 @@ async function run() {
   }
   running.value = true
   try {
-    const r = await api<{ run_ids: number[]; hosts: number }>('POST', '/api/runs', {
-      items: items.value,
-      selector: { kind, value: selValue.value, host_ids: selHostIDs.value },
-    })
+    const selector: Record<string, unknown> = { kind, value: selValue.value, host_ids: selHostIDs.value }
+    if (kind === 'inline') selector.inventory = inlineInv.value
+    const payload = { items: items.value, selector }
+    const r = await api<{ run_ids: number[]; hosts: number }>('POST', '/api/runs', payload)
+    lastSubmit.value = payload // 重新执行按原样重发（目标选择器随提交快照）
     ElMessage.success(`已提交：目标 ${r.hosts} 台主机，共 ${r.run_ids.length} 个应用（下方实时输出）`)
     submitted.value = true
     awaitingFirstPoll.value = true
@@ -162,6 +191,74 @@ async function run() {
     trackedRunIDs = r.run_ids
     for (const k of Object.keys(activeTasks)) delete activeTasks[Number(k)]
     await pollActive(r.run_ids)
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  } finally {
+    running.value = false
+  }
+}
+
+// 最近一次提交的原始载荷（重新执行用：目标与清单按当时快照重发）
+const lastSubmit = ref<{ items: Item[]; selector: Record<string, unknown> } | null>(null)
+
+// activeRunActive：queued/running/cancelling 都算未收尾
+function runActive(r: Run): boolean {
+  return r.Status === 'running' || r.Status === 'queued' || r.Status === 'cancelling'
+}
+
+// cancelRun 取消一个进行中的 run：在途任务会执行完，已执行结果保留；
+// 幂等模块下重新发起即断点续跑
+async function cancelRun(r: Run) {
+  try {
+    await ElMessageBox.confirm(
+      `取消 ${r.AppName}@${r.Version}[${r.Phase || 'deploy'}] 的执行？在途任务会执行完，已执行任务的结果保留，可重新发起。`,
+      '取消执行', { type: 'warning', confirmButtonText: '取消执行', cancelButtonText: '再想想' },
+    )
+  } catch {
+    return
+  }
+  try {
+    await api('POST', `/api/runs/${r.ID}/cancel`, {})
+    ElMessage.success('已请求取消（在途任务执行完后生效）')
+    pollSoon()
+  } catch (e) {
+    ElMessage.error((e as Error).message)
+  }
+}
+
+// rerunRun 重新执行：按该 run 的应用/版本/相位 + 最近一次提交的目标
+// 选择器原样重发（幂等模块下等于断点续跑；改清单/目标后请用主执行按钮）
+async function rerunRun(r: Run) {
+  if (!lastSubmit.value) {
+    ElMessage.warning('本会话没有该次提交的目标快照，请重新配置后执行')
+    return
+  }
+  if (activeRuns.value.some(runActive)) {
+    ElMessage.warning('仍有执行未收尾，先取消或等它完成')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      `重新执行 ${r.AppName}@${r.Version}[${r.Phase || 'deploy'}]（目标按上次提交快照）？`,
+      '重新执行', { type: 'warning', confirmButtonText: '执行', cancelButtonText: '取消' },
+    )
+  } catch {
+    return
+  }
+  running.value = true
+  try {
+    const payload = {
+      items: [{ app_id: r.AppID, version: r.Version, phase: r.Phase || 'deploy' }],
+      selector: lastSubmit.value.selector,
+    }
+    const resp = await api<{ run_ids: number[]; hosts: number }>('POST', '/api/runs', payload)
+    lastSubmit.value = payload
+    submitted.value = true
+    awaitingFirstPoll.value = true
+    activeRuns.value = []
+    trackedRunIDs = resp.run_ids
+    for (const k of Object.keys(activeTasks)) delete activeTasks[Number(k)]
+    await pollActive(resp.run_ids)
   } catch (e) {
     ElMessage.error((e as Error).message)
   } finally {
@@ -217,7 +314,7 @@ async function pollActive(runIDs: number[]) {
 
 function anyRunning(): boolean {
   if (awaitingFirstPoll.value) return true
-  if (activeRuns.value.some((r) => r.Status === 'running' || r.Status === 'queued')) return true
+  if (activeRuns.value.some(runActive)) return true
   // 有跟踪但从未成功拿到状态的 run（每轮都失败）：视为进行中继续轮询，
   // 否则其余 run 全部终态后轮询停摆，该 run 的输出与终态永远缺失
   return trackedRunIDs.some((id) => !activeRuns.value.some((r) => r.ID === id))
@@ -262,6 +359,21 @@ onUnmounted(() => {
   window.clearTimeout(pollTimer)
   unsubRuns?.()
 })
+
+// 执行未收尾时拦截路由离开：结果只在「本次执行输出」区实时展示，误点
+// 别处回来就只剩执行记录的静态明细——确认后再放行（执行本身不受影响）
+onBeforeRouteLeave(async () => {
+  if (!submitted.value || !anyRunning()) return true
+  try {
+    await ElMessageBox.confirm(
+      '仍有应用在执行中，离开后这里不再实时刷新（可随时回「执行记录」查看结果）。',
+      '执行进行中', { type: 'warning', confirmButtonText: '仍要离开', cancelButtonText: '留在本页' },
+    )
+    return true
+  } catch {
+    return false
+  }
+})
 </script>
 
 <template>
@@ -279,6 +391,7 @@ onUnmounted(() => {
               <el-radio-button value="group">组</el-radio-button>
               <el-radio-button value="label">标签</el-radio-button>
               <el-radio-button value="hosts">手动选</el-radio-button>
+              <el-radio-button value="inline" :disabled="targetsRestricted">自定义</el-radio-button>
             </el-radio-group>
           </el-form-item>
           <el-form-item v-if="selKind === 'pool'" label="池">
@@ -301,6 +414,20 @@ onUnmounted(() => {
               <el-option v-for="h in hosts" :key="h.ID" :label="`${h.Name} (${h.Address})`" :value="h.ID" />
             </el-select>
           </el-form-item>
+          <template v-else-if="selKind === 'inline'">
+            <el-alert type="info" :closable="false" show-icon style="margin-bottom: 8px"
+              title="粘贴 inventory YAML 执行未纳管主机（conn: ssh 直连或自带证书材料的 agent）。清单内容（可能含凭据）不落库，仅在执行期使用；需要全局 run:execute 权限。" />
+            <el-form-item label="inventory">
+              <div class="inv-tools">
+                <el-button size="small" @click="insertExample">插入示例模板</el-button>
+                <el-button size="small" :disabled="!inlineInv" @click="clearInline">清空</el-button>
+                <span class="muted">示例可直接编辑；password_env 引用控制端环境变量，避免明文凭据</span>
+              </div>
+              <el-input v-model="inlineInv" type="textarea" :rows="8" spellcheck="false"
+                placeholder="粘贴 inventory YAML，或点「插入示例模板」获取可编辑模板"
+                style="font-family: ui-monospace, Menlo, monospace; width: 100%" />
+            </el-form-item>
+          </template>
         </el-form>
       </el-card>
 
@@ -349,7 +476,13 @@ onUnmounted(() => {
         <div class="run-row">
           <el-button :icon="Refresh" @click="load()">刷新</el-button>
           <div style="flex: 1" />
-          <el-button v-if="can('run:execute')" type="primary" :icon="CaretRight" :loading="running" :disabled="!items.length" @click="run">
+          <el-tooltip v-if="submitted && anyRunning()" placement="top"
+            :content="`正在执行：${activeRuns.filter(runActive).map((r) => `${r.AppName}@${r.Version}`).join('、') || '提交中…'}——完成或取消后再发起新执行`">
+            <span>
+              <el-button type="primary" :icon="CaretRight" disabled>执行</el-button>
+            </span>
+          </el-tooltip>
+          <el-button v-else-if="can('run:execute')" type="primary" :icon="CaretRight" :loading="running" :disabled="!items.length" @click="run">
             执行
           </el-button>
         </div>
@@ -362,16 +495,26 @@ onUnmounted(() => {
         <div class="out-head">
           <span>本次执行输出</span>
           <span class="muted">
-            {{ anyRunning() ? '执行中…（实时刷新）' : '已完成' }} · 完整历史见左侧菜单「执行记录」
+            {{ anyRunning()
+              ? `执行中：${activeRuns.filter(runActive).map((r) => `${r.AppName}@${r.Version}`).join('、') || '提交中…'}（实时刷新，可取消）`
+              : '已完成' }} · 完整历史见左侧菜单「执行记录」
           </span>
         </div>
       </template>
-      <div v-for="r in activeRuns" :key="r.ID" class="run-block">
+      <div v-for="r in activeRuns" :key="r.ID" class="run-block" :class="{ 'run-active': runActive(r) }">
         <div class="run-title">
           <el-tag :type="runStatus(r.Status)" round size="small">{{ r.Status }}</el-tag>
           <b style="margin-left: 8px">{{ r.AppName }}@{{ r.Version }}</b>
           <el-tag size="small" type="info" effect="plain" style="margin-left: 6px">{{ r.Phase || 'deploy' }}</el-tag>
           <span class="muted" style="margin-left: 8px">run #{{ r.ID }} · {{ r.Summary }}</span>
+          <span class="muted" style="margin-left: 8px">已执行 {{ (activeTasks[r.ID] || []).length }} 条任务</span>
+          <div style="flex: 1" />
+          <el-button v-if="runActive(r) && r.Status !== 'cancelling' && can('run:execute')" size="small" type="warning" plain @click="cancelRun(r)">
+            取消执行
+          </el-button>
+          <el-button v-else-if="!runActive(r) && can('run:execute')" size="small" plain @click="rerunRun(r)">
+            重新执行
+          </el-button>
         </div>
         <el-table :data="activeTasks[r.ID] || []" size="small">
           <el-table-column prop="Task" label="任务" min-width="160" />
@@ -413,6 +556,13 @@ onUnmounted(() => {
   display: flex;
   gap: 8px;
 }
+.inv-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  width: 100%;
+}
 .run-row {
   display: flex;
   align-items: center;
@@ -427,6 +577,12 @@ onUnmounted(() => {
 }
 .run-block {
   margin-bottom: 14px;
+  padding: 8px 10px;
+  border-radius: 6px;
+}
+.run-active {
+  background: #f0f7ff;
+  border: 1px solid #d4e7fc;
 }
 .run-title {
   display: flex;

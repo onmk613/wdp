@@ -14,12 +14,46 @@ import (
 // ---- 主机台账 ----
 
 func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
-	hosts, err := s.st.ListHosts(r.URL.Query().Get("q"))
+	// 无分页参数 = 老语义全量（exec 圈选、CSV 预检等服务端内部调用）
+	if !r.URL.Query().Has("page") && !r.URL.Query().Has("page_size") {
+		hosts, err := s.st.ListHosts(r.URL.Query().Get("q"))
+		if err != nil {
+			s.writeInternal(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.filterHosts(r, verbHostView, hosts))
+		return
+	}
+	pp := parsePage(r)
+	q := r.URL.Query().Get("q")
+	perm := s.permsOf(permUser(r))
+	if perm.global[verbHostView] {
+		// 全局权限：SQL 层直接分页（快路径）
+		items, total, err := s.st.ListHostsPage(q, pp.Page, pp.PageSize)
+		if err != nil {
+			s.writeInternal(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, pagedResp[*store.Host]{Items: items, Total: total, Page: pp.Page, PageSize: pp.PageSize})
+		return
+	}
+	// 作用域裁剪在池/组/标签上，SQL 化会与权限模型耦合——过滤后内存
+	// 分页（搜索词已先在 SQL 收窄；主机量级为千行，可接受）
+	hosts, err := s.st.ListHosts(q)
 	if err != nil {
 		s.writeInternal(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.filterHosts(r, verbHostView, hosts))
+	hosts = s.filterHosts(r, verbHostView, hosts)
+	total := int64(len(hosts))
+	lo, hi := pp.offset(), pp.offset()+pp.PageSize
+	if lo > len(hosts) {
+		lo = len(hosts)
+	}
+	if hi > len(hosts) {
+		hi = len(hosts)
+	}
+	writeJSON(w, http.StatusOK, pagedResp[*store.Host]{Items: hosts[lo:hi], Total: total, Page: pp.Page, PageSize: pp.PageSize})
 }
 
 // createHostReq 是 POST /api/hosts 的请求体。不再裸解码 store.Host：
@@ -146,6 +180,6 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := probeHost(r.Context(), h, s.probeClientFor(h))
-	_ = s.st.SetHostStatus(h.ID, result.Status)
+	_ = s.st.SetHostStatus(h.ID, result.Status, result.Build, probeModulesJSON(result))
 	writeJSON(w, http.StatusOK, result)
 }

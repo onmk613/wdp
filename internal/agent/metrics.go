@@ -200,8 +200,11 @@ func collectMem() []sample {
 
 func collectLoad() []sample {
 	if runtime.GOOS != "linux" {
-		// darwin 的 vm.loadavg 是二进制 struct（长度随版本浮动，解析脆弱）；
-		// 演练环境不硬解，Linux 主战场不受影响
+		// darwin 走 sysctl 的 struct loadavg（布局见 metrics_darwin.go）；
+		// 解不动（布局异常/试验平台）输出空集，Linux 主战场不受影响
+		if l1, l5, l15, ok := darwinLoadavg(); ok {
+			return []sample{{name: "node_load1", value: l1}, {name: "node_load5", value: l5}, {name: "node_load15", value: l15}}
+		}
 		return nil
 	}
 	b, err := os.ReadFile("/proc/loadavg")

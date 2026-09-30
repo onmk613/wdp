@@ -1,5 +1,3 @@
-# golangci-lint 配置：以 gofmt/vet 为基线，聚焦真实缺陷类检查。
-# 本地运行: golangci-lint run ；CI 中作为质量门禁（见 .github/workflows/ci.yml）。
 version: "2"
 
 run:
@@ -39,6 +37,13 @@ linters:
       # 失败无补救动作，best-effort 是刻意约定（写路径的 Close 已在代码中上抛）
       - linters: [errcheck]
         text: 'Error return value of `.+\.Close` is not checked'
+      # 根 CA 私钥口令保护有意使用标准库标记废弃的 legacy PEM 加密
+      # （x509.EncryptPEMBlock 一族）：纯标准库无替代 API，与 openssl
+      # 命令行互操作是硬需求——威胁模型与论证见 internal/ca/passphrase.go；
+      # 升级为现代格式属 docs/18 挂账的独立改造项。豁免精确匹配这三个
+      # API 名，其余 SA1019 废弃调用照常拦截。
+      - linters: [staticcheck]
+        text: 'x509\.(IsEncryptedPEMBlock|EncryptPEMBlock|DecryptPEMBlock) has been deprecated'
 
 formatters:
   # v2 schema 的 formatters 段没有 default 键（只有 enable/settings/exclusions），

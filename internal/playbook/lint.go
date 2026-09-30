@@ -77,9 +77,15 @@ func lintPlays(plays []*model.Play, src string, chartsDir string) []Issue {
 				Msg: fmt.Sprintf("task %q has no module", label)})
 			return
 		}
-		if _, _, ok := module.Resolve(t.Module, nil); !ok {
+		if mod, _, ok := module.Resolve(t.Module, nil); !ok {
 			issues = append(issues, Issue{Level: "ERROR", Path: src,
 				Msg: fmt.Sprintf("task %q uses unknown module %q", label, t.Module)})
+		} else if mod != nil {
+			// 空参数调用（如 `set_fact:` 下没写键值对）运行期必失败，提前拦截
+			if err := module.LintBareCall(mod, t.Args, t.FreeForm); err != nil {
+				issues = append(issues, Issue{Level: "ERROR", Path: src,
+					Msg: fmt.Sprintf("task %q: %v", label, err)})
+			}
 		}
 		for _, msg := range eng.ValidateTaskTemplates(t) {
 			issues = append(issues, Issue{Level: "ERROR", Path: src,

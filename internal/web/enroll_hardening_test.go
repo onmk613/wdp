@@ -4,17 +4,21 @@ package web
 //   - 明文 HTTP 下默认拒绝下发一键命令（脚本以 root 执行，脚本内嵌的
 //     CA 指纹与脚本同源，挡不住主动中间人）；
 //   - --advertise 只接受 https（除非显式打开明文开关）；
-//   - 逐主机私钥只能从 claim 的同一来源取一次。
+//   - CSR 换证绑定 claim 来源 IP，token 锁定到首个公钥（异钥 410）。
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
 
+	"wdp/internal/ca"
 	"wdp/internal/store"
 )
 
@@ -52,9 +56,10 @@ func TestEnrollRefusesPlaintext(t *testing.T) {
 	}
 }
 
-// TestEnrollHostKeyBoundToClaimSource 私钥下载绑定 claim 来源 IP，
-// 且只交付一次（token 会经 URL 进日志/历史）。
-func TestEnrollHostKeyBoundToClaimSource(t *testing.T) {
+// TestEnrollCSRBoundToClaimSource CSR 换证绑定 claim 来源 IP，且 token
+// 锁定到首个公钥（token 会经 URL 进日志/历史：来源绑定挡异地取用，
+// 异钥拒绝挡"泄露后换钥匙冒名"）。
+func TestEnrollCSRBoundToClaimSource(t *testing.T) {
 	s, st := newEnrollServer(t)
 
 	if err := st.CreateEnrollToken("tok-key", "keyhost", 7602, time.Hour); err != nil {
@@ -69,31 +74,45 @@ func TestEnrollHostKeyBoundToClaimSource(t *testing.T) {
 		t.Fatalf("claim 应成功: %d %s", rec.Code, rec.Body)
 	}
 
-	// 同一来源可取私钥一次
-	get := func(remote string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest("GET", "/enroll/tok-key/host-key", nil)
+	// 目标机本地生成密钥 + CSR（两次生成 = 两把不同的钥匙）
+	dir := t.TempDir()
+	mkCSR := func(name string) []byte {
+		t.Helper()
+		if _, err := ca.GenCSR(filepath.Join(dir, name+".key"), filepath.Join(dir, name+".csr")); err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(filepath.Join(dir, name+".csr"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	postCSR := func(token string, pem []byte, remote string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", "/enroll/"+token+"/csr", bytes.NewReader(pem))
 		r.RemoteAddr = remote
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, r)
 		return w
 	}
-	if w := get("192.0.2.1:5555"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "PRIVATE KEY") {
-		t.Fatalf("claim 来源应可取私钥: %d %s", w.Code, strings.TrimSpace(w.Body.String()))
+
+	// 同一来源：首把钥匙换到证书，同钥重试幂等
+	first := mkCSR("a")
+	if w := postCSR("tok-key", first, "192.0.2.1:5555"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "BEGIN CERTIFICATE") {
+		t.Fatalf("claim 来源应可换证书: %d %s", w.Code, strings.TrimSpace(w.Body.String()))
 	}
-	// 二次取私钥：拒绝（一次性）
-	if w := get("192.0.2.1:5555"); w.Code != http.StatusGone {
-		t.Fatalf("私钥只应交付一次: %d %s", w.Code, w.Body)
+	if w := postCSR("tok-key", first, "192.0.2.1:5555"); w.Code != http.StatusOK {
+		t.Fatalf("同钥重试应幂等: %d %s", w.Code, w.Body)
 	}
-	// 证书仍可重复取（安装可重跑）
-	rc := httptest.NewRequest("GET", "/enroll/tok-key/host-cert", nil)
-	rc.RemoteAddr = "192.0.2.1:5555"
-	wc := httptest.NewRecorder()
-	s.Handler().ServeHTTP(wc, rc)
-	if wc.Code != http.StatusOK {
-		t.Fatalf("证书应可重复取: %d %s", wc.Code, wc.Body)
+	// 换第二把钥匙：token 已锁定到首个公钥 → 410
+	if w := postCSR("tok-key", mkCSR("b"), "192.0.2.1:5555"); w.Code != http.StatusGone {
+		t.Fatalf("异钥 CSR 应 410: %d %s", w.Code, w.Body)
+	}
+	// 非 CSR 载荷：400
+	if w := postCSR("tok-key", []byte("garbage"), "192.0.2.1:5555"); w.Code != http.StatusBadRequest {
+		t.Fatalf("坏 CSR 应 400: %d %s", w.Code, w.Body)
 	}
 
-	// 换来源取证书：拒绝
+	// 换来源提交 CSR：拒绝（模拟日志泄露后的异地取用）
 	if err := st.CreateEnrollToken("tok-ip", "iph", 7602, time.Hour); err != nil {
 		t.Fatal(err)
 	}
@@ -102,12 +121,8 @@ func TestEnrollHostKeyBoundToClaimSource(t *testing.T) {
 	req2.RemoteAddr = "192.0.2.9:1234"
 	s.Handler().ServeHTTP(httptest.NewRecorder(), req2)
 
-	r3 := httptest.NewRequest("GET", "/enroll/tok-ip/host-key", nil)
-	r3.RemoteAddr = "203.0.113.7:1234" // 另一个来源（模拟日志泄露后的异地取用）
-	w3 := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w3, r3)
-	if w3.Code != http.StatusForbidden {
-		t.Fatalf("异地取私钥应 403: %d %s", w3.Code, w3.Body)
+	if w := postCSR("tok-ip", mkCSR("c"), "203.0.113.7:1234"); w.Code != http.StatusForbidden {
+		t.Fatalf("异地提交 CSR 应 403: %d %s", w.Code, w.Body)
 	}
 }
 

@@ -81,4 +81,7 @@ type Stats struct {
 	Unreachable int `json:"unreachable"`
 	Skipped     int `json:"skipped"`
 	Ignored     int `json:"ignored"` // ignore_errors 吞掉的失败
+	// ElapsedMs 该主机全部任务耗时之和（任务级执行墙钟，不含主机间等待）。
+	// RECAP 耗时列与最慢主机据此呈现（性能对比的依据）
+	ElapsedMs int64 `json:"elapsed_ms"`
 }

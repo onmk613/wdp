@@ -13,6 +13,7 @@ import (
 
 	"wdp/internal/chart"
 	"wdp/internal/fmtutil"
+	"wdp/internal/i18n"
 	"wdp/internal/release"
 )
 
@@ -20,7 +21,7 @@ import (
 func newReleaseCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "release",
-		Short: "deployment record viewing",
+		Short: i18n.T("deployment record viewing", "部署记录查看"),
 	}
 	cmd.AddCommand(newReleaseListCmd(), newReleaseShowCmd(), newReleaseDiffCmd(), newReleaseDelCmd())
 	return cmd
@@ -54,9 +55,10 @@ func saveReleaseRecord(rec *release.Record, werr error, failed bool) error {
 // newReleaseListCmd 构造 `wdp release list`。
 func newReleaseListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "list [chart-name prefix]",
-		Short: "list deployment records (newest first)",
-		Args:  cobra.MaximumNArgs(1),
+		Use: "list [chart-name prefix]",
+		Short: i18n.T("list deployment records (newest first)",
+			"列出部署记录（最新在前）"),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			filter := ""
 			if len(args) > 0 {
@@ -87,8 +89,18 @@ func newReleaseListCmd() *cobra.Command {
 	}
 }
 
-const releaseShowHelp = `
-查看单条部署记录详情
+// releaseShowHelp 返回 `wdp release show` 的长帮助（调用时求值）。
+func releaseShowHelp() string {
+	return i18n.T(`Show the details of one deployment record
+
+Prints the ID, time, chart and version, result, host list, values file references and snapshot
+--values prints only the values snapshot YAML — feed it back with -f to reproduce that deployment's parameters
+Bare-playbook records have no values snapshot
+
+Examples:
+wdp release show myapp-1760000000000000123
+wdp release show myapp-1760000000000000123 --values > prod.yaml
+`, `查看单条部署记录详情
 
 输出 ID、时间、chart 与版本、结果、主机清单、values 文件引用与快照
 --values 只打印 values 快照 YAML——可直接 -f 回放复现该次部署参数
@@ -97,16 +109,18 @@ const releaseShowHelp = `
 示例：
 wdp release show myapp-1760000000000000123
 wdp release show myapp-1760000000000000123 --values > prod.yaml
-`
+`)
+}
 
 // newReleaseShowCmd 构造 `wdp release show`。
 func newReleaseShowCmd() *cobra.Command {
 	var asValues bool
 	cmd := &cobra.Command{
-		Use:   "show <id>",
-		Short: "show record details",
-		Long:  releaseShowHelp,
-		Args:  cobra.ExactArgs(1),
+		Use: "show <id>",
+		Short: i18n.T("show record details",
+			"查看单条部署记录详情"),
+		Long: releaseShowHelp(),
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rec, err := release.Load(args[0])
 			if err != nil {
@@ -144,9 +158,10 @@ func newReleaseShowCmd() *cobra.Command {
 // newReleaseDiffCmd 构造 `wdp release diff`。
 func newReleaseDiffCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "diff <id1> <id2>",
-		Short: "diff the values snapshots of two deployment records",
-		Args:  cobra.ExactArgs(2),
+		Use: "diff <id1> <id2>",
+		Short: i18n.T("diff the values snapshots of two deployment records",
+			"对比两条部署记录的 values 快照"),
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := release.Load(args[0])
 			if err != nil {
@@ -175,8 +190,23 @@ func newReleaseDiffCmd() *cobra.Command {
 	}
 }
 
-const releaseDelHelp = `
-删除部署记录（本地审计文件，可一条或多条）
+// releaseDelHelp 返回 `wdp release del` 的长帮助（调用时求值）。
+func releaseDelHelp() string {
+	return i18n.T(`Delete deployment records (local audit files; one or many)
+
+By default deletes by ID: an ID prefix is enough (record IDs look like <chart>-<unixnano> and are
+impractical to copy in full); it deletes only on a unique match and lists candidates when ambiguous.
+All arguments are resolved first: if any has no match or is ambiguous, nothing is deleted
+--prefix bulk mode: every record matched by each argument is deleted (clear old records by chart name)
+--regex bulk mode: arguments are Go regexes matched against IDs (unanchored; use ^...$ for the whole string)
+Bulk modes list the records to be deleted first and act after --yes; deletion cannot be undone
+
+Examples:
+wdp release del myapp-1760001234                      # unique prefix, delete directly
+wdp release del myapp-1760001234 other-998            # several records
+wdp release del --prefix myapp --yes                  # every record of that chart
+wdp release del --regex '^myapp-1760001' --yes        # regex bulk
+`, `删除部署记录（本地审计文件，可一条或多条）
 
 默认按 ID 删除：ID 可只给前缀（记录 ID 形如 <chart>-<unixnano>，完整抄录
 不便），唯一命中才删，歧义报候选；全部参数先解析，任一无命中或歧义则不删任何记录
@@ -189,16 +219,18 @@ wdp release del myapp-1760001234                      # 唯一前缀，直接删
 wdp release del myapp-1760001234 other-998            # 多条
 wdp release del --prefix myapp --yes                  # 该 chart 全部记录
 wdp release del --regex '^myapp-1760001' --yes        # 正则批量
-`
+`)
+}
 
 // newReleaseDelCmd 构造 `wdp release del`。
 func newReleaseDelCmd() *cobra.Command {
 	var byPrefix, byRegex, yes bool
 	cmd := &cobra.Command{
-		Use:   "del <id>... [--prefix | --regex] [--yes]",
-		Short: "delete one or more deployment records (unique ID prefix; --prefix/--regex bulk with --yes)",
-		Long:  releaseDelHelp,
-		Args:  cobra.MinimumNArgs(1),
+		Use: "del <id>... [--prefix | --regex] [--yes]",
+		Short: i18n.T("delete one or more deployment records (unique ID prefix; --prefix/--regex bulk with --yes)",
+			"删除一条或多条部署记录（ID 唯一前缀；--prefix/--regex 批量需 --yes）"),
+		Long: releaseDelHelp(),
+		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			bulk := byPrefix || byRegex
 			if byPrefix && byRegex {
@@ -241,12 +273,15 @@ func newReleaseDelCmd() *cobra.Command {
 		},
 	}
 	f := cmd.Flags()
-	f.BoolVar(&byPrefix, "prefix", false,
-		"bulk: delete ALL records whose ID starts with each arg")
-	f.BoolVar(&byRegex, "regex", false,
-		"bulk: args are Go regexes matched against record IDs (anchor with ^... as needed)")
-	f.BoolVarP(&yes, "yes", "y", false,
-		"confirm bulk (--prefix/--regex) deletion without the review listing")
+	f.BoolVar(&byPrefix, "prefix", false, i18n.T(
+		"bulk: delete ALL records whose ID starts with each arg",
+		"批量：删除 ID 以每个参数为前缀的全部记录"))
+	f.BoolVar(&byRegex, "regex", false, i18n.T(
+		"bulk: args are Go regexes matched against record IDs (anchor with ^... as needed)",
+		"批量：参数为对记录 ID 匹配的 Go 正则（需要时用 ^... 锚定）"))
+	f.BoolVarP(&yes, "yes", "y", false, i18n.T(
+		"confirm bulk (--prefix/--regex) deletion without the review listing",
+		"跳过预览清单，直接确认批量（--prefix/--regex）删除"))
 	return cmd
 }
 

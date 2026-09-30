@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { CaretRight, Refresh, Search } from '@element-plus/icons-vue'
 import { can } from '../auth'
-import { api, type ExecHostResult, type Host } from '../api'
+import {
+  api, subscribeExecStream, type ExecHostResult, type Host, type RunTask,
+} from '../api'
+import TailPre from '../components/TailPre.vue'
 
 const hosts = ref<Host[]>([])
 const loading = ref(false)
@@ -14,8 +17,12 @@ const tableRef = ref()
 const script = ref('uname -a')
 const timeoutSec = ref(120)
 const running = ref(false)
-const results = ref<ExecHostResult[]>([])
+// pending=true 的条目是尚未完成的主机占位（spinner），事件到达后原位填充
+type LiveResult = ExecHostResult & { pending?: boolean }
+const results = ref<LiveResult[]>([])
 const runID = ref(0)
+// 已完成计数（header 徽标）：ok/failed 之和，随事件推进
+const doneCount = computed(() => results.value.filter((r) => !r.pending).length)
 // 目标按执行权限裁剪（restricted=true 时提示；数据源是 /api/exec/targets
 // 而非台账全量——资源显示与执行权限同口径）
 const restricted = ref(false)
@@ -48,6 +55,59 @@ function onSelectionChange(rows: Host[]) {
   selection.value = rows
 }
 
+// 流订阅与兜底轮询的清理句柄（组件卸载 / 下一次执行前释放）
+let stopStream: (() => void) | null = null
+let pollTimer = 0
+
+function finishRun(ok: number, failed: number) {
+  running.value = false
+  stopStream?.()
+  stopStream = null
+  window.clearTimeout(pollTimer)
+  if (failed === 0) ElMessage.success(`${ok} 台执行成功`)
+  else ElMessage.warning(`${ok} 成功 / ${failed} 失败`)
+}
+
+// 以落库任务明细补齐结果（done 后仍有 pending 占位 = 流上丢了事件；
+// 或流断开后的兜底轮询收敛）。Detail 是截断快照，展示口径从简
+async function fillFromStore(id: number, final = false) {
+  try {
+    const r = await api<{ run: { Status: string }; tasks: RunTask[] }>('GET', `/api/runs/${id}`)
+    const byName = new Map(r.tasks.map((t) => [t.Host, t]))
+    for (const [i, res] of results.value.entries()) {
+      if (!res.pending) continue
+      const t = byName.get(res.name)
+      if (!t) continue
+      results.value[i] = {
+        id: res.id, name: res.name,
+        code: t.Status === 'ok' ? 0 : 1,
+        stdout: t.Detail || '', stderr: '',
+        err: t.Status === 'unreachable' ? t.Detail : '',
+      }
+    }
+    if (final) {
+      const ok = r.tasks.filter((t) => t.Status === 'ok').length
+      finishRun(ok, r.tasks.length - ok)
+    }
+  } catch { /* 兜底失败：保持现状等下一轮 */ }
+}
+
+// 兜底轮询：SSE 断开（HTTP 错误不自动重连）时按 3s 收敛到落库结果
+function pollFallback(id: number) {
+  window.clearTimeout(pollTimer)
+  pollTimer = window.setTimeout(async () => {
+    if (!running.value) return
+    try {
+      const r = await api<{ Status: string }>('GET', `/api/runs/${id}`)
+      if (r.Status !== 'running') {
+        await fillFromStore(id, true)
+        return
+      }
+    } catch { /* 网络故障：下一轮再试 */ }
+    pollFallback(id)
+  }, 3000)
+}
+
 async function run() {
   if (!selection.value.length) {
     ElMessage.warning('先勾选目标主机')
@@ -57,25 +117,42 @@ async function run() {
     ElMessage.warning('脚本不能为空')
     return
   }
+  const targets = [...selection.value]
   running.value = true
-  results.value = []
+  // 选择序占位：全部 pending，事件到达原位填充（大批量时逐台可见）
+  results.value = targets.map((h) => ({ id: h.ID, name: h.Name, code: 0, stdout: '', stderr: '', pending: true }))
   try {
-    const r = await api<{ run_id: number; ok: number; failed: number; results: ExecHostResult[] }>(
-      'POST', '/api/exec',
-      { host_ids: selection.value.map((h) => h.ID), script: script.value, timeout_sec: timeoutSec.value },
-    )
+    const r = await api<{ run_id: number }>('POST', '/api/exec', {
+      host_ids: targets.map((h) => h.ID), script: script.value, timeout_sec: timeoutSec.value,
+    })
     runID.value = r.run_id
-    results.value = r.results
-    if (r.failed === 0) ElMessage.success(`${r.ok} 台执行成功`)
-    else ElMessage.warning(`${r.ok} 成功 / ${r.failed} 失败`)
+    stopStream?.()
+    stopStream = subscribeExecStream(
+      r.run_id,
+      (h) => {
+        const idx = results.value.findIndex((x) => x.id === h.result.id || (h.result.id === 0 && x.name === h.result.name))
+        const filled: LiveResult = { ...h.result }
+        if (idx >= 0) results.value[idx] = filled
+        else results.value.push(filled)
+      },
+      (d) => {
+        // done 后仍有占位（订阅通道满丢事件）：按落库明细补齐再收尾
+        if (results.value.some((x) => x.pending)) void fillFromStore(r.run_id).then(() => finishRun(d.ok, d.failed))
+        else finishRun(d.ok, d.failed)
+      },
+      () => { if (running.value) pollFallback(r.run_id) },
+    )
   } catch (e) {
     ElMessage.error((e as Error).message)
-  } finally {
     running.value = false
   }
 }
 
 onMounted(() => load())
+onBeforeUnmount(() => {
+  stopStream?.()
+  window.clearTimeout(pollTimer)
+})
 </script>
 
 <template>
@@ -144,26 +221,31 @@ onMounted(() => load())
     <el-card v-if="results.length" shadow="never" class="block">
       <template #header>
         <span>执行结果</span>
-        <span class="muted" style="margin-left: 12px">run #{{ runID }}（记录已入审计）</span>
+        <span class="muted" style="margin-left: 12px">
+          run #{{ runID }}（已记录到「执行记录」，可回看输出）<template v-if="running"> · {{ doneCount }}/{{ results.length }} 台完成</template>
+        </span>
       </template>
       <el-collapse>
         <el-collapse-item v-for="r in results" :key="r.id">
           <template #title>
-            <el-tag :type="r.err || r.code !== 0 ? 'danger' : 'success'" size="small" style="margin-right: 8px">
+            <el-tag v-if="r.pending" type="info" size="small" style="margin-right: 8px">运行中…</el-tag>
+            <el-tag v-else :type="r.err || r.code !== 0 ? 'danger' : 'success'" size="small" style="margin-right: 8px">
               {{ r.err ? 'unreachable' : 'rc=' + r.code }}
             </el-tag>
             <b>{{ r.name }}</b>
-            <span class="muted" style="margin-left: 10px">
+            <span v-if="!r.pending" class="muted" style="margin-left: 10px">
               stdout {{ (r.stdout || '').length }}B · stderr {{ (r.stderr || '').length }}B
             </span>
           </template>
-          <div v-if="r.err" class="err">{{ r.err }}</div>
+          <div v-if="r.pending" class="muted" style="padding: 6px 0">等待执行完成…</div>
+          <div v-else-if="r.err" class="err">{{ r.err }}</div>
           <template v-else>
             <div class="out-label">stdout</div>
-            <pre class="out">{{ r.stdout || '(stdout 无输出)' }}</pre>
+            <TailPre v-if="r.stdout" :text="r.stdout" />
+            <div v-else class="muted" style="padding: 4px 0">(stdout 无输出)</div>
             <template v-if="r.stderr">
               <div class="out-label">stderr</div>
-              <pre class="out err-out">{{ r.stderr }}</pre>
+              <TailPre :text="r.stderr" class="err-out" />
             </template>
           </template>
         </el-collapse-item>
@@ -207,17 +289,6 @@ onMounted(() => load())
 }
 .err-out {
   border-left: 3px solid #f56c6c;
-}
-.out {
-  background: #0f172a;
-  color: #e2e8f0;
-  border-radius: 6px;
-  padding: 10px 12px;
-  font-size: 12px;
-  max-height: 300px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-all;
 }
 .block {
   margin-top: 16px;

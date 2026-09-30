@@ -37,7 +37,7 @@
 wdp run <playbook.yaml | chart目录 | chart.tgz>
         [-i inventory（可多次）] [-f values 文件（可多次）] [--set k=v（可多次）]
         [--limit 模式] [-t/--tags 逗号分隔] [--skip-tags 逗号分隔]
-        [--check] [--diff] [--list-hosts] [--start-at-task 任务名]
+        [--check] [--diff] [--fail-fast] [--list-hosts] [--start-at-task 任务名]
         [--phase <相位>] [--fact-cache facts.json] [-y/--yes]
 ```
 
@@ -51,6 +51,7 @@ wdp run <playbook.yaml | chart目录 | chart.tgz>
 | `--skip-tags` | 跳过带这些 tag 的任务 |
 | `--check` | 预演模式（全相位可用） |
 | `--diff` | 内容级差异（自动启用 check） |
+| `--fail-fast` | 任一主机失败即中止：当前批次在途主机会执行完，随后不再推进后续批次与后续 play（ansible `max_fail_percentage=0` 语义；配置了 strategy 的 play 自带该行为）。大批量灰度时避免明知会全盘失败还打满全量。`adhoc` / `apply` 同名同义 |
 | `--list-hosts` | 仅列出将执行的主机 |
 | `--start-at-task` | 从指定任务开始（调试） |
 | `--phase` | chart 生命周期相位（缺省 deploy）：根目录任意 `<phase>.yaml` 都是相位——内置 `uninstall` / `status`，自定义如 `update` / `download`（见 [08 生命周期](08-chart应用包.md#生命周期)）；未知相位报错并列出可用相位。该相位的 **values 来源**由 chart.yaml `values_from` 决定：缺省卸载类相位（`clears_marker`）读各主机 marker 记录的实际部署入参，其余相位（含 `status`、`download` 等自定义相位）读 chart values——从未部署过的主机也能跑 `--phase download` |
@@ -213,6 +214,37 @@ wdp package <chart目录> [-o/--out-dir 输出目录]
 
 先加载校验再打包为 `<name>-<version>.tgz`（包内顶层 `<name>/` 前缀，可直接 `wdp run`）。
 
+## wdp repo（chart 仓库客户端）
+
+`wdp server` 把应用库以 **Helm 兼容仓库**暴露在 `/charts` 下
+（`GET /charts/index.yaml`、`GET /charts/<name>-<version>.tgz`），
+认证与控制台同源（`--repo-auth user:password`，或 `WDP_REPO_AUTH`
+环境变量；`--repo` 可用 `WDP_REPO` 预设，裸基址自动补 `/charts`）。
+
+```sh
+wdp repo list --repo http://server:7603/charts --repo-auth admin:pass   # 应用与版本一览
+wdp repo show nginx --version 1.2.0 --repo …                            # 元信息/相位/digest
+wdp repo pull nginx --dest ./charts        # 解包为 charts/nginx/（run 可直接引用）
+wdp repo pull nginx --tgz                  # 保留 .tgz 包（lint/plan/render 直接吃）
+wdp repo push app-1.2.0.tgz --repo …       # 登录后走应用上传（chart.yaml 定名/版本）
+```
+
+- 拉取/推送都做 **sha256 digest 校验**（索引 digest 即入库校验和）；
+- `pull` 默认解包到 `./charts/<name>/`——与裸 playbook 的 chart 引用
+  解析根一致，拉完即可 `wdp run`；
+- `push` 复用 Web 上传端点：权限（`app:upload`）、审计、「版本发布后
+  不可覆盖」口径完全一致。
+
+### run 直接引用仓库 chart
+
+```sh
+wdp run pb.yaml -i inv.yaml --repo http://server:7603/charts --repo-auth admin:pass
+```
+
+playbook 里 `chart: {name: nginx}` 在本地 `charts/nginx/` 缺失时自动
+从仓库拉取（`@版本` 约束优先，未约束取最新），digest 校验后解包缓存到
+`charts/<name>/`——之后的执行离线可用。
+
 ## wdp inv（别名 `inventory` / `i`）
 
 ```sh
@@ -336,6 +368,8 @@ wdp agent [--listen 127.0.0.1:7602]
 | `--max-request-mb` | 请求体大小上限 MiB（0 = 内置默认 64；`/exec`、`/file` 上传等全部端点的请求体超过即拒绝 413） |
 | `--log-level` | 日志级别 `trace\|debug\|info\|warn\|error`（默认 info）。info=执行的命令、传输的文件、解压、换证、收到停止信号等必要运行记录；debug=每次操作完整细节 + 逐请求访问日志；trace=debug 之上再对每个请求/响应做 httpdump（敏感字段遮蔽） |
 | `--log-file` | 日志同时追加写入该文件（自动建父目录，0600）；**自清理不删除该文件**，退役后保留供审计；控制端可经 `agentctl logs` 或 `GET /file` 拉取 |
+
+子命令 `wdp agent gencsr --key <私钥路径> --csr <CSR 输出路径>`：**在本机**生成（或幂等复用已有）agent 私钥并产出 CSR——server 纳管脚本/SSH 推装调用，私钥留在目标机本地、只把 CSR 交给 server 签发（CSR 不带 Subject，身份由 server 侧纳管记录决定）。已有私钥但解析失败时显式报错，绝不静默覆盖。
 
 端点：`/exec`（命令执行）、`/file`（读写）、`/archive`（原生解压，不依赖目标机工具链）、`/health`（探活 + `cert_not_after` 证书到期时刻 + `idle_timeout_sec`/`idle_left_sec`，供批量巡检）、`/shutdown`（退出并自清理：请求体空或空 JSON `{}` 即默认清理——删自身二进制、证书材料含 CA、best-effort 停用 systemd 单元；也可 `{"systemd_unit":"...","files":[...]}` 指定单元名与额外文件/目录一并清理；无认证模式直接执行，mTLS 模式经证书校验后执行）、`/logs`（拉取近期日志：内存环形缓冲约 512KiB，`agentctl logs` 逐主机落盘即"日志传输到控制端"；完整历史走 `--log-file`）。
 敏感操作（换证/远程清理/空闲自动退出）输出事件日志到 stderr（systemd 托管时进 journal，可追溯）。

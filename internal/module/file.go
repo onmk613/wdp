@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -26,7 +27,7 @@ func (m *FileModule) Name() string { return "file" }
 func (m *FileModule) RollbackCapability() RollbackCapability { return RollbackFull }
 
 func (m *FileModule) Desc() string {
-	return "manage file/directory/symlink state and attributes"
+	return i18n.T("Manage the state and attributes of remote files, directories, and symlinks", "管理远端文件/目录/符号链接的状态与属性")
 }
 
 // fileReq 是 file 模块解析后的参数。
@@ -375,26 +376,37 @@ func changeLabel(would bool) string {
 // src 紧随 state，其余按使用频率——补全候选与 snippet 骨架按此序展示。
 func (m *FileModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "path", Type: "string", Desc: "remote path (required)"},
-		{Name: "state", Type: "string", Enum: fileStates, Desc: "target state; empty = attribute correction on the existing path"},
-		{Name: "src", Type: "string", Desc: "link target when state=link"},
-		{Name: "mode", Type: "mode", Desc: "mode, e.g. 0755"},
-		{Name: "owner", Type: "string", Desc: "owner (requires become)"},
-		{Name: "group", Type: "string", Desc: "group (requires become)"},
+		{Name: "path", Type: "string", Desc: i18n.T("remote target path (required)", "远端目标路径（必填）")},
+		{Name: "state", Type: "string", Enum: fileStates, Desc: i18n.T("desired state; empty = only correct attributes of an existing path", "目标状态；留空 = 仅对已存在路径做属性校正")},
+		{Name: "src", Type: "string", Desc: i18n.T("link target (required when state=link)", "链接目标（state=link 时必填）")},
+		{Name: "mode", Type: "mode", Desc: i18n.T("mode, e.g. 0755", "权限位，如 0755")},
+		{Name: "owner", Type: "string", Desc: i18n.T("owner (requires become)", "属主（需 become）")},
+		{Name: "group", Type: "string", Desc: i18n.T("group (requires become)", "属组（需 become）")},
 	}
 }
 
 func (m *FileModule) Example() string {
-	return `- name: app directory and symlink
+	return i18n.T(`- name: Set up the application directory and symlink
   file:
     path: "{{ .global.workdir }}"
     state: directory
     mode: "0755"
 
-- name: current release symlink
+- name: Symlink the current version
   file:
     src: "{{ .global.workdir }}/releases/v1"
     path: "{{ .global.workdir }}/current"
     state: link
-`
+`, `- name: 应用目录与符号链接
+  file:
+    path: "{{ .global.workdir }}"
+    state: directory
+    mode: "0755"
+
+- name: 当前版本软链
+  file:
+    src: "{{ .global.workdir }}/releases/v1"
+    path: "{{ .global.workdir }}/current"
+    state: link
+`)
 }

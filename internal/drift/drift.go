@@ -49,8 +49,8 @@ func (c *Capture) PlayStart(name string, hosts []string) { c.inner.PlayStart(nam
 func (c *Capture) TaskStart(task, module string)         { c.inner.TaskStart(task, module) }
 func (c *Capture) TaskDone()                             { c.inner.TaskDone() }
 func (c *Capture) PlayMsg(format string, a ...any)       { c.inner.PlayMsg(format, a...) }
-func (c *Capture) Recap(n string, s map[string]*model.Stats) {
-	c.inner.Recap(n, s)
+func (c *Capture) Recap(n string, s map[string]*model.Stats, wallMs int64) {
+	c.inner.Recap(n, s, wallMs)
 }
 func (c *Capture) Finish() { c.inner.Finish() }
 

@@ -11,6 +11,9 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"wdp/internal/agent"
+	"wdp/internal/buildinfo"
 )
 
 const (
@@ -167,11 +170,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.auditEntry(req.User, s.remoteIP(r), "login", "session", req.User, "登录成功")
 	http.SetCookie(w, &http.Cookie{
 		Name: sessionCookie, Value: token, Path: "/", HttpOnly: true,
-		SameSite: http.SameSiteStrictMode, MaxAge: int(sessionTTL.Seconds()),
+		SameSite: http.SameSiteStrictMode, MaxAge: int(s.sessions.idleTTL().Seconds()),
 		Secure: s.requestIsHTTPS(r), // TLS 部署（原生或信任反代）下防 token 明文外泄
 	})
 	p := s.permsOf(req.User)
-	writeJSON(w, http.StatusOK, map[string]any{"user": req.User, "role": p.role, "perms": p.summary()})
+	writeJSON(w, http.StatusOK, map[string]any{"user": req.User, "role": p.role, "perms": p.summary(), "build": agent.BuildVersion(), "build_unversioned": buildinfo.Unversioned()})
 }
 
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +190,11 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	user, _ := r.Context().Value(ctxUser{}).(string)
 	p := s.permsOf(user)
-	writeJSON(w, http.StatusOK, map[string]any{"user": user, "role": p.role, "perms": p.summary()})
+	// build：server 端 agent 通道二进制版本（远程升级的目标版本）——前端
+	// 据此门控「升级」按钮（agent build 与之一致 = 已是最新）。
+	// build_unversioned：未注入构建信息的开发构建，同串不能证明同版本，
+	// 前端据此放开门控（点击升级由后端重推二进制兜底）
+	writeJSON(w, http.StatusOK, map[string]any{"user": user, "role": p.role, "perms": p.summary(), "build": agent.BuildVersion(), "build_unversioned": buildinfo.Unversioned()})
 }
 
 // ctxUser 会话用户注入 context 的键类型。

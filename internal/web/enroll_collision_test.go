@@ -1,15 +1,20 @@
 package web
 
 // 主机名碰撞防护：未绑定主机名的 enroll token 不允许 claim 既有主机的
-// 名字——否则"证书已存在即跳过"的幂等分支会把既有主机的 mTLS 私钥交付
-// 给撞名者，done 还会改写台账地址。绑定主机名的 token 是管理员对该主机
-// 的重装/迁移授权，不受此限。
+// 名字——否则撞名者可对既有主机名签出新证书（server 侧覆盖留档），
+// done 还会改写台账地址。绑定主机名的 token 是管理员对该主机的
+// 重装/迁移授权，不受此限。
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"wdp/internal/ca"
 	"wdp/internal/store"
 )
 
@@ -41,10 +46,10 @@ func TestEnrollNameCollisionRejected(t *testing.T) {
 		t.Fatalf("撞名 claim 应 409: %d %s", rec.Code, rec.Body)
 	}
 
-	// 被拒的 claim 不得让私钥变得可取（ClaimHost 未落库 → 仍应 410）
-	rec = do(t, h, "GET", "/enroll/"+created.Token+"/host-key", nil, nil)
+	// 被拒的 claim 不得让 CSR 变得可用（ClaimHost 未落库 → 仍应 410）
+	rec = do(t, h, "POST", "/enroll/"+created.Token+"/csr", map[string]any{}, nil)
 	if rec.Code != http.StatusGone {
-		t.Fatalf("被拒 claim 后私钥不应可取: %d %s", rec.Code, rec.Body)
+		t.Fatalf("被拒 claim 后 CSR 不应可用: %d %s", rec.Code, rec.Body)
 	}
 
 	// done 也不得改写台账（未 claim 的 token → 410，不产生任何落账）
@@ -86,9 +91,20 @@ func TestEnrollBoundTokenReinstallAllowed(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("绑定 token 的重装 claim 应 200: %d %s", rec.Code, rec.Body)
 	}
-	rec = do(t, h, "GET", "/enroll/"+created.Token+"/host-cert", nil, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("绑定 token 的证书交付应 200: %d %s", rec.Code, rec.Body)
+	// 绑定 token 的 CSR 换证应 200（身份由 server 决定，与来源无关地放行）
+	csrDir := t.TempDir()
+	if _, err := ca.GenCSR(filepath.Join(csrDir, "k.key"), filepath.Join(csrDir, "k.csr")); err != nil {
+		t.Fatal(err)
+	}
+	csrPEM, err := os.ReadFile(filepath.Join(csrDir, "k.csr"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest("POST", "/enroll/"+created.Token+"/csr", bytes.NewReader(csrPEM))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("绑定 token 的 CSR 换证应 200: %d %s", w.Code, w.Body)
 	}
 }
 

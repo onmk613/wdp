@@ -1,9 +1,11 @@
 package web
 
-// 证书远程换证：web 持有逐主机证书对（<caDir>/hosts/<name>.crt|.key），
-// Renew 保留私钥重签（SAN 不变、NotAfter 延后），再把新证书经 mTLS 推给
-// agent 的 POST /cert 热更换——agent 免重装/免重启换证。agent 离线时新
-// 证书已在 server 侧就位（agent 重启后即加载），在线推送只差一步补推。
+// 证书远程换证：server 侧只持有逐主机证书（<caDir>/hosts/<name>.crt）——
+// CSR 纳管（docs/20）后叶子私钥在目标机本地，server 不再持有任何
+// 逐主机私钥。续期本就只需要旧证书的公钥（签名用 CA 私钥）：Keyless
+// 重签（SAN/公钥不变、NotAfter 延后），再把新证书经 mTLS 推给 agent 的
+// POST /cert 热更换——agent 免重装/免重启换证。agent 离线时新证书已在
+// server 侧就位（agent 重启后即加载），在线推送只差一步补推。
 
 import (
 	"bytes"
@@ -37,7 +39,7 @@ func (s *Server) handleRenewHostCert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "enrollment CA is not enabled on this server")
 		return
 	}
-	crt, key := s.hostCertPaths(h.Name)
+	crt, _ := s.hostCertPaths(h.Name)
 	if _, err := os.Stat(crt); err != nil {
 		// 只有"确实没有证书"才是 404：Stat 的其他失败（权限/IO）是
 		// server 侧问题，回 500 而不是伪装成"未纳管"
@@ -49,15 +51,11 @@ func (s *Server) handleRenewHostCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	newCrt, _, fp, err := ca.Renew(ca.RenewOptions{
-		CertPath: crt, KeyPath: key, OutPath: crt,
+		CertPath: crt, OutPath: crt,
 		CACertPath: s.cam.caPath, CAKeyPath: s.cam.caKeyPath,
-		Days: DefaultAgentCertDays,
+		Days: DefaultAgentCertDays, Keyless: true,
 	})
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeError(w, http.StatusNotFound, "host certificate or key not found (was this host enrolled via the web console?)")
-			return
-		}
 		s.writeInternal(w, fmt.Errorf("renew host cert: %w", err))
 		return
 	}

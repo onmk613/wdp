@@ -51,6 +51,13 @@ function fieldDoc(sec: SchemaMeta['task'][number] | SchemaMeta['play'][number], 
 // 常用模块置顶
 const COMMON_MODULES = ['shell', 'copy', 'template', 'file', 'service', 'package', 'user', 'group', 'systemd', 'stat', 'set_fact', 'wait_for', 'lineinfile']
 
+// isRealParam 过滤 ParamDoc 的伪参数行：括号约定名不是真实可写的键——
+// (free-form) 自由形式、(any) 任意键值对、(no arguments) 无参声明。
+// 不过滤的话它们会以 "(no arguments): " 之类的形态出现在键补全里
+function isRealParam(name: string | undefined): boolean {
+  return !!name && !name.startsWith('(')
+}
+
 // 模板函数说明（白名单 = 后端 render.AllowlistFuncs，docs/09 全集的投影；
 // 未列出的白名单函数落回按类别的兜底说明）。新手在补全弹窗里就能看到
 // 每个函数干什么、怎么用。
@@ -284,7 +291,7 @@ export function registerProviders(monaco: MonacoNs, deps: CompleteDeps): Monaco.
         for (const m of mods) {
           if (m.name === 'chart') continue // 伪模块条目：由下方带骨架的显式项提供，避免重复候选
 
-          const params = (m.params || []).filter((p) => p.name !== '(free-form)' && p.name !== '')
+          const params = (m.params || []).filter((p) => isRealParam(p.name))
           let snippet = `${m.name}: $0`
           if (params.length) {
             const ph = params.slice(0, 4).map((p, i) => `${paramRelIndent}${p.name}: ` + '${' + (i + 1) + '}').join('\n')
@@ -330,7 +337,7 @@ export function registerProviders(monaco: MonacoNs, deps: CompleteDeps): Monaco.
         let idx = 0
         for (const p of mmeta.params || []) {
           idx++
-          if (p.name === '(free-form)' || !p.name) continue
+          if (!isRealParam(p.name)) continue
           if (ctx.existing.has(p.name)) continue
           const v = p.type === 'bool' ? `${p.name}: ` : p.type === 'list' ? `${p.name}:\n${childIndent}- ` : `${p.name}: `
           suggestions.push(makeItem(p.name, K.Field, v, range, {

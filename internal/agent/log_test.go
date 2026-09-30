@@ -57,23 +57,28 @@ func TestParseLogLevel(t *testing.T) {
 	}
 }
 
-// TestLogsEndpointInfoLevel info 默认级：必要运行记录入缓冲（命令摘要——
-// 脚本常含密码/令牌，日志不记明文），访问日志与 httpdump 不出现。
+// TestLogsEndpointInfoLevel info 默认级：运行记录入缓冲且**能看出执行了
+// 什么**——脚本首行预览入 info（完整脚本只在 debug，深行令牌不露出），
+// 访问日志与 httpdump 不出现。
 func TestLogsEndpointInfoLevel(t *testing.T) {
 	s := New(":0")
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(ts.Close)
 
+	// 首行是主命令；敏感内容放深行——info 只见首行
 	resp, err := http.Post(ts.URL+"/exec", "application/json",
-		strings.NewReader(`{"script":"echo hello"}`))
+		strings.NewReader(`{"script":"deploy --target prod\nexport TOKEN=deep-secret-token"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 
 	logs := waitLogsContain(t, ts, "sha256=")
-	if strings.Contains(logs, "echo hello") {
-		t.Fatalf("info 级不得记录脚本明文（含密命令会随日志落盘并被 /logs 拉取）:\n%s", logs)
+	if !strings.Contains(logs, "deploy --target prod") {
+		t.Fatalf("info 级应记脚本首行（日志要能定位执行了什么）:\n%s", logs)
+	}
+	if strings.Contains(logs, "deep-secret-token") {
+		t.Fatalf("info 级不得露出深行内容（令牌常在深行）:\n%s", logs)
 	}
 	if strings.Contains(logs, "httpdump") || strings.Contains(logs, "HTTP POST") {
 		t.Fatalf("info 级不应出现访问日志/httpdump:\n%s", logs)

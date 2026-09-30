@@ -67,6 +67,43 @@ func TestLintBareVar(t *testing.T) {
 	}
 }
 
+// TestLintBareModuleCall 模块键写了但底下没有任何参数（`set_fact:`
+// 后内容缺失）必须 lint 期拦截：这类任务运行期在全部主机上失败，用户
+// 只能看到汇总报错，定位不到具体任务。
+func TestLintBareModuleCall(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "bare.yaml")
+	os.WriteFile(p, []byte(`- hosts: all
+  tasks:
+    - name: 获取主机详细信息
+      set_fact:
+    - name: 采集后使用
+      shell: echo {{ .arch }}
+`), 0o644)
+	issues := Lint(p)
+	found := false
+	for _, is := range issues {
+		if is.Level == "ERROR" && strings.Contains(is.Msg, `task "获取主机详细信息"`) &&
+			strings.Contains(is.Msg, "set_fact requires at least one key/value pair") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("应发现空 set_fact 任务: %+v", issues)
+	}
+
+	// setup 裸调用合法（采集 facts），不应误报
+	ok := filepath.Join(dir, "ok.yaml")
+	os.WriteFile(ok, []byte(`- hosts: all
+  tasks:
+    - name: 获取主机详细信息
+      setup:
+`), 0o644)
+	if issues := Lint(ok); len(issues) != 0 {
+		t.Fatalf("setup 裸调用不应有发现: %+v", issues)
+	}
+}
+
 // TestLintContent 内存内容级校验：合法通过、未知模块/语法错误为 ERROR、
 // chart 引用跳过目录检查（无文件上下文）。
 func TestLintContent(t *testing.T) {

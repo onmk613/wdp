@@ -141,11 +141,15 @@ func (s *Server) SetLogFile(path string) error {
 			return err
 		}
 	}
+	if s.logFilePath == path {
+		return nil // 同路径重复挂载会把每行日志写两遍
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	s.sink.add(f)
+	s.logFilePath = path
 	s.logInfo("log file attached: %s", path)
 	return nil
 }
@@ -165,11 +169,27 @@ func (s *Server) logWarn(msg string, args ...any)  { s.logAt(slog.LevelWarn, msg
 func (s *Server) logDebug(msg string, args ...any) { s.logAt(slog.LevelDebug, msg, args...) }
 func (s *Server) logTrace(msg string, args ...any) { s.logAt(LevelTrace, msg, args...) }
 
-// scriptDigest 返回脚本内容的 sha256 前 8 位（日志用摘要替代明文：脚本
-// 常含密码/令牌，日志会落盘并可经 /logs 拉取）。
+// scriptDigest 返回脚本内容的 sha256 前 8 位（日志定位同脚本的指纹）。
 func scriptDigest(script string) string {
 	sum := sha256.Sum256([]byte(script))
 	return hex.EncodeToString(sum[:])[:8]
+}
+
+// scriptPreview 取脚本首个非空行（去掉注释/空行）截断到 80 字符——info
+// 级日志的"执行了什么"标识：多行脚本首行通常是主命令，令牌多在深行；
+// 完整内容在 debug 级（exec detail）。
+func scriptPreview(script string) string {
+	for line := range strings.SplitSeq(script, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if len(line) > 80 {
+			return line[:80] + "…"
+		}
+		return line
+	}
+	return "(empty script)"
 }
 
 // logRequest 访问日志（debug 起）与 httpdump（trace 起）中间件，位于

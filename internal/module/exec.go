@@ -3,6 +3,7 @@ package module
 import (
 	"fmt"
 
+	"wdp/internal/i18n"
 	"wdp/internal/shellquote"
 )
 
@@ -17,7 +18,7 @@ type ShellModule struct{}
 func (m *ShellModule) Name() string { return "shell" }
 
 func (m *ShellModule) Desc() string {
-	return "run commands on remote hosts via sh"
+	return i18n.T("Run commands on the target host via /bin/sh (supports pipes and other shell syntax)", "经 /bin/sh 在远端执行命令（支持管道等 shell 语法）")
 }
 
 // Run 执行 free-form 命令。
@@ -31,8 +32,7 @@ type CommandModule struct{}
 func (m *CommandModule) Name() string { return "command" }
 
 func (m *CommandModule) Desc() string {
-	return "run commands on remote hosts (same as shell; both go through /bin/sh)"
-
+	return i18n.T("Run commands on the target host (exactly equivalent to shell, also via /bin/sh)", "在远端执行命令（与 shell 完全等价，同样经 /bin/sh）")
 }
 
 // Run 执行命令（同一实现）。
@@ -95,30 +95,39 @@ func runCommandModule(rc *RunContext, args map[string]any, free string) *Result 
 
 func (m *ShellModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "(free-form)", Type: "string", Desc: "command to run (shell and command are identical: both run via /bin/sh)"},
-		{Name: "cmd", Type: "string", Desc: "command (alternative when free-form is empty)"},
-		{Name: "creates", Type: "string", Desc: "skip when this path exists (idempotency guard)"},
-		{Name: "removes", Type: "string", Desc: "skip when this path is missing (idempotency guard)"},
-		{Name: "chdir", Type: "string", Desc: "chdir here before execution"},
+		{Name: "(free-form)", Type: "string", Desc: i18n.T("command to run, given as the module's own value: `shell: uptime` (command is exactly equivalent to shell)", "要执行的命令，写在模块键本位：`shell: uptime`（command 与 shell 完全等价）")},
+		{Name: "cmd", Type: "string", Desc: i18n.T("command content (alternative form when free-form is empty)", "命令内容（free-form 为空时的替代写法）")},
+		{Name: "creates", Type: "string", Desc: i18n.T("skip if this path already exists (idempotency guard)", "该路径已存在则跳过（幂等守卫）")},
+		{Name: "removes", Type: "string", Desc: i18n.T("skip if this path does not exist (idempotency guard)", "该路径不存在则跳过（幂等守卫）")},
+		{Name: "chdir", Type: "string", Desc: i18n.T("change to this directory before running", "执行前先切换到该目录")},
 	}
 }
 
 func (m *ShellModule) Example() string {
-	return `- name: wait for the service to be ready
+	return i18n.T(`- name: Wait for the service to become ready (auto-retry on failure)
   shell: 'curl -sf http://localhost:{{ .app.port }}/health'
   until: '{{ if eq .result.rc 0 }}ok{{ end }}'
   retries: 10
   delay: 3
-`
+`, `- name: 等待服务就绪（失败自动重试）
+  shell: 'curl -sf http://localhost:{{ .app.port }}/health'
+  until: '{{ if eq .result.rc 0 }}ok{{ end }}'
+  retries: 10
+  delay: 3
+`)
 }
 
 // Params 参数文档（command 与 shell 同构）。
 func (m *CommandModule) Params() []ParamDoc { return (&ShellModule{}).Params() }
 
 func (m *CommandModule) Example() string {
-	return `- name: idempotent run (skipped once the artifact exists)
+	return i18n.T(`- name: Idempotent run (skip if the artifact already exists)
   command: ./migrate.sh
   args:
     creates: /opt/app/.migrated
-`
+`, `- name: 幂等执行（产物已存在则跳过）
+  command: ./migrate.sh
+  args:
+    creates: /opt/app/.migrated
+`)
 }

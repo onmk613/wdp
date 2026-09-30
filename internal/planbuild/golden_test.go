@@ -1,4 +1,4 @@
-package plan
+package planbuild
 
 // §6.4 golden 快照：docker 与 node-exporter 两个示例 chart 的 plan 编译
 // 结果固化为 golden 文件，防后续改动无意提交语义漂移。有意变更时：

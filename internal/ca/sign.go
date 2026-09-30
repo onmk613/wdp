@@ -90,9 +90,23 @@ func autoLeafNotAfter(caCert *x509.Certificate) time.Time {
 
 // signAndWrite 用 CA 签发模板并落盘证书/私钥（私钥不加密——叶子密钥短周期轮换）。
 // CA 取自 caCertPath/caKeyPath（空时回退 <dir>/ca.crt|ca.key）。
+func signAndWrite(dir, caCertPath, caKeyPath, name string, tpl *x509.Certificate, key crypto.Signer) (string, string, string, error) {
+	certPath, _, fp, err := signCert(dir, caCertPath, caKeyPath, name, tpl, key.Public())
+	if err != nil {
+		return "", "", "", err
+	}
+	keyPath := filepath.Join(dir, name+".key")
+	if err := writeKey(keyPath, key); err != nil {
+		return "", "", "", err
+	}
+	return certPath, keyPath, fp, nil
+}
+
+// signCert 用 CA 给模板与**公钥**签发证书，只写 .crt。签发不需要叶子
+// 私钥（签名用 CA 私钥）——CSR 纳管与无钥续期共用此路径。
 // 叶子有效期钳制到 CA 到期时刻：链校验随 CA 过期即失效，签出超出 CA 的
 // NotAfter 是撒谎证书（默认 1 天 CA 时尤其常见），钳制让证书自身诚实。
-func signAndWrite(dir, caCertPath, caKeyPath, name string, tpl *x509.Certificate, key crypto.Signer) (string, string, string, error) {
+func signCert(dir, caCertPath, caKeyPath, name string, tpl *x509.Certificate, pub crypto.PublicKey) (string, []byte, string, error) {
 	if caCertPath == "" {
 		caCertPath = filepath.Join(dir, DefaultCAFile)
 	}
@@ -101,7 +115,7 @@ func signAndWrite(dir, caCertPath, caKeyPath, name string, tpl *x509.Certificate
 	}
 	caCert, caKey, err := LoadCAAt(caCertPath, caKeyPath)
 	if err != nil {
-		return "", "", "", err
+		return "", nil, "", err
 	}
 	// 有效期硬规则：叶子一律不得超过签发 CA 到期时刻（链随 CA 过期，
 	// 超出的天数是无效谎言）。自动档（未显式给 --days）在此基础上按
@@ -112,21 +126,17 @@ func signAndWrite(dir, caCertPath, caKeyPath, name string, tpl *x509.Certificate
 	if tpl.NotAfter.After(caCert.NotAfter) {
 		tpl.NotAfter = caCert.NotAfter
 	}
-	der, err := x509.CreateCertificate(rand.Reader, tpl, caCert, key.Public(), caKey)
+	der, err := x509.CreateCertificate(rand.Reader, tpl, caCert, pub, caKey)
 	if err != nil {
-		return "", "", "", err
+		return "", nil, "", err
 	}
 	// 输出目录可与 CA 目录分离（--ca-cert/--ca-key），不存在时创建
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", "", "", err
+		return "", nil, "", err
 	}
 	certPath := filepath.Join(dir, name+".crt")
-	keyPath := filepath.Join(dir, name+".key")
 	if err := writePEM(certPath, "CERTIFICATE", der, 0o644); err != nil {
-		return "", "", "", err
+		return "", nil, "", err
 	}
-	if err := writeKey(keyPath, key); err != nil {
-		return "", "", "", err
-	}
-	return certPath, keyPath, FingerprintDER(der), nil
+	return certPath, der, FingerprintDER(der), nil
 }

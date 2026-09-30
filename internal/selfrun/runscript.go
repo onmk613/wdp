@@ -6,15 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
+	"wdp/internal/conn"
 	"wdp/internal/shellquote"
 )
-
-// envKeyRe 是允许注入的环境变量键白名单（与 sshc 一致）。
-var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9]*$`)
 
 // ExecReq 是一次脚本执行请求。
 type ExecReq struct {
@@ -25,6 +22,8 @@ type ExecReq struct {
 	Cwd            string            `json:"cwd"`
 	BecomeUser     string            `json:"become_user"`
 	BecomePassword string            `json:"become_password"`
+	// Label 人读标识（任务名），agent 日志呈现用；不参与执行语义
+	Label string `json:"label,omitempty"`
 }
 
 // ExecResp 是脚本执行结果。
@@ -94,7 +93,7 @@ func prepareScriptEnv(req ExecReq) (string, []string) {
 	if req.BecomeUser != "" && len(req.Env) > 0 {
 		var sb strings.Builder
 		for k, v := range req.Env {
-			if envKeyRe.MatchString(k) {
+			if conn.EnvKeyAllowed(k) {
 				fmt.Fprintf(&sb, "export %s=%s\n", k, shellquote.Quote(v))
 			}
 		}

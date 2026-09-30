@@ -212,6 +212,7 @@ func (e *Executor) recordResult(hr *hostRun, r *model.TaskResult, stats map[stri
 
 // countResult 把单条结果计入统计条目（recordResult 的公共尾部）。
 func countResult(s *model.Stats, r *model.TaskResult, ignore bool) {
+	s.ElapsedMs += r.ElapsedMs
 	switch {
 	case r.Unreachable:
 		s.Unreachable++

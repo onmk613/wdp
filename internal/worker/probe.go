@@ -41,7 +41,10 @@ type ProbeResult struct {
 	Goos         string `json:"goos,omitempty"`
 	Arch         string `json:"arch,omitempty"`
 	CertNotAfter string `json:"cert_not_after,omitempty"`
-	CheckedAt    string `json:"checked_at"`
+	// Modules 是 agent /info 上报的内置模块集（能力对账用；nil = agent
+	// 无该端点（老版本）或抓取失败——保留库内最后已知值，不视为空集）
+	Modules   []string `json:"modules,omitempty"`
+	CheckedAt string   `json:"checked_at"`
 }
 
 // ProbeHost 对台账主机做一次 /health 探测。
@@ -106,7 +109,35 @@ func probeOnce(ctx context.Context, h *store.Host, scheme string, client *http.C
 	res.Status = "online"
 	res.Hostname, res.Version, res.Build, res.BinPath, res.Goos, res.Arch, res.CertNotAfter =
 		info.Hostname, info.Version, info.Build, info.BinPath, info.Goos, info.Arch, info.CertNotAfter
+	// 能力自描述顺带抓取（分层方案 P2）：/info 失败（老 agent 404、瞬时
+	// 故障）不影响探活结论，仅本轮不带模块集——库内保留最后已知值
+	res.Modules = fetchAgentModules(ctx, scheme, h, client)
 	return res
+}
+
+// fetchAgentModules 抓取 agent /info 的模块集（失败返回 nil，调用方按
+// 「未知」处理而非空集——空集会让对账把所有模块判缺）。
+func fetchAgentModules(ctx context.Context, scheme string, h *store.Host, client *http.Client) []string {
+	url := fmt.Sprintf("%s://%s/info", scheme, net.JoinHostPort(h.Address, fmt.Sprint(h.AgentPort)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+	var info struct {
+		Modules []string `json:"modules"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(nil, resp.Body, 1<<20)).Decode(&info); err != nil {
+		return nil
+	}
+	return info.Modules
 }
 
 // Prober 周期探活全量主机并写回状态。Probe 回调由传输层注入（带 mTLS
@@ -151,7 +182,15 @@ func (p *Prober) Run(ctx context.Context) {
 				if ctx.Err() != nil {
 					return
 				}
-				if err := p.Store.SetHostStatus(id, res.Status); err != nil {
+				// 模块集序列化：nil（agent 未上报）传空串，SetHostStatus 按
+				// 「保留最后已知」处理（与 build 同口径）
+				modulesJSON := ""
+				if res.Modules != nil {
+					if b, err := json.Marshal(res.Modules); err == nil {
+						modulesJSON = string(b)
+					}
+				}
+				if err := p.Store.SetHostStatus(id, res.Status, res.Build, modulesJSON); err != nil {
 					p.Logger.Error("probe: set status", "host", h.Name, "err", err)
 				}
 				p.Logger.Debug("probe done", "host", h.Name, "status", res.Status, "err", res.Error)

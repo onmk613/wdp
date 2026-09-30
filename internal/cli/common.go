@@ -10,6 +10,7 @@ import (
 
 	"wdp/internal/config"
 	"wdp/internal/conn"
+	"wdp/internal/i18n"
 	"wdp/internal/inventory"
 
 	// 连接驱动注册（副作用导入：各驱动在 init 里向 conn 注册 factory，
@@ -33,10 +34,12 @@ func normalizeDiffFlag(diff, check bool) bool {
 
 // chartValueFlags 声明 chart 公共 flag（-f/--values/--set）。
 func chartValueFlags(cmd *cobra.Command, valuesFiles, setArgs *[]string) {
-	cmd.Flags().StringArrayVarP(valuesFiles, "values-file", "f", nil,
-		"chart values override files (repeatable, deep-merged in order, like Helm)")
-	cmd.Flags().StringArrayVar(setArgs, "set", nil,
+	cmd.Flags().StringArrayVarP(valuesFiles, "values-file", "f", nil, i18n.T(
+		"chart values override files (repeatable, deep-merged in order, like Helm)",
+		"chart values 覆盖文件（可重复，依序深合并，同 Helm）"))
+	cmd.Flags().StringArrayVar(setArgs, "set", nil, i18n.T(
 		"chart values dot-path overrides (--set a.b[0]=v, repeatable)",
+		"chart values 点路径覆盖（--set a.b[0]=v，可重复）"),
 	)
 }
 

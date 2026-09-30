@@ -34,6 +34,7 @@ type Conn struct {
 	client *http.Client
 	tlsErr error          // 构造期 TLS 配置错误（Connect 时显式报出）
 	dc     *conn.Defaults // 组合根注入的默认值（nil = 内置默认）
+	shared bool           // client 由 NewWithClient 注入：Close 不关连接（所有权归注入方）
 }
 
 // New 创建 agent 连接。TLS 启用条件（任一）：
@@ -41,6 +42,19 @@ type Conn struct {
 // PEM，CA/Cert/Key 三者任一形态都算——漏 KeyData 会让"仅内联私钥"的主机
 // 静默走明文）/ 降级或改名开关。CA 未配置时信任系统证书池（公网 CA 场景）；
 // 证书文件/数据加载失败显式报错。
+// NewWithClient 用调用方提供的 http.Client 创建连接（批量执行的热路径
+// 优化：共享 Transport 让同主机的连续请求复用 TCP/TLS 连接，省掉每次
+// 完整握手）。连接生命周期归调用方——本形态下 Close 不关空闲连接
+// （Transport 的所有权在注入方）。client 为 nil 时等价 New。
+func NewWithClient(h *model.Host, dc *conn.Defaults, client *http.Client) *Conn {
+	c := New(h, dc)
+	if client != nil {
+		c.client = client
+		c.shared = true
+	}
+	return c
+}
+
 func New(h *model.Host, dc *conn.Defaults) *Conn {
 	useTLS := h.TLS || h.CAFile != "" || h.KeyFile != "" || h.CertFile != "" ||
 		len(h.CAData) > 0 || len(h.CertData) > 0 || len(h.KeyData) > 0 ||
@@ -139,7 +153,9 @@ func (c *Conn) Connect(ctx context.Context) error {
 // Close 释放 HTTP 连接池的空闲连接（幂等；进行中的请求不受影响）。
 // transport 未特化时委托给默认共享实例，仅回收空闲连接，无副作用。
 func (c *Conn) Close() error {
-	c.client.CloseIdleConnections()
+	if !c.shared {
+		c.client.CloseIdleConnections()
+	}
 	return nil
 }
 

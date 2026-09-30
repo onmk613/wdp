@@ -25,12 +25,25 @@ export function can(verb: string): boolean {
   return verbSet.value.has(verb)
 }
 
-let mePromise: Promise<{ user: string; role: string; perms: Perms } | null> | null = null
+// server 端构建版本（远程升级目标版本）：me 响应带回，升级按钮门控用。
+// serverBuildUnversioned：裸 go build 的开发构建（未注入构建信息），版本串
+// 不反映二进制内容——同串不能证明同版本，升级门控按可升级放行
+export const serverBuild = ref('')
+export const serverBuildUnversioned = ref(false)
+
+let mePromise: Promise<{ user: string; role: string; perms: Perms; build?: string } | null> | null = null
 
 function fetchMe() {
   if (mePromise) return mePromise
   const p = fetch('/api/me', { headers: { Accept: 'application/json' } }).then(async (r) => {
-    if (r.ok) return (await r.json()) as { user: string; role: string; perms: Perms }
+    if (r.ok) {
+      const me = (await r.json()) as {
+        user: string; role: string; perms: Perms; build?: string; build_unversioned?: boolean
+      }
+      if (me.build) serverBuild.value = me.build
+      serverBuildUnversioned.value = !!me.build_unversioned
+      return me
+    }
     // 仅明确的未登录（401/403）算「未登录」返回 null；其余状态码与网络层
     // reject（瞬时故障）一律抛错——否则网络抖动会被守卫当未登录跳登录页
     if (r.status === 401 || r.status === 403) return null
@@ -57,11 +70,13 @@ export async function ensureAuthed(): Promise<string> {
   return me ? me.user : ''
 }
 
-export function setAuth(user: string, perms?: Perms) {
+export function setAuth(user: string, perms?: Perms, build?: string, buildUnversioned?: boolean) {
   authUser.value = user
   if (perms) authPerms.value = perms
+  if (build) serverBuild.value = build
+  if (buildUnversioned !== undefined) serverBuildUnversioned.value = buildUnversioned
   // 守卫下次导航读缓存：写入已解析的用户（含权限摘要），避免重探
-  mePromise = Promise.resolve({ user, role: perms?.role || '', perms: perms || authPerms.value })
+  mePromise = Promise.resolve({ user, role: perms?.role || '', perms: perms || authPerms.value, build: serverBuild.value || undefined })
 }
 
 // resetAuth 登出 / 401 时清态；下次守卫会重新探 /api/me。

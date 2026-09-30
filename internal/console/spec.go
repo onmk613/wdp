@@ -436,3 +436,45 @@ func ChartYAMLVersion(content string) string {
 	}
 	return meta.Version
 }
+
+// PatchSpecChartVersion 把请求内 chart.yaml 的顶层 version 行改写为目标
+// 版本（仅校验端点用）：保存流程在前端先把建议版本 patch 进 chart.yaml
+// 再提交，校验请求里还是底本旧版本号——ApplySpec 的版本对账会把这种
+// 预期中的不一致当 ERROR。校验应当看到"保存将产生的形态"，这里做与
+// 保存相同的虚拟改写；保存路径的对账仍是硬约束。注释/其余内容逐字
+// 保留，找不到顶层 version 行时插在 name 行后（与前端 patchChartYAMLVersion
+// 同语义）。
+func PatchSpecChartVersion(req *SpecReq, version string) {
+	for i := range req.Files {
+		f := &req.Files[i]
+		if f.Path != "chart.yaml" || f.Content == nil || f.Binary {
+			continue
+		}
+		if ChartYAMLVersion(*f.Content) == version {
+			return
+		}
+		patched := patchChartYAMLVersion(*f.Content, version)
+		f.Content = &patched
+		return
+	}
+}
+
+// patchChartYAMLVersion 替换首个顶层 version: 行；没有时插在 name: 行后。
+func patchChartYAMLVersion(content, version string) string {
+	lines := strings.Split(content, "\n")
+	for i, l := range lines {
+		if strings.HasPrefix(l, "version:") {
+			lines[i] = "version: " + version
+			return strings.Join(lines, "\n")
+		}
+	}
+	at := 0
+	for i, l := range lines {
+		if strings.HasPrefix(l, "name:") {
+			at = i + 1
+			break
+		}
+	}
+	out := append(lines[:at:at], append([]string{"version: " + version}, lines[at:]...)...)
+	return strings.Join(out, "\n")
+}

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"wdp/internal/i18n"
 )
 
 func init() {
@@ -25,24 +26,24 @@ type WaitForModule struct{}
 func (m *WaitForModule) Name() string { return "wait_for" }
 
 func (m *WaitForModule) Desc() string {
-	return "wait until a port/path condition is met (polled from the controller)"
+	return i18n.T("Wait for a port/path condition to hold (polled from the controller; failure on timeout)", "等待端口/路径条件满足（控制端轮询，超时即失败）")
 }
 
 func (m *WaitForModule) Params() []ParamDoc {
 	return []ParamDoc{
-		{Name: "host", Type: "string", Desc: "probe address (defaults to the host Address)"},
-		{Name: "port", Type: "int", Desc: "TCP port: state=present waits for reachable, absent waits for closed (mutually exclusive with path)"},
-		{Name: "path", Type: "string", Desc: "remote path: state=present waits for existence, absent waits for removal (mutually exclusive with port)"},
-		{Name: "state", Type: "string", Default: "present", Enum: waitforStates, Desc: "present waits for the condition / absent waits for it to clear"},
-		{Name: "timeout", Type: "int", Default: "300", Desc: "total wait seconds (timeout fails the task)"},
-		{Name: "delay", Type: "int", Default: "0", Desc: "seconds to wait before the first probe"},
-		{Name: "sleep", Type: "int", Default: "1", Desc: "seconds between probes"},
-		{Name: "msg", Type: "string", Desc: "custom message on timeout failure"},
+		{Name: "host", Type: "string", Desc: i18n.T("probe address (defaults to the host Address)", "探测地址（缺省为主机 Address）")},
+		{Name: "port", Type: "int", Desc: i18n.T("TCP port: present waits until it is reachable, absent waits until it is closed (mutually exclusive with path)", "TCP 端口：present 等待可连通，absent 等待关闭（与 path 互斥）")},
+		{Name: "path", Type: "string", Desc: i18n.T("remote path: present waits for it to appear, absent waits for it to disappear (mutually exclusive with port)", "远端路径：present 等待出现，absent 等待消失（与 port 互斥）")},
+		{Name: "state", Type: "string", Default: "present", Enum: waitforStates, Desc: i18n.T("present waits for the condition to hold / absent waits for it to clear", "present 等待条件成立 / absent 等待条件解除")},
+		{Name: "timeout", Type: "int", Default: "300", Desc: i18n.T("total seconds to wait (the task fails on timeout)", "总等待秒数（超时任务失败）")},
+		{Name: "delay", Type: "int", Default: "0", Desc: i18n.T("seconds to wait before the first probe", "首次探测前等待的秒数")},
+		{Name: "sleep", Type: "int", Default: "1", Desc: i18n.T("seconds between two probes", "两次探测间隔秒数")},
+		{Name: "msg", Type: "string", Desc: i18n.T("custom message on timeout failure", "超时失败时的自定义消息")},
 	}
 }
 
 func (m *WaitForModule) Example() string {
-	return `- name: wait for the service port (host defaults to the host address)
+	return i18n.T(`- name: wait for the service port to be ready (host defaults to the host address)
   wait_for:
     port: 8080
     delay: 5
@@ -54,7 +55,19 @@ func (m *WaitForModule) Example() string {
     state: absent
     timeout: 60
     msg: app failed to exit in time
-`
+`, `- name: 等待服务端口就绪（host 缺省为主机地址）
+  wait_for:
+    port: 8080
+    delay: 5
+    timeout: 120
+
+- name: 等待远端锁文件消失
+  wait_for:
+    path: /var/run/app.lock
+    state: absent
+    timeout: 60
+    msg: app failed to exit in time
+`)
 }
 
 // minPollInterval 是轮询探测的最小间隔（见 poll 的轮询循环）。

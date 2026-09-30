@@ -28,6 +28,17 @@ import (
 type RunService struct {
 	Store  *store.Store
 	Logger *slog.Logger
+	// Forks 覆盖并发（0 = [run].forks 配置）。web 控制台批量执行用
+	// 更高并发（agent 常驻 HTTP 通道，无 SSH 每任务握手代价）。
+	Forks int
+}
+
+// forks 归一化并发数。
+func (r *RunService) forks() int {
+	if r.Forks > 0 {
+		return r.Forks
+	}
+	return config.Current().Forks()
 }
 
 // RunOneApp 加载 chart 并执行到给定主机集合。接线与 CLI 的 run 一致：
@@ -139,8 +150,8 @@ func (r *RunService) RunOneApp(ctx context.Context, tgz string, hosts []*model.H
 	plays = runnable
 
 	conns := conn.NewManagerWithDefaults(&conn.Defaults{Conn: "agent"})
-	// 连接并发与 CLI 同口径 2×forks（缺省 5 → 10）
-	conns.SetConnectConcurrency(2 * config.Current().Forks())
+	// 连接并发 2×forks：并发取本服务归一值（web 注入更高值）
+	conns.SetConnectConcurrency(2 * r.forks())
 	ex := executor.New(inv, conns, rep, opts)
 	failed := ex.Run(ctx, plays)
 	if failed {
@@ -170,8 +181,7 @@ func (r *RunService) MarkerValues(ctx context.Context, ch *chart.Chart, hosts []
 			ac := agentc.New(h, dc)
 			return ac, func() { _ = ac.Close() }, nil
 		},
-		// 并发与 RunOneApp 的连接并发同口径 2×forks（forks 缺省 5 → 10）
-		markerread.Options{Concurrency: 2 * config.Current().Forks(), PerHostTimeout: perHost})
+		markerread.Options{Concurrency: 2 * r.forks(), PerHostTimeout: perHost})
 
 	out := make(map[string]map[string]any, len(hosts))
 	var missing, legacy, failed []string

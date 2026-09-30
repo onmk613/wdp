@@ -11,11 +11,26 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"wdp/internal/fmtutil"
+	"wdp/internal/i18n"
 	"wdp/internal/inventory"
 )
 
-const inventoryHelp = `
-列出 inventory 中的主机与组
+// inventoryHelp 返回 `wdp inventory` 的长帮助（调用时求值）。
+func inventoryHelp() string {
+	return i18n.T(`List hosts and groups from the inventory
+
+The table prints host name, address, port, connection type (conn) and group memberships
+The optional positional argument is a host pattern (default all): comma union, ! prefix exclusion,
+:& intersection chains, path.Match wildcards (matched against both group and host names; group hits
+expand to their members)
+--vars additionally prints each host's merged variables (YAML, including the layer-by-layer group vars overrides)
+Multiple -i inventories are shown here as merged
+
+Examples:
+wdp inventory
+wdp inventory 'webservers:&production'
+wdp inventory web1 --vars
+`, `列出 inventory 中的主机与组
 
 表格输出主机名、地址、端口、连接类型（conn）、所属组
 可选位置参数为主机模式（默认 all）：逗号联合、! 前缀排除、:& 交集链、
@@ -27,7 +42,8 @@ path.Match 通配（同时匹配组名与主机名，组命中展开成员）
 wdp inventory
 wdp inventory 'webservers:&production'
 wdp inventory web1 --vars
-`
+`)
+}
 
 // newInventoryCmd 构造 `wdp inventory`。
 func newInventoryCmd() *cobra.Command {
@@ -35,9 +51,10 @@ func newInventoryCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "inv [host-pattern]",
 		Aliases: []string{"inventory", "i"},
-		Short:   "list hosts/groups from the inventory",
-		Long:    inventoryHelp,
-		Args:    cobra.MaximumNArgs(1),
+		Short: i18n.T("list hosts/groups from the inventory",
+			"列出 inventory 中的主机与组"),
+		Long: inventoryHelp(),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pattern := "all"
 			if len(args) == 1 {

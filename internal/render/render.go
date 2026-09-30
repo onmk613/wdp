@@ -35,6 +35,11 @@ var funcs = template.FuncMap{
 	"hasPrefix": func(prefix, s string) bool { return strings.HasPrefix(s, prefix) },
 	"hasSuffix": func(suffix, s string) bool { return strings.HasSuffix(s, suffix) },
 	"to_json":   toJSON,
+	// size/humansize 容量单位换算对：size 把 "10G"/"512Mi"/"1.5TB" 解析成
+	// 字节数（facts 的 *_bytes 直接比对：{{ if ge .disk.avail_bytes (size "10G") }}）；
+	// humansize 反向把字节数渲染成人读形态（80530636800 → "75.0Gi"）
+	"size":      ParseSize,
+	"humansize": HumanSize,
 	// Helm 同款的 yaml 互转（sprig 未提供，wdp 自带）
 	"to_yaml": func(v any) string {
 		b, err := yaml.Marshal(v)

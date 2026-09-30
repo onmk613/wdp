@@ -20,15 +20,15 @@ import (
 func TestReconcileStaleRunsOnStartup(t *testing.T) {
 	s, st := newTestServer(t)
 
-	q, err := st.CreateRun("app", 1, "ghost", "1.0.0", "deploy", 0, "{}", "alice", "queued")
+	q, err := st.CreateRun(store.RunInput{Kind: "app", AppID: 1, AppName: "ghost", Version: "1.0.0", Phase: "deploy", Selector: "{}", User: "alice", Status: "queued"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rn, err := st.CreateRun("app", 1, "ghost", "1.0.0", "deploy", 1, "{}", "bob", "running")
+	rn, err := st.CreateRun(store.RunInput{Kind: "app", AppID: 1, AppName: "ghost", Version: "1.0.0", Phase: "deploy", Seq: 1, Selector: "{}", User: "bob", Status: "running"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	done, err := st.CreateRun("exec", 0, "", "", "", 0, "{}", "carol", "running")
+	done, err := st.CreateRun(store.RunInput{Kind: "exec", Selector: "{}", User: "carol", Status: "running"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestRunAppAdmission(t *testing.T) {
 	}
 
 	// 预置在途执行（模拟：另一用户正跑这个应用）
-	if _, err := st.CreateRun("app", app.ID, app.Name, "1.0.0", "deploy", 0, "{}", "alice", "running"); err != nil {
+	if _, err := st.CreateRun(store.RunInput{Kind: "app", AppID: app.ID, AppName: app.Name, Version: "1.0.0", Phase: "deploy", Selector: "{}", User: "alice", Status: "running"}); err != nil {
 		t.Fatal(err)
 	}
 
