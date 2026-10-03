@@ -4,7 +4,7 @@ on:
   push:
     # web-console 是活跃开发分支（Web 管理端主体在此演进），直推同样要过
     # CI——此前直推不触发，叠加 [skip ci] 习惯会让该分支长期没有 CI 信号
-    branches: [main, master, web-console]
+    branches: [main, web-console]
   pull_request:
 
 permissions:
@@ -20,17 +20,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-
       - name: Build
         run: go build ./...
-
       - name: Vet
         run: go vet ./...
-
       - name: Gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -39,7 +35,6 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
-
       - name: go mod tidy
         run: |
           go mod tidy
@@ -47,7 +42,10 @@ jobs:
             echo "::error::go.mod/go.sum 与代码不同步，请运行 go mod tidy"
             exit 1
           fi
+      - name: golangci-lint（配置见 .golangci.yml）
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1 run
 
+      # cmd/wdp-agent/deps_test.go 的依赖边界断言也在 ./... 里一并执行
       - name: Test
         run: |
           set -o pipefail
@@ -79,12 +77,35 @@ jobs:
           path: coverage.out
           if-no-files-found: ignore
 
-      - name: golangci-lint（配置见 .golangci.yml）
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.1 run
+      - name: Govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.4.0 ./...
 
-  # build.sh 是唯一构建入口且缺省走全平台交叉编译：多架构 bin 目录是
-  # 纳管脚本同级查找的分发单元，默认路径必须有门禁；--frontend 额外
-  # 构建 frontend/（Vite + Vue 3）并经 go:embed 内嵌控制台。
+  # jsonv2 观察位：GOEXPERIMENT=jsonv2 下 v1 encoding/json 由 v2 引擎重实现
+  # （v1 API 输出字节兼容，本地已实测：HTML 转义/map 排序/浮点/大小写折叠一致）。
+  # golden 逐字节对比、plan 确定性编译、marker digest 等以 Marshal 输出为口径的
+  # 测试在此验证跨引擎一致性；实验转正或行为清单变化时（Go 版本升级需复核）
+  # 此位第一时间暴露。默认引擎的结论仍以 check job 为准。
+  jsonv2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOEXPERIMENT: jsonv2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build（jsonv2 引擎）
+        run: go build ./...
+
+      - name: Test（jsonv2 引擎，含竞态检测）
+        run: go test -race -count=1 ./...
+
+  # build.sh 是唯一构建入口且缺省走全平台交叉编译（full + agent 两档 ×
+  # 5 平台）：多架构 bin 目录是纳管脚本同级查找的分发单元，默认路径必须
+  # 有门禁；--frontend 额外构建 frontend/（Vite + Vue 3）并经 go:embed
+  # 内嵌控制台。全平台交叉编译在此一并验证，无需单列 cross-build 矩阵。
   build-script:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -117,6 +138,7 @@ jobs:
           ./build.sh --frontend
           test -x bin/wdp-linux-amd64
           test -x bin/wdp-linux-arm64
+          test -x bin/wdp-darwin-amd64
           test -x bin/wdp-darwin-arm64
           test -f bin/wdp-windows-amd64.exe
           test -x bin/wdp-agent-linux-amd64
@@ -124,90 +146,26 @@ jobs:
           test -s bin/SHA256SUMS
           test -f internal/web/static/index.html
 
-      - name: 全集产物可用（--version / 两档命令面冒烟）
+      - name: 产物冒烟（--version / 两档命令面）
         run: |
           ./bin/wdp-linux-amd64 --version | grep -q 'tier full'
-          # 瘦入口命令形态与全量档同构（纳管脚本/systemd 按 <bin> agent 调用）
-          ./bin/wdp-agent-linux-amd64 agent --help >/dev/null
-          ./bin/wdp-agent-linux-amd64 agent gencsr --help >/dev/null
-          ./bin/wdp-agent-linux-amd64 --version | grep -q 'tier agent'
-
-      # 两档即全部产物面（原 --tier cli / --tier console 已删除，见 build.sh
-      # 头部档位说明）：这里钉住两件事——全量档的控制端命令面齐全（取代原先
-      # 用 cli/console 两档间接覆盖的部分），以及被删档位确实不再可选（防
-      # 有人把 tier_tags 那套机制加回来而又没有消费方）。
-      - name: 全量档命令面 + 已删档位不可达
-        run: |
+          # 全量档控制端命令面（server/ca/module…）
           ./bin/wdp-linux-amd64 server --help >/dev/null
           ./bin/wdp-linux-amd64 ca --help >/dev/null
           ./bin/wdp-linux-amd64 module >/dev/null
+          # 瘦 agent 档命令形态与全量档同构（纳管脚本/systemd 按 <bin> agent 调用）
+          ./bin/wdp-agent-linux-amd64 --version | grep -q 'tier agent'
+          ./bin/wdp-agent-linux-amd64 agent --help >/dev/null
+          ./bin/wdp-agent-linux-amd64 agent gencsr --help >/dev/null
+
+      # 两档即全部产物面（原 --tier cli / --tier console 已删除，见 build.sh
+      # 头部档位说明）：钉住被删档位确实不再可选——防有人把 tier_tags 那套
+      # 机制加回来而又没有消费方。
+      - name: 已删档位不可达
+        run: |
           for t in cli console; do
             if ./build.sh --tier "$t" linux/amd64 2>/dev/null; then
               echo "::error::--tier $t 已被删除，此处应报错而非构建成功"
               exit 1
             fi
           done
-
-  # 多平台编译矩阵：控制端支持 macOS/Windows，交叉编译必须在 CI 验证
-  #（单元测试仍只在 linux 跑，避免把平台差异带进断言）。
-  cross-build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - linux/arm64
-          - darwin/amd64
-          - darwin/arm64
-          - windows/amd64
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Cross build ${{ matrix.target }}
-        run: |
-          os=${TARGET%/*}; arch=${TARGET#*/}
-          CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -o /tmp/wdp-$os-$arch ./cmd/wdp
-        env:
-          TARGET: ${{ matrix.target }}
-
-  # jsonv2 观察位：GOEXPERIMENT=jsonv2 下 v1 encoding/json 由 v2 引擎重实现
-  # （v1 API 输出字节兼容，本地已实测：HTML 转义/map 排序/浮点/大小写折叠一致）。
-  # golden 逐字节对比、plan 确定性编译、marker digest 等以 Marshal 输出为口径的
-  # 测试在此验证跨引擎一致性；实验转正或行为清单变化时（Go 版本升级需复核）
-  # 此位第一时间暴露。默认引擎的结论仍以 check job 为准。
-  jsonv2:
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      GOEXPERIMENT: jsonv2
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Build（jsonv2 引擎）
-        run: go build ./...
-
-      - name: Test（jsonv2 引擎，含竞态检测）
-        run: go test -race -count=1 ./...
-
-  vulncheck:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      # 版本锁定：@latest 会让扫描行为随上游发布漂移（且供应链上不可复现）
-      - name: Govulncheck（已知漏洞扫描）
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.4.0 ./...

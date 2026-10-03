@@ -21,7 +21,7 @@ func TestInventoryOps(t *testing.T) {
 	// 造两台主机（地址无前缀包含关系）
 	for _, hd := range []struct{ name, addr string }{{"web1", "10.0.1.1"}, {"db1", "10.0.2.2"}} {
 		rec := do(t, h, "POST", "/api/hosts", map[string]any{
-			"Name": hd.name, "Address": hd.addr, "AgentPort": 7602,
+			"name": hd.name, "address": hd.addr, "agent_port": 7602,
 		}, &token)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("创建 %s 应 201: %d %s", hd.name, rec.Code, rec.Body)
@@ -173,7 +173,7 @@ func TestDeleteHostRetiresAgent(t *testing.T) {
 	h := s.Handler()
 	token := loginSession(t, s)
 
-	rec := do(t, h, "POST", "/api/hosts", map[string]any{"Name": "gone", "Address": "127.0.0.1", "AgentPort": 9}, &token)
+	rec := do(t, h, "POST", "/api/hosts", map[string]any{"name": "gone", "address": "127.0.0.1", "agent_port": 9}, &token)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("创建: %d", rec.Code)
 	}

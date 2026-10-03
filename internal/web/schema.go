@@ -15,8 +15,9 @@ import (
 	"wdp/internal/render"
 )
 
-// schemaResp 是 GET /api/schema 的返回体（FieldSection/FieldDoc 无 json
-// tag，按导出名序列化：Title/Fields/Example、Name/Type/Default/Desc）。
+// schemaResp 是 GET /api/schema 的返回体（FieldSection/FieldDoc 见
+// internal/model/fielddoc.go——json tag 统一 snake_case，与全目录 API
+// 口径一致：title/fields/example、name/type/default/desc）。
 type schemaResp struct {
 	Task          []model.FieldSection `json:"task"`           // 任务控制键字段分组表
 	Play          []model.FieldSection `json:"play"`           // play 级字段分组表

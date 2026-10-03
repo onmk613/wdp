@@ -5,13 +5,18 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // buildTarGz 构造真实 tar.gz（entries: 归档内路径 → 内容；二进制条目 0755）。
@@ -312,5 +317,97 @@ func TestUnarchiveMembers(t *testing.T) {
 	// unarchive_remote_test.go）；此处只确认不再被参数层拒绝
 	if r := mod.Run(rc, map[string]any{"src": "/tmp/s.tar.gz", "dest": "/opt/bin", "members": []any{"kubelet"}, "remote_src": true}, ""); r.Failed {
 		t.Fatalf("remote_src + members 应可用: %s", r.Msg)
+	}
+}
+
+// TestArtifactConcurrentDownloadSingleflight 并发缓存击穿回归：forks 下
+// N 台主机同刻 miss 时同一制品只下载一次——此前每个 worker 各自下载
+// 同一 URL（大制品 + 高 forks 浪费带宽且可能打满连接）。
+func TestArtifactConcurrentDownloadSingleflight(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		time.Sleep(300 * time.Millisecond) // 敞开并发窗口：全部调用者都处在 miss 态
+		_, _ = w.Write([]byte("artifact-blob-v1"))
+	}))
+	t.Cleanup(srv.Close)
+
+	cache := filepath.Join(t.TempDir(), "pkg.bin")
+	const n = 6
+	var wg sync.WaitGroup
+	type outcome struct {
+		data []byte
+		res  *Result
+	}
+	outcomes := make([]outcome, n)
+	for i := range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			m := &ArtifactModule{}
+			data, _, res := m.loadCache(&RunContext{Ctx: context.Background(), MaxUploadBytes: 1 << 20},
+				cache, srv.URL+"/pkg.bin", "", nil, 10)
+			outcomes[i] = outcome{data: data, res: res}
+		}()
+	}
+	wg.Wait()
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("并发 miss 应只下载一次（singleflight 失效）: 实际 %d 次", got)
+	}
+	for i, oc := range outcomes {
+		if oc.res != nil && oc.res.Failed {
+			t.Fatalf("第 %d 个调用者不应失败: %s", i, oc.res.Msg)
+		}
+		if string(oc.data) != "artifact-blob-v1" {
+			t.Fatalf("第 %d 个调用者应拿到共享结果: %q", i, oc.data)
+		}
+	}
+	// 缓存已落盘：后续调用不再发起网络请求
+	hits.Store(0)
+	m := &ArtifactModule{}
+	data, cacheHit, res := m.loadCache(&RunContext{Ctx: context.Background(), MaxUploadBytes: 1 << 20},
+		cache, srv.URL+"/pkg.bin", "", nil, 10)
+	if res != nil && res.Failed || !cacheHit || string(data) != "artifact-blob-v1" {
+		t.Fatalf("缓存应命中: hit=%v data=%q res=%+v", cacheHit, data, res)
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("缓存命中后不应再下载: %d 次", got)
+	}
+}
+
+// TestFlightGroupErrorShared 等待者共享先行者的失败（同源失败即刻可见，
+// 而非各自重试放大故障）；失败的键在先行者结束后可重试。
+func TestFlightGroupErrorShared(t *testing.T) {
+	var g flightGroup
+	calls := atomic.Int32{}
+	fn := func() ([]byte, error) {
+		calls.Add(1)
+		time.Sleep(100 * time.Millisecond)
+		return nil, errors.New("boom")
+	}
+	var wg sync.WaitGroup
+	errs := make([]error, 3)
+	for i := range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, errs[i] = g.do("k", fn)
+		}()
+	}
+	wg.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("失败也应只执行一次: %d", got)
+	}
+	for i, err := range errs {
+		if err == nil || err.Error() != "boom" {
+			t.Fatalf("第 %d 个等待者应共享失败: %v", i, err)
+		}
+	}
+	// 在飞表已清理：新调用重新执行
+	if _, err := g.do("k", fn); err == nil {
+		t.Fatal("新一轮应重新执行并再次失败")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("在飞表应清理: %d", got)
 	}
 }

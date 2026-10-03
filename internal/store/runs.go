@@ -12,20 +12,22 @@ import (
 // ---- 执行记录 ----
 
 // Run 是一次执行（应用执行按序每个应用一行；远程命令 kind=exec 单行）。
+// 命名口径：JSON tag 统一 snake_case（全目录 API 统一决策，见 hosts.go
+// Host 的注释）。
 type Run struct {
-	ID         int64
-	Kind       string
-	AppID      int64
-	AppName    string
-	Version    string
-	Phase      string // 应用执行使用的相位（行级；exec 类为空）
-	Seq        int
-	Status     string
-	Selector   string
-	Summary    string
-	User       string // 触发者（会话用户；历史行为空）
-	StartedAt  string
-	FinishedAt string
+	ID         int64  `json:"id"`
+	Kind       string `json:"kind"`
+	AppID      int64  `json:"app_id"`
+	AppName    string `json:"app_name"`
+	Version    string `json:"version"`
+	Phase      string `json:"phase"` // 应用执行使用的相位（行级；exec 类为空）
+	Seq        int    `json:"seq"`
+	Status     string `json:"status"`
+	Selector   string `json:"selector"`
+	Summary    string `json:"summary"`
+	User       string `json:"user"` // 触发者（会话用户；历史行为空）
+	StartedAt  string `json:"started_at"`
+	FinishedAt string `json:"finished_at"`
 	// exec 的执行证据：截断快照 + 完整脚本的 sha256（列表不回传——
 	// 50 行 × 16 KiB 会撑爆列表响应，只有详情端点显式带出）。
 	Script    string `json:"-"`
@@ -34,15 +36,15 @@ type Run struct {
 
 // RunTask 是执行中的一条任务结果（reporter 回调写入）。
 type RunTask struct {
-	ID      int64
-	RunID   int64
-	Play    string
-	Task    string
-	Module  string
-	Host    string
-	Status  string
-	Changed bool
-	Detail  string
+	ID      int64  `json:"id"`
+	RunID   int64  `json:"run_id"`
+	Play    string `json:"play"`
+	Task    string `json:"task"`
+	Module  string `json:"module"`
+	Host    string `json:"host"`
+	Status  string `json:"status"`
+	Changed bool   `json:"changed"`
+	Detail  string `json:"detail"`
 }
 
 // CreateRun 建单条执行记录（status 空时按 running；exec 传入 Script/
@@ -352,16 +354,18 @@ func activeRunsByApp(q execer, appIDs []int64) ([]ActiveRun, error) {
 }
 
 // HostTaskItem 是主机视角的一条执行任务（join runs 取状态与应用）。
+// 命名口径：JSON tag 统一 snake_case（全目录 API 统一决策，见 hosts.go
+// Host 的注释）。
 type HostTaskItem struct {
-	RunID   int64  `json:"RunID"`
-	AppName string `json:"AppName"`
-	Kind    string `json:"Kind"`
-	Task    string `json:"Task"`
-	Module  string `json:"Module"`
-	Status  string `json:"Status"`
-	Changed bool   `json:"Changed"`
-	Detail  string `json:"Detail"`
-	StartAt string `json:"StartAt"`
+	RunID   int64  `json:"run_id"`
+	AppName string `json:"app_name"`
+	Kind    string `json:"kind"`
+	Task    string `json:"task"`
+	Module  string `json:"module"`
+	Status  string `json:"status"`
+	Changed bool   `json:"changed"`
+	Detail  string `json:"detail"`
+	StartAt string `json:"start_at"`
 }
 
 // HostTasksByName 主机名匹配的最近执行任务（按任务行插入序倒排）。

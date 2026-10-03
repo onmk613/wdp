@@ -1,5 +1,9 @@
+/// <reference types="vitest/config" />
 import { defineConfig, type Plugin } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import AutoImport from 'unplugin-auto-import/vite'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { gzipSync } from 'node:zlib'
 import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
@@ -43,8 +47,30 @@ function precompress(): Plugin {
 // 开发模式：vite dev server (5173) 代理后端 API 到 wdp server (7603)，
 // 热更新无需重新 go build。生产：vite build → dist/，由 build.sh 拷入
 // internal/web/static/ 经 go:embed 打进二进制。
+// 按需引入：模板里的 el-* 由 Components 插件在编译期解析为具名 import
+// （每个组件只进真正用到它的 chunk，样式随组件走）；ElMessage/ElMessageBox
+// 等命令式 API 代码里全是显式 import，AutoImport 只为未来新代码兜底，
+// 顺带让 resolver 的 importStyle 机制对未显式 import 的 API 也生效。
+// dts 策略：AutoImport 的声明照常生成并提交（typecheck 不跑 vite 插件
+// 链，CI 又先 typecheck 后 build）；Components 的 GlobalComponents dts
+// 刻意关闭——一旦生成，el-table 插槽 row 从 any 收紧为 DefaultRow，存量
+// 7 个视图 27 处 scope.row 传参全部报 TS2345（正解是给每处插槽标注行
+// 类型，属 .vue 模板批量改动，超出按需引入改造范围），关闭后模板类型
+// 与全量引入时代一致（未注册组件 → any）。
 export default defineConfig({
-  plugins: [vue(), precompress()],
+  plugins: [
+    vue(),
+    AutoImport({
+      imports: [],
+      resolvers: [ElementPlusResolver()],
+      dts: 'auto-imports.d.ts',
+    }),
+    Components({
+      resolvers: [ElementPlusResolver()],
+      dts: false,
+    }),
+    precompress(),
+  ],
   // 构建标识注入 bundle：每次构建必变 → 产物 hash 与构建一一对应。
   // 静态资源按 hash 名 immutable 缓存一年，若两次构建产物同名而内容有异
   // （预压缩事故即此形态），客户端坏缓存无法自愈；构建 ID 进内容后，
@@ -56,6 +82,17 @@ export default defineConfig({
     proxy: {
       '/api': 'http://127.0.0.1:7603',
       '/enroll': 'http://127.0.0.1:7603',
+    },
+  },
+  test: {
+    // element-plus 按需样式链是「style mjs → import .css」形态；vitest 默认
+    // 把 node_modules 依赖外置给 node 原生加载，node 咽不下 .css。把
+    // element-plus 内联进 vite 管线（.css 由 vitest 桩掉），渲染冒烟用例
+    // 才能跑通（见 src/element-smoke.spec.ts）
+    server: {
+      deps: {
+        inline: ['element-plus'],
+      },
     },
   },
   build: {
@@ -76,12 +113,14 @@ export default defineConfig({
         deps.filter((d) => !d.includes('monaco')),
     },
     // 构建期预压缩：产物同时输出 .gz，服务端按 Accept-Encoding 直接送
-    // （见 internal/web/static.go）。控制台首屏 ~1.4MB JS，gzip 后 ~450KB。
+    // （见 internal/web/static.go）。控制台首屏 ~340KB JS（element-plus
+    // 按需引入后；此前全量引入时 ~1.4MB），gzip 后 ~120KB。
     // 用 Node 内置 zlib，不引额外依赖。
     assetsInlineLimit: 4096,
-    // 拆分大依赖：element-plus 整包与 monaco 各自成块——按需引入改造前，
-    // 至少让两者与业务代码分离（独立缓存、并行加载，业务迭代不失效
-    // 大体积 vendor 块的浏览器缓存）
+    // 拆分大依赖：monaco 自成一块（动态 import、体积大，独立缓存）。element-
+    // plus 已改按需引入，不再单独成块——用到的组件代码由 rollup 按引用关系
+    // 分进各路由 chunk，共用部分自动提升为 shared chunk，登录页不再为只在
+    // 其它页面出现的组件买单。
     rollupOptions: {
       output: {
         manualChunks(id: string) {
@@ -91,7 +130,6 @@ export default defineConfig({
           // 3.9MB JS + 阻塞渲染的 monaco CSS（modulePreload 过滤只藏得掉
           // 预热提示，藏不掉静态 import 的实际拉取）。助手必须钉进入口块。
           if (id.includes('vite/preload-helper')) return 'index'
-          if (id.includes('node_modules/element-plus') || id.includes('node_modules/@element-plus')) return 'element'
           if (id.includes('node_modules/monaco-editor') || id.includes('node_modules/monaco-yaml')) return 'monaco'
         },
       },

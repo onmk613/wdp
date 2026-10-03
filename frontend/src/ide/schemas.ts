@@ -16,15 +16,15 @@ export function controlKeys(meta: SchemaMeta | null): Set<string> {
   const s = new Set<string>()
   if (!meta) return s
   for (const sec of meta.task) {
-    for (const f of sec.Fields) s.add(f.Name)
+    for (const f of sec.fields) s.add(f.name)
   }
   // chart 引用/模块键写法不算控制键（它们写在模块位置）
   for (const k of ['chart', 'include', 'values', 'values_from', 'hosts', 'phase', 'args']) s.delete(k)
   return s
 }
 
-function descOf(f: FieldSection['Fields'][number]): string {
-  return `${f.Desc}${f.Default && f.Default !== '-' ? `（默认 ${f.Default}）` : ''}`
+function descOf(f: FieldSection['fields'][number]): string {
+  return `${f.desc}${f.default && f.default !== '-' ? `（默认 ${f.default}）` : ''}`
 }
 
 function jsonType(t: string, taskRef?: string): any {
@@ -39,12 +39,12 @@ function jsonType(t: string, taskRef?: string): any {
 function propsFrom(sections: FieldSection[], taskRef?: string): Record<string, any> {
   const out: Record<string, any> = {}
   for (const sec of sections) {
-    for (const f of sec.Fields) {
-      if (taskRef && ['block', 'rescue', 'always'].includes(f.Name)) {
-        out[f.Name] = { type: 'array', items: { $ref: taskRef }, description: descOf(f) }
+    for (const f of sec.fields) {
+      if (taskRef && ['block', 'rescue', 'always'].includes(f.name)) {
+        out[f.name] = { type: 'array', items: { $ref: taskRef }, description: descOf(f) }
         continue
       }
-      out[f.Name] = { ...jsonType(f.Type, taskRef), description: descOf(f) }
+      out[f.name] = { ...jsonType(f.type, taskRef), description: descOf(f) }
     }
   }
   return out

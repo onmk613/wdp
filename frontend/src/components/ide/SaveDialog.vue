@@ -35,7 +35,7 @@ async function loadLabelKeys() {
   if (labelKeysLoaded) return
   labelKeysLoaded = true
   try {
-    labelKeys.value = (await api<LabelDef[]>('GET', '/api/labels')).map((l) => l.Key)
+    labelKeys.value = (await api<LabelDef[]>('GET', '/api/labels')).map((l) => l.key)
   } catch {
     // 无 registry 权限或瞬时错误：回滚加载标记，下次打开对话框仍会重试
     labelKeysLoaded = false
@@ -99,12 +99,12 @@ function ok() {
       </el-form-item>
       <el-form-item label="池（多选）">
         <el-select v-model="form.pools" multiple style="width: 100%">
-          <el-option v-for="p in pools" :key="p.ID" :label="p.Name" :value="p.Name" />
+          <el-option v-for="p in pools" :key="p.id" :label="p.name" :value="p.name" />
         </el-select>
       </el-form-item>
       <el-form-item label="组（多选）">
         <el-select v-model="form.groups" multiple style="width: 100%">
-          <el-option v-for="g in groups" :key="g.ID" :label="g.Name" :value="g.Name" />
+          <el-option v-for="g in groups" :key="g.id" :label="g.name" :value="g.name" />
         </el-select>
       </el-form-item>
       <el-form-item label="标签">

@@ -75,9 +75,9 @@ func RunScript(ctx context.Context, req ExecReq) ExecResp {
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
-	// 输出上限（每流 1MiB，与控制端截断对齐）：防高输出命令把常驻进程撑爆
-	var stdout, stderr capWriter
-	stdout.limit, stderr.limit = maxExecOutputBytes, maxExecOutputBytes
+	// 输出上限（每流 1MiB，与控制端截断对齐；conn.CapWriter 单一实现）：
+	// 防高输出命令把常驻进程撑爆
+	var stdout, stderr conn.CapWriter
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -135,12 +135,12 @@ func writeScriptFile(script string) (path string, err error) {
 
 // execRespOf 组装执行响应：输出截断标注、退出码归因（超时/调用方取消
 // 区分，退出码取真实 exit status）。
-func execRespOf(ctx context.Context, err error, stdout, stderr *capWriter) ExecResp {
+func execRespOf(ctx context.Context, err error, stdout, stderr *conn.CapWriter) ExecResp {
 	resp := ExecResp{Stdout: stdout.String(), Stderr: stderr.String()}
-	if stdout.truncated {
+	if stdout.Truncated() {
 		resp.Stdout += "\n[wdp-agent] " + "stdout exceeded 1MiB and was truncated"
 	}
-	if stderr.truncated {
+	if stderr.Truncated() {
 		resp.Stderr += "\n[wdp-agent] " + "stderr exceeded 1MiB and was truncated"
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil && err != nil {

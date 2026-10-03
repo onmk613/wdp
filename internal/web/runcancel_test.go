@@ -4,6 +4,8 @@ package web
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"testing"
@@ -73,5 +75,47 @@ func TestCancelRunEndpoint(t *testing.T) {
 	rec = do(t, h, "POST", "/api/runs/99999/cancel", map[string]any{}, &token)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("未知 run 应 404: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// TestCancelRunRequiresScope 取消越权回归：此前路由只要求全局 run:execute，
+// handler 不做任何可见性判定——持作用域 run:execute 的用户可取消任意用户
+// 对任意主机的在途 run（详情/exec 流都有校验，唯独取消漏掉）。
+func TestCancelRunRequiresScope(t *testing.T) {
+	s, st := newAppServer(t, 18851) // 台账里已有 e2e-local（e2e-pool）
+	h := s.Handler()
+	admin := loginSession2(t, s, "e2e-pass-1")
+
+	// 长执行（在途中）：exec 落 run 后台推进
+	rec := do(t, h, "POST", "/api/exec", map[string]any{
+		"host_ids": []int64{1}, "script": "sleep 2", "timeout_sec": 10,
+	}, &admin)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("exec 应 200: %d %s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		RunID int64 `json:"run_id"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.RunID == 0 {
+		t.Fatalf("应返回 run_id: %v %s", err, rec.Body)
+	}
+
+	// 作用域外执行者：run:execute 只授予不存在的池（可通过路由 verb 门，
+	// 但 run 实际触达 e2e-pool 主机 → 必须拒取消）
+	scoped := newUserSession(t, h, admin, "cxlother", "scoped-Pass1", "operator")
+	do(t, h, "PUT", fmt.Sprintf("/api/users/%d/scopes", userIDByName(t, st, "cxlother")), map[string]any{
+		"scopes": []map[string]any{{"verb": "run:execute", "kind": "pool", "value": "no-such-pool"}},
+	}, &admin)
+	rec = do(t, h, "POST", fmt.Sprintf("/api/runs/%d/cancel", resp.RunID), map[string]any{}, &scoped)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("作用域外取消应 403（越权取消回归）: %d %s", rec.Code, rec.Body)
+	}
+
+	// 全局权限（admin）不受影响：通过可见性门（exec 类 run 不注册取消
+	// 句柄，得到 409"不在本进程"而非 403——本用例只锁越权门，注册表
+	// 语义由 TestCancelRunEndpoint 覆盖）
+	rec = do(t, h, "POST", fmt.Sprintf("/api/runs/%d/cancel", resp.RunID), map[string]any{}, &admin)
+	if rec.Code == http.StatusForbidden {
+		t.Fatalf("全局权限不应被可见性门拦截: %d %s", rec.Code, rec.Body)
 	}
 }

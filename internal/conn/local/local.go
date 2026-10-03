@@ -64,7 +64,11 @@ func (l *Local) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult
 	if req.Stdin != "" {
 		cmd.Stdin = bytes.NewReader([]byte(req.Stdin))
 	}
-	var stdout, stderr bytes.Buffer
+	// 输出上限（每流 1MiB，conn.CapWriter 单一实现，与 sshc/selfrun
+	// 同一口径）：无界 bytes.Buffer 下一条高输出命令（yes、cat 大文件）
+	// 就是控制端 OOM 的最短路径；模块层 truncateOut 在 Exec 返回之后
+	// 才截断，对内存保护而言太晚。
+	var stdout, stderr conn.CapWriter
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
@@ -75,7 +79,14 @@ func (l *Local) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult
 			code = ee.ExitCode()
 		}
 	}
-	return conn.ExecResult{Code: code, Stdout: stdout.String(), Stderr: stderr.String()}, nil
+	out, errOut := stdout.String(), stderr.String()
+	if stdout.Truncated() {
+		out += "\n[wdp-local] output exceeded 1MiB and was truncated"
+	}
+	if stderr.Truncated() {
+		errOut += "\n[wdp-local] output exceeded 1MiB and was truncated"
+	}
+	return conn.ExecResult{Code: code, Stdout: out, Stderr: errOut}, nil
 }
 
 // UploadFile 写本地文件（conn.WriteLocalFile 共享实现：建父目录 +

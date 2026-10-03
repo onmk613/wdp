@@ -220,11 +220,11 @@ onMounted(async () => {
     modulesMeta.value = mods
     try {
       const [hosts, hgroups] = await Promise.all([
-        api<{ Name: string }[]>('GET', '/api/hosts'),
-        api<{ Name: string }[]>('GET', '/api/groups'),
+        api<{ name: string }[]>('GET', '/api/hosts'),
+        api<{ name: string }[]>('GET', '/api/groups'),
       ])
       if (disposed) return
-      hostGroups.value = { hosts: hosts.map((h) => h.Name), groups: hgroups.map((g) => g.Name) }
+      hostGroups.value = { hosts: hosts.map((h) => h.name), groups: hgroups.map((g) => g.name) }
     } catch { if (!disposed) hostGroups.value = null }
 
     // 内容：草稿 > 脚手架

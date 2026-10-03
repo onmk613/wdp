@@ -115,3 +115,36 @@ func TestGetURLRemoteEndToEnd(t *testing.T) {
 		t.Fatalf("404 应失败: %+v", r4)
 	}
 }
+
+// TestGetURLRemoteIdempotentWithoutSha256 无 sha256 参数时的幂等回归：
+// 二次执行靠脚本回传的 wdp_sum 判"内容未变"。此前脚本里 sha256sum 引用
+// 未定义变量 $dest，wdp_sum 恒空 → 恒判 changed（notify 每次重触发、审计
+// 计数失真）。上方端到端用例带 sha256 参数走 skipDownload 短路，从未
+// 覆盖此路径——本用例以真 sh 执行修复前的脚本必然失败。
+func TestGetURLRemoteIdempotentWithoutSha256(t *testing.T) {
+	srv := newHTTPServer(t, "idem-body-v1")
+	defer srv.Close()
+	dest := filepath.Join(t.TempDir(), "idem.bin")
+
+	lc, lerr := conn.NewConnection(&model.Host{Name: "local-test", Conn: "local"}, nil)
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	rc := &RunContext{Ctx: context.Background(), Conn: lc, Host: &model.Host{Name: "local-test"}, Vars: map[string]any{}}
+	mod := &GetURLModule{}
+
+	r1 := mod.Run(rc, map[string]any{"url": srv.URL + "/a.bin", "dest": dest}, "")
+	if r1.Failed || !r1.Changed {
+		t.Fatalf("首次下载应 changed: %+v", r1)
+	}
+	r2 := mod.Run(rc, map[string]any{"url": srv.URL + "/a.bin", "dest": dest}, "")
+	if r2.Failed {
+		t.Fatalf("二次执行不应失败: %s", r2.Msg)
+	}
+	if r2.Changed {
+		t.Fatalf("内容未变应判 unchanged（wdp_sum 解析失效的回归）: %s", r2.Msg)
+	}
+	if !strings.Contains(r2.Msg, "unchanged") {
+		t.Fatalf("消息应说明内容未变: %s", r2.Msg)
+	}
+}

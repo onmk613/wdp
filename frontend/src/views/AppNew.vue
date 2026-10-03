@@ -47,8 +47,8 @@ async function onChartPicked(e: Event) {
   uploading.value = true
   try {
     const app = await upload<App>('/api/apps/upload', {}, file)
-    ElMessage.success(`应用 ${app.Name}@${app.LatestVersion} 已入库`)
-    void router.push({ path: '/apps/ide', query: { app: String(app.ID) } })
+    ElMessage.success(`应用 ${app.name}@${app.latest_version} 已入库`)
+    void router.push({ path: '/apps/ide', query: { app: String(app.id) } })
   } catch (err) {
     ElMessage.error((err as Error).message)
   } finally {

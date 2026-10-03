@@ -20,11 +20,11 @@ func TestAuditAndRunUser(t *testing.T) {
 	token := loginSession(t, s)
 
 	// 增：手动建档 → create host
-	if rec := do(t, h, "POST", "/api/hosts", map[string]any{"Name": "audit-h1", "Address": "127.0.0.1", "AgentPort": 1}, &token); rec.Code != http.StatusCreated {
+	if rec := do(t, h, "POST", "/api/hosts", map[string]any{"name": "audit-h1", "address": "127.0.0.1", "agent_port": 1}, &token); rec.Code != http.StatusCreated {
 		t.Fatalf("建档: %d %s", rec.Code, rec.Body)
 	}
 	// 改：更新
-	if rec := do(t, h, "PUT", "/api/hosts/1", map[string]any{"Address": "10.7.0.2"}, &token); rec.Code != http.StatusOK {
+	if rec := do(t, h, "PUT", "/api/hosts/1", map[string]any{"address": "10.7.0.2"}, &token); rec.Code != http.StatusOK {
 		t.Fatalf("更新: %d", rec.Code)
 	}
 	// exec：run 应带 user

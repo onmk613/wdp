@@ -1,52 +1,56 @@
 // 后端 API 封装：JSON fetch + 统一错误口径 + 401 全局事件。
 // 任何请求收到 401 都派发 wdp-unauthorized（App 切回登录视图）。
 
+// 命名口径：全部接口字段与后端 json tag 对齐（snake_case）；此前主机/
+// 应用等资源按 Go 导出名（PascalCase）序列化，现已与 users/exec/settings
+// 等端点统一为 snake_case。
+
 export interface Host {
-  ID: number
-  Name: string
-  Address: string
-  AgentPort: number
-  Pools: string[] | null
-  Groups: string[] | null
-  Labels: string
-  Status: string
-  AgentBuild?: string // 最近在线上报的 agent 版本（升级门控：与 server build 一致=已最新）
-  LastSeenAt: string
-  CreatedAt: string
-  UpdatedAt: string
+  id: number
+  name: string
+  address: string
+  agent_port: number
+  pools: string[] | null
+  groups: string[] | null
+  labels: string
+  status: string
+  agent_build?: string // 最近在线上报的 agent 版本（升级门控：与 server build 一致=已最新）
+  last_seen_at: string
+  created_at: string
+  updated_at: string
   // 明文通道：agent 未启用 mTLS 时需显式打开（默认按 mTLS 建连并校验身份）
-  AllowPlaintext?: boolean
+  allow_plaintext?: boolean
 }
 
 export interface Pool {
-  ID: number
-  Name: string
-  Note: string
-  Members: number
-  CreatedAt: string
+  id: number
+  name: string
+  note: string
+  members: number
+  created_at: string
 }
 
 export interface GroupEntry {
-  ID: number
-  Name: string
-  Note: string
-  CreatedAt: string
+  id: number
+  name: string
+  note: string
+  created_at: string
 }
 
 export interface LabelDef {
-  ID: number
-  Key: string
-  Note: string
-  CreatedAt: string
+  id: number
+  key: string
+  note: string
+  created_at: string
 }
 
 export interface BatchResult {
-  Row?: number // 批量建档时 = 提交数组中的序号（1 起）
-  ID: number
-  Name: string
-  OK: boolean
-  Detail?: string
-  Retired?: boolean
+  row?: number // 批量建档时 = 提交数组中的序号（1 起）
+  id: number
+  name: string
+  ok: boolean
+  detail?: string
+  retired?: boolean
 }
 
 export interface BatchResponse {
@@ -127,27 +131,27 @@ export async function api<T>(method: string, url: string, body?: unknown): Promi
 }
 
 export interface App {
-  ID: number
-  Name: string
-  Note: string
-  LatestVersion: string
-  Pools: string[] | null
-  Groups: string[] | null
-  Labels: string
-  VersionCount: number
-  CreatedAt: string
-  UpdatedAt: string
+  id: number
+  name: string
+  note: string
+  latest_version: string
+  pools: string[] | null
+  groups: string[] | null
+  labels: string
+  version_count: number
+  created_at: string
+  updated_at: string
 }
 
 export interface AppVersion {
-  ID: number
-  AppID: number
-  Version: string
-  Sha256: string
-  Size: number
-  Note: string
-  Phases: string[] | null
-  CreatedAt: string
+  id: number
+  app_id: number
+  version: string
+  sha256: string
+  size: number
+  note: string
+  phases: string[] | null
+  created_at: string
 }
 
 // 运行时设置（admin 设置页）：全库单文档，nil 字段 = 未配置（回落
@@ -171,19 +175,19 @@ export interface SettingsView extends SettingsDoc {
 }
 
 export interface Run {
-  ID: number
-  Kind: string
-  AppID: number
-  AppName: string
-  Version: string
-  Phase: string
-  Seq: number
-  Status: string
-  Selector: string
-  Summary: string
-  User: string
-  StartedAt: string
-  FinishedAt: string
+  id: number
+  kind: string
+  app_id: number
+  app_name: string
+  version: string
+  phase: string
+  seq: number
+  status: string
+  selector: string
+  summary: string
+  user: string
+  started_at: string
+  finished_at: string
 }
 
 // 用户与会话管理（user:manage）
@@ -211,25 +215,25 @@ export interface SessionInfo {
 
 // 操作审计（GET /api/audit）
 export interface AuditLog {
-  ID: number
-  User: string
-  Action: string
-  Object: string
-  Name: string
-  Detail: string
-  IP: string
-  CreatedAt: string
+  id: number
+  user: string
+  action: string
+  object: string
+  name: string
+  detail: string
+  ip: string
+  created_at: string
 }
 
 // 主机健康告警（GET /api/alerts；页面红黄标记，真正告警走 Prometheus）
 export interface HostAlert {
-  HostID: number
-  HostName: string
-  Kind: string // cpu / mem / fs / offline
-  Level: string // warn / crit
-  Detail: string
-  Value: number
-  UpdatedAt: string
+  host_id: number
+  host_name: string
+  kind: string // cpu / mem / fs / offline
+  level: string // warn / crit
+  detail: string
+  value: number
+  updated_at: string
 }
 
 // Prometheus 文本格式的解析样本（GET /api/hosts/{id}/metrics?format=json）
@@ -248,27 +252,27 @@ export interface SeriesPoint {
 
 // 该主机最近的执行任务（GET /api/hosts/{id}/tasks）
 export interface HostTaskItem {
-  RunID: number
-  AppName: string
-  Kind: string
-  Task: string
-  Module: string
-  Status: string
-  Changed: boolean
-  Detail: string
-  StartAt: string
+  run_id: number
+  app_name: string
+  kind: string
+  task: string
+  module: string
+  status: string
+  changed: boolean
+  detail: string
+  start_at: string
 }
 
 export interface RunTask {
-  ID: number
-  RunID: number
-  Play: string
-  Task: string
-  Module: string
-  Host: string
-  Status: string
-  Changed: boolean
-  Detail: string
+  id: number
+  run_id: number
+  play: string
+  task: string
+  module: string
+  host: string
+  status: string
+  changed: boolean
+  detail: string
 }
 
 // 字段名必须与后端 json tag 一致（小写）
@@ -330,19 +334,19 @@ export interface AppSpec {
 
 // ---- IDE 支撑（schema / validate / draft）----
 
-// GET /api/schema：结构元数据（与后端 model.FieldSection 对应，无 json
-// tag 按导出名序列化）
+// GET /api/schema：结构元数据（与后端 model.FieldSection 对应，json tag
+// 统一 snake_case）
 export interface FieldDoc {
-  Name: string
-  Type: string
-  Default?: string
-  Desc: string
+  name: string
+  type: string
+  default?: string
+  desc: string
 }
 
 export interface FieldSection {
-  Title: string
-  Fields: FieldDoc[]
-  Example?: string
+  title: string
+  fields: FieldDoc[]
+  example?: string
 }
 
 export interface SchemaMeta {
@@ -484,4 +488,37 @@ export function subscribeExecStream(
   })
   if (onError) es.onerror = () => onError()
   return () => es.close()
+}
+
+// ---- agent 远程升级（后台 run）----
+// 升级受理即返回 run_id，服务端后台推进（kind=upgrade 的 run，逐步明细落
+// run_tasks）。此前同步等待最长可达数十分钟（批量并发 3 × 每台含二进制
+// 上传与重启等待），挂起请求会被反代/浏览器掐断且断连后进度不可恢复；
+// 现在提交后轮询 runs 列表跟进（进度对话框见 HostsPage，历史回看走
+// RunsPage 的 kind=upgrade 过滤）。
+
+export interface UpgradeRunRef {
+  run_id: number
+  host_id: number
+  name: string
+}
+
+export interface UpgradeBatchResp {
+  run_ids: number[]
+  hosts: UpgradeRunRef[]
+}
+
+export function upgradeAgentRun(hostID: number, force = false): Promise<{ run_id: number }> {
+  return api('POST', `/api/hosts/${hostID}/upgrade`, { force })
+}
+
+export function upgradeAgentsBatch(ids: number[], force = false): Promise<UpgradeBatchResp> {
+  return api('POST', '/api/hosts/upgrade', { ids, force })
+}
+
+// 升级 run 状态轮询：一次列表请求覆盖全部在途 run（逐台详情请求会随主机
+// 数线性放大；列表已含状态与终态摘要，逐步明细到「执行记录」详情里看）。
+// limit 上限 100：超出部分的 run 由调用方按 run_id 单条补拉。
+export function listUpgradeRuns(limit = 100): Promise<Run[]> {
+  return api('GET', `/api/runs?kind=upgrade&limit=${limit}`)
 }

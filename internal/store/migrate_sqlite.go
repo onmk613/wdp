@@ -241,6 +241,3 @@ ALTER TABLE hosts ADD COLUMN agent_build TEXT NOT NULL DEFAULT '';
 ALTER TABLE hosts ADD COLUMN agent_modules TEXT NOT NULL DEFAULT '';
 ALTER TABLE app_versions ADD COLUMN modules TEXT NOT NULL DEFAULT '';
 `}
-
-// sqliteMigrationCount 是 SQLite 迁移线的长度（v1..vN）。
-const sqliteMigrationCount = 17

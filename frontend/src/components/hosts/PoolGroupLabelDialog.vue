@@ -90,7 +90,7 @@ async function submit() {
       </el-form-item>
       <el-form-item :label="meta().hostsLabel">
         <el-select v-model="form.hostIDs" multiple :placeholder="meta().hostsPlaceholder" style="width: 100%">
-          <el-option v-for="hst in hosts" :key="hst.ID" :label="`${hst.Name} (${hst.Address})`" :value="hst.ID" />
+          <el-option v-for="hst in hosts" :key="hst.id" :label="`${hst.name} (${hst.address})`" :value="hst.id" />
         </el-select>
       </el-form-item>
     </el-form>

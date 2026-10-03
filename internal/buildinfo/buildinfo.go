@@ -6,7 +6,8 @@ package buildinfo
 import "strings"
 
 // Version / Commit / BuildDate / GoVersion / Tier 由 ldflags 注入；开发
-// 构建用缺省值。Tier 标识功能档位（full / cli / agent）。
+// 构建用缺省值。Tier 标识功能档位（full / agent，两档即全部产物面——
+// 曾有的 cli 档已删除，见 build.sh 头部档位说明）。
 var (
 	Version   = "0.0.1"
 	Commit    = "none"

@@ -115,8 +115,8 @@ func SignCSR(o SignCSROptions, csr *x509.CertificateRequest, name string) (strin
 	return certPath, fp, err
 }
 
-// GenCSR 在**本机**生成（或复用已有）私钥并产出 CSR——目标机侧的
-// `wdp agent gencsr`。已存在可解析的私钥时幂等复用（重装不换身份）；
+// GenCSR 在本机生成（或复用已有）私钥并产出 CSR——目标机侧的
+// `wdp-agent gencsr`。已存在可解析的私钥时幂等复用（重装不换身份）；
 // 存在但解析失败时显式报错（静默覆盖可能毁掉 agent 正在使用的钥匙）。
 // CSR 不带 Subject：身份由 server 侧 claim 记录决定，自报无意义。
 // 返回是否复用了既有私钥。

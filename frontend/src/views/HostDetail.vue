@@ -37,7 +37,7 @@ async function load() {
 async function loadAlerts() {
   try {
     const list = await api<HostAlert[]>('GET', '/api/alerts')
-    alerts.value = list.filter((a) => a.HostID === hostId.value)
+    alerts.value = list.filter((a) => a.host_id === hostId.value)
   } catch {
     /* 静默 */
   }
@@ -66,7 +66,7 @@ const renewing = ref(false)
 async function renewCert() {
   try {
     await ElMessageBox.confirm(
-      `重签 ${host.value?.Name || '该主机'} 的 agent 证书并热更换（保留私钥，到期日在当前值上延长一年）？`,
+      `重签 ${host.value?.name || '该主机'} 的 agent 证书并热更换（保留私钥，到期日在当前值上延长一年）？`,
       '证书换发',
       { type: 'warning', confirmButtonText: '换证', cancelButtonText: '取消' },
     )
@@ -233,21 +233,21 @@ onUnmounted(() => window.clearInterval(timer))
     <div class="toolbar">
       <el-button :icon="ArrowLeft" @click="router.push('/hosts')">返回列表</el-button>
       <h2 class="title">
-        {{ host?.Name || `主机 #${hostId}` }}
-        <el-tag v-if="host" :type="statusType(host.Status)" round style="margin-left: 8px">{{ host.Status }}</el-tag>
-        <el-popover v-for="a in alerts" :key="a.Kind + '-' + a.UpdatedAt" placement="bottom" :width="360" trigger="hover">
+        {{ host?.name || `主机 #${hostId}` }}
+        <el-tag v-if="host" :type="statusType(host.status)" round style="margin-left: 8px">{{ host.status }}</el-tag>
+        <el-popover v-for="a in alerts" :key="a.kind + '-' + a.updated_at" placement="bottom" :width="360" trigger="hover">
           <template #reference>
             <el-icon
               :size="18" class="alert-dot"
-              :color="a.Level === 'crit' ? '#f56c6c' : '#e6a23c'"
+              :color="a.level === 'crit' ? '#f56c6c' : '#e6a23c'"
             ><WarningFilled /></el-icon>
           </template>
           <div class="alert-item">
-            <el-tag size="small" :type="a.Level === 'crit' ? 'danger' : 'warning'" round>
-              {{ a.Level === 'crit' ? '严重' : '警告' }}
+            <el-tag size="small" :type="a.level === 'crit' ? 'danger' : 'warning'" round>
+              {{ a.level === 'crit' ? '严重' : '警告' }}
             </el-tag>
-            {{ a.Detail }}
-            <span class="muted">（{{ a.UpdatedAt }}）</span>
+            {{ a.detail }}
+            <span class="muted">（{{ a.updated_at }}）</span>
           </div>
         </el-popover>
       </h2>
@@ -258,21 +258,21 @@ onUnmounted(() => window.clearInterval(timer))
 
     <!-- 告警条 -->
     <el-alert
-      v-for="a in alerts" :key="a.Kind + '-' + a.UpdatedAt"
-      :type="a.Level === 'crit' ? 'error' : 'warning'" :closable="false" show-icon style="margin-bottom: 10px"
-      :title="`【${a.Level === 'crit' ? '严重' : '警告'}】${a.Detail}（更新于 ${a.UpdatedAt}）`"
+      v-for="a in alerts" :key="a.kind + '-' + a.updated_at"
+      :type="a.level === 'crit' ? 'error' : 'warning'" :closable="false" show-icon style="margin-bottom: 10px"
+      :title="`【${a.level === 'crit' ? '严重' : '警告'}】${a.detail}（更新于 ${a.updated_at}）`"
     />
 
     <!-- 基本信息 -->
     <el-card shadow="never" class="block">
       <template #header><b>基本信息</b></template>
       <el-descriptions :column="4" size="small" border>
-        <el-descriptions-item label="地址">{{ host?.Address }}</el-descriptions-item>
-        <el-descriptions-item label="agent 端口">{{ host?.AgentPort }}</el-descriptions-item>
-        <el-descriptions-item label="最近在线">{{ fmtTime(host?.LastSeenAt) }}</el-descriptions-item>
-        <el-descriptions-item label="加入时间">{{ fmtTime(host?.CreatedAt) }}</el-descriptions-item>
-        <el-descriptions-item label="池" :span="2">{{ (host?.Pools || []).join('、') || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="组" :span="2">{{ (host?.Groups || []).join('、') || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="地址">{{ host?.address }}</el-descriptions-item>
+        <el-descriptions-item label="agent 端口">{{ host?.agent_port }}</el-descriptions-item>
+        <el-descriptions-item label="最近在线">{{ fmtTime(host?.last_seen_at) }}</el-descriptions-item>
+        <el-descriptions-item label="加入时间">{{ fmtTime(host?.created_at) }}</el-descriptions-item>
+        <el-descriptions-item label="池" :span="2">{{ (host?.pools || []).join('、') || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="组" :span="2">{{ (host?.groups || []).join('、') || '-' }}</el-descriptions-item>
       </el-descriptions>
     </el-card>
 
@@ -358,28 +358,28 @@ onUnmounted(() => window.clearInterval(timer))
       <template #header><b>该主机的执行历史（最近 30 条任务）</b></template>
       <el-table :data="tasks" size="small">
         <el-table-column label="时间" width="170">
-          <template #default="{ row }"><span class="muted">{{ fmtTime(row.StartAt) }}</span></template>
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.start_at) }}</span></template>
         </el-table-column>
         <el-table-column label="类型" width="70">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.Kind === 'exec' ? 'info' : 'primary'" effect="plain">{{ row.Kind }}</el-tag>
+            <el-tag size="small" :type="row.kind === 'exec' ? 'info' : 'primary'" effect="plain">{{ row.kind }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="AppName" label="应用" min-width="110">
-          <template #default="{ row }">{{ row.AppName || '远程命令' }}</template>
+        <el-table-column prop="app_name" label="应用" min-width="110">
+          <template #default="{ row }">{{ row.app_name || '远程命令' }}</template>
         </el-table-column>
-        <el-table-column prop="Task" label="任务" min-width="140" />
-        <el-table-column prop="Module" label="模块" width="90" />
+        <el-table-column prop="task" label="任务" min-width="140" />
+        <el-table-column prop="module" label="模块" width="90" />
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag size="small" :type="taskStatus(row.Status)">{{ row.Status }}</el-tag>
+            <el-tag size="small" :type="taskStatus(row.status)">{{ row.status }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="输出" min-width="200">
           <template #default="{ row }">
             <el-popover placement="left" :width="480" trigger="hover">
-              <template #reference><span class="muted out-line">{{ (row.Detail || '').slice(0, 80) || '-' }}</span></template>
-              <pre class="out">{{ row.Detail || '(无输出)' }}</pre>
+              <template #reference><span class="muted out-line">{{ (row.detail || '').slice(0, 80) || '-' }}</span></template>
+              <pre class="out">{{ row.detail || '(无输出)' }}</pre>
             </el-popover>
           </template>
         </el-table-column>

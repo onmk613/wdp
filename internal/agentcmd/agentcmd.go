@@ -26,6 +26,8 @@ Auth: --ca/--cert/--key enable mTLS (client certs must be issued by that CA);
 --pin-client-fp pins the allowed client fingerprints — exact revocation: drop a fingerprint and restart
 Loopback-only listen may run unauthenticated (on a multi-user host any local user can call /exec and /file, so mTLS is advised);
 unauthenticated non-loopback listen requires an explicit --allow-no-auth (trusted LAN only)
+File territory: --allow-file-path narrows /file and /archive to the given directory trees (repeatable; default unrestricted) —
+once enabled, remote upgrades require the agent binary's directory in the list; /exec stays unrestricted (deployment semantics)
 Lifecycle: --idle-timeout exits after this long without an authenticated request (/health probes do not count; 0 = never);
 --cleanup-on-shutdown self-cleans on that exit (temporary agents; the /shutdown signal always self-cleans);
 --systemd-unit matches the unit name so Restart=always cannot loop on a deleted binary
@@ -41,6 +43,8 @@ Usually runs permanently as a systemd service (installed by the server's enrollm
 --pin-client-fp 钉住允许的客户端指纹——精确吊销：删一个指纹重启即生效
 仅回环监听可不认证（多用户主机上本机任意用户均可调用 /exec 与 /file，建议 mTLS）；
 非回环无认证需显式 --allow-no-auth（仅可信内网）
+文件领地：--allow-file-path 把 /file 与 /archive 收窄到指定目录树（可重复；缺省不限制）——
+启用后远程升级要求清单包含 agent 二进制所在目录；/exec 不在收紧范围（部署语义即全权）
 生命周期：--idle-timeout 无认证请求达此时长即退出（/health 探测不计入；0 = 永不）；
 --cleanup-on-shutdown 退出时自清理（临时托管场景；/shutdown 信号总是自清理）；
 --systemd-unit 匹配单元名，避免 Restart=always 循环拉起已删除的二进制
@@ -59,6 +63,7 @@ func New() *cobra.Command {
 		cleanup       bool
 		pins          []string
 		allowNoAuth   bool
+		filePaths     []string
 		systemdUnit   string
 		maxRequestMB  int64
 		idleTimeout   time.Duration
@@ -95,6 +100,9 @@ func New() *cobra.Command {
 				return err
 			}
 			if err := srv.PinClientFingerprints(pins); err != nil {
+				return err
+			}
+			if err := srv.SetFilePathRoots(filePaths); err != nil {
 				return err
 			}
 			srv.CleanupOnShutdown(cleanup)
@@ -146,6 +154,12 @@ func New() *cobra.Command {
 	cmd.Flags().BoolVar(&allowNoAuth, "allow-no-auth", false,
 		i18n.T("explicitly allow unauthenticated non-loopback listen (trusted LAN only)",
 			"显式允许非回环的无认证监听（仅可信内网）"),
+	)
+
+	// 文件领地（opt-in 收紧 /file、/archive）
+	cmd.Flags().StringArrayVar(&filePaths, "allow-file-path", nil,
+		i18n.T("restrict /file and /archive to this directory tree (repeatable; default unrestricted). Remote upgrades then require the agent binary's directory in the list",
+			"把 /file 与 /archive 收窄到该目录树（可重复；缺省不限制）。启用后远程升级须将 agent 二进制所在目录列入"),
 	)
 
 	// cleanup & idle

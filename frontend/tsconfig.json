@@ -11,5 +11,13 @@
     "isolatedModules": true,
     "types": ["vite/client"]
   },
-  "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.vue",
+    // 按需引入插件（unplugin-auto-import）的生成声明（已提交进库）：
+    // typecheck 不跑 vite 插件链，靠生成文件在场；Components 的 dts
+    // 关闭（见 vite.config.ts 注释），不在此列
+    "auto-imports.d.ts"
+  ]
 }

@@ -272,14 +272,14 @@ func TestCreateHostNameValidation(t *testing.T) {
 
 	for _, bad := range []string{"bad/name", "with space", "semi;colon", "quote\"name"} {
 		rec := do(t, h, "POST", "/api/hosts", map[string]any{
-			"Name": bad, "Address": "10.0.0.99", "AgentPort": 7602,
+			"name": bad, "address": "10.0.0.99", "agent_port": 7602,
 		}, &token)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("非法名字 %q 应 400: %d %s", bad, rec.Code, rec.Body)
 		}
 	}
 	rec := do(t, h, "POST", "/api/hosts", map[string]any{
-		"Name": "good-name_1.x", "Address": "10.0.0.99", "AgentPort": 7602,
+		"name": "good-name_1.x", "address": "10.0.0.99", "agent_port": 7602,
 	}, &token)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("合法名字应 201: %d %s", rec.Code, rec.Body)
@@ -295,7 +295,7 @@ func TestDecodeJSONSizeLimit413(t *testing.T) {
 	h := s.Handler()
 	token := loginSession(t, s)
 	rec := do(t, h, "POST", "/api/hosts", map[string]any{
-		"Name": "big", "Address": "10.0.0.99", "Labels": strings.Repeat("x", 1<<20),
+		"name": "big", "address": "10.0.0.99", "labels": strings.Repeat("x", 1<<20),
 	}, &token)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("超限请求体应 413: %d %s", rec.Code, rec.Body)

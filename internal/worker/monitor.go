@@ -219,46 +219,36 @@ func (m *Monitor) Run(ctx context.Context) {
 }
 
 func (m *Monitor) scrapeOnce(ctx context.Context) {
-	ids, err := m.Store.HostIDs()
+	// 一次查询取全量主机：此前 HostIDs()+逐台 GetHost() 是每轮 1+N 次
+	// 单行查询（N+1），千台台账每分钟多打上千次库
+	hosts, err := m.Store.AllHosts()
 	if err != nil {
 		m.Logger.Error("scrape: list hosts", "err", err)
 		return
 	}
 	// 有界并发抓取：串行时一台超时就拖累整轮（主机多了 1 分钟周期装不
-	// 下）；8 并发 + 单机超时控制，整轮时延 ≈ 主机数/8 × 最慢单机
-	sem := make(chan struct{}, 8)
-	var wg sync.WaitGroup
-	for _, id := range ids {
+	// 下）；8 并发 + 单机超时控制，整轮时延 ≈ 主机数/8 × 最慢单机。
+	// 固定 worker 池（BoundedForeach）而非逐台起 goroutine：信号量只约束
+	// 在途工作、约束不了 goroutine 创建，万台级慢 agent 会驻留数万个阻塞
+	// 在信号量上的 goroutine
+	_ = BoundedForeach(ctx, hosts, sweepConcurrency, func(ctx context.Context, _ int, h *store.Host) error {
+		id := h.ID
+		body, err := m.Fetch(ctx, h)
+		// ctx 已取消（server 关停）：已派发的抓取以失败收场，据此写
+		// offline crit 告警会把全网打成不可达——关停不应污染告警面板，
+		// 下一轮采样自会给出真实结论
 		if ctx.Err() != nil {
-			break
+			return nil
 		}
-		h, err := m.Store.GetHost(id)
 		if err != nil {
-			m.Logger.Warn("scrape: get host", "id", id, "err", err)
-			continue
+			// 离线：置一条 crit 告警（探活状态由 Prober 维护）
+			_ = m.Store.SetHostAlert(id, "offline", "crit", "agent 不可达："+fmtutil.FirstLine(err.Error()), 0)
+			return nil
 		}
-		wg.Add(1)
-		go func(id int64, h *store.Host) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			body, err := m.Fetch(ctx, h)
-			// ctx 已取消（server 关停）：已派发 goroutine 的抓取以失败收场，
-			// 据此写 offline crit 告警会把全网打成不可达——关停不应污染告警
-			// 面板，下一轮采样自会给出真实结论
-			if ctx.Err() != nil {
-				return
-			}
-			if err != nil {
-				// 离线：置一条 crit 告警（探活状态由 Prober 维护）
-				_ = m.Store.SetHostAlert(id, "offline", "crit", "agent 不可达："+fmtutil.FirstLine(err.Error()), 0)
-				return
-			}
-			_ = m.Store.ClearHostAlert(id, "offline")
-			m.IngestSamples(id, ParsePromText(body))
-		}(id, h)
-	}
-	wg.Wait()
+		_ = m.Store.ClearHostAlert(id, "offline")
+		m.IngestSamples(id, ParsePromText(body))
+		return nil
+	})
 }
 
 // IngestSamples 派生瞬时指标并写桶、评估告警：按"比率类 / 文件系统类 /

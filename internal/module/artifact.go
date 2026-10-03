@@ -1,12 +1,16 @@
 package module
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+
+	"wdp/internal/fsatomic"
 	"wdp/internal/i18n"
 )
 
@@ -180,18 +184,70 @@ func (m *ArtifactModule) loadCache(rc *RunContext, cachePath, url, wantSum strin
 	if url == "" {
 		return nil, false, Fail("offline artifact %s is missing (prepare it with the chart's download phase or ship it inside the package; no url is set to fetch it)", cachePath)
 	}
-	data, bad := (&GetURLModule{}).fetch(rc, url, headers, timeoutSecs)
-	if bad != nil {
-		return nil, false, bad
-	}
-	if wantSum != "" && sha256hex(data) != wantSum {
-		return nil, false, Fail("download checksum mismatch for %s (expected %s)", url, wantSum)
-	}
-	if err := writeCache(cachePath, data); err != nil {
-		return nil, false, Fail("failed to write artifact cache %s: %v", cachePath, err)
+	// singleflight：forks 并发下同一制品在 N 台主机同时 miss 时，首个下载
+	// 完成前其余 worker 全部重复下载同一 URL（大制品 + 高 forks 浪费带宽
+	// 且可能打满连接）。键取缓存路径（同一制品多来源仍只落一份）。等待者
+	// 共享先行者的下载/校验/落缓存结果；先行者的 ctx 取消会连带等待者
+	// 失败——同制品同源，即刻可见优于各自重复下载放大故障。
+	data, ferr := artifactFlights.do(cachePath, func() ([]byte, error) {
+		data, bad := (&GetURLModule{}).fetch(rc, url, headers, timeoutSecs)
+		if bad != nil {
+			return nil, errors.New(bad.Msg)
+		}
+		if wantSum != "" && sha256hex(data) != wantSum {
+			return nil, fmt.Errorf("download checksum mismatch for %s (expected %s)", url, wantSum)
+		}
+		if err := writeCache(cachePath, data); err != nil {
+			return nil, fmt.Errorf("failed to write artifact cache %s: %v", cachePath, err)
+		}
+		return data, nil
+	})
+	if ferr != nil {
+		return nil, false, Fail("%v", ferr)
 	}
 	return data, false, nil
 }
+
+// flightGroup 是 singleflight 语义的最小实现（键粒度的在飞去重）：同键
+// 并发调用只有一个真正执行 fn，其余等待并共享同一份结果。结果视为只读
+// （调用方不得改写返回的 []byte）；不加依赖库（x/sync）是为保住 go.mod
+// 的最小直接依赖面。
+type flightGroup struct {
+	mu       sync.Mutex
+	inflight map[string]*flightCall
+}
+
+type flightCall struct {
+	done chan struct{}
+	data []byte
+	err  error
+}
+
+func (g *flightGroup) do(key string, fn func() ([]byte, error)) ([]byte, error) {
+	g.mu.Lock()
+	if g.inflight == nil {
+		g.inflight = make(map[string]*flightCall)
+	}
+	if c, ok := g.inflight[key]; ok {
+		g.mu.Unlock()
+		<-c.done
+		return c.data, c.err
+	}
+	c := &flightCall{done: make(chan struct{})}
+	g.inflight[key] = c
+	g.mu.Unlock()
+
+	c.data, c.err = fn()
+	close(c.done) // 先关 channel 再出表：等待者拿结果不经过锁，删表晚无碍
+
+	g.mu.Lock()
+	delete(g.inflight, key)
+	g.mu.Unlock()
+	return c.data, c.err
+}
+
+// artifactFlights 是制品下载的进程级在飞表（Executor 各批次共用）。
+var artifactFlights flightGroup
 
 // distributeMembers 从归档制品中选取成员并逐个分发（拍平到 dest/，basename
 // 命中；权限沿用归档条目，mode 参数显式给出时强制覆盖）。
@@ -222,21 +278,15 @@ func (m *ArtifactModule) distributeMembers(rc *RunContext, data []byte, cacheHit
 		fmt.Sprintf("distributed %d members from %s to %s", len(sel), cache, dest))}
 }
 
-// writeCache 原子落缓存（临时名 + rename，并发执行不会留半成品）。
+// writeCache 原子落缓存（临时名 + rename，并发执行不会留半成品）。落盘
+// 走 fsatomic（fsync + 目录 fsync）——与 executor/plan 的 writeFileDurably
+// 同一耐久口径：裸 rename 在掉电后可能产出空壳缓存（下次运行由 sha256
+// 校验自愈，但没必要留这个窗口）。
 func writeCache(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	tmp := path + ".tmp-" + tempSuffix()
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
-		os.Remove(tmp) // 磁盘满等失败不留半截 tmp（会随时间在缓存目录累积）
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return nil
+	return fsatomic.WriteFile(path, bytes.NewReader(data), 0o644)
 }
 
 // msg 组装来源说明（cache 命中 = 离线复用；未命中 = 在线下载落缓存）。

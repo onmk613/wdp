@@ -16,37 +16,8 @@ import (
 	"time"
 )
 
-// maxExecOutputBytes 是单条 exec 每个输出流的缓冲上限（与控制端
-// "单任务输出超 1MB 截断"对齐）。
-const maxExecOutputBytes = 1 << 20
-
-// capWriter 是带上限的缓冲 writer：保留前 limit 字节，超出部分丢弃并标记。
-// 始终返回原始写入长度——io.Writer 契约禁止 n < len(p) 且 err == nil
-// （os/exec 的输出拷贝走 io.Copy，短写会被判 ErrShortWrite 并中断收集）。
-type capWriter struct {
-	buf       bytes.Buffer
-	limit     int
-	truncated bool
-}
-
-func (w *capWriter) Write(p []byte) (int, error) {
-	if w.limit <= 0 {
-		w.limit = maxExecOutputBytes
-	}
-	room := w.limit - w.buf.Len()
-	switch {
-	case room <= 0:
-		w.truncated = true
-	case len(p) > room:
-		w.buf.Write(p[:room])
-		w.truncated = true
-	default:
-		w.buf.Write(p)
-	}
-	return len(p), nil
-}
-
-func (w *capWriter) String() string { return w.buf.String() }
+// 输出上限的缓冲 writer 收敛至 conn.CapWriter（与 sshc/local 三通道
+// 同一实现，防各持一份近似拷贝后口径漂移）；截断标记文案见 execRespOf。
 
 // becomeCmd 构造提权执行的 argv 与 stdin 布局。
 // 脚本体不进 argv（本机 ps、/proc/<pid>/cmdline 对同机任意用户可见，脚本

@@ -115,7 +115,7 @@ func TestHostAPI(t *testing.T) {
 	token := loginSession(t, s)
 
 	rec := do(t, h, "POST", "/api/hosts", map[string]any{
-		"Name": "web1", "Address": "10.0.0.11", "AgentPort": 7602, "Group": "web", "Labels": `{"env":"prod"}`,
+		"name": "web1", "address": "10.0.0.11", "agent_port": 7602, "group": "web", "labels": `{"env":"prod"}`,
 	}, &token)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("创建应 201: %d %s", rec.Code, rec.Body)
@@ -135,12 +135,12 @@ func TestHostAPI(t *testing.T) {
 	}
 
 	// 更新
-	rec = do(t, h, "PUT", "/api/hosts/1", map[string]any{"Address": "10.0.0.12", "AgentPort": 7700}, &token)
+	rec = do(t, h, "PUT", "/api/hosts/1", map[string]any{"address": "10.0.0.12", "agent_port": 7700}, &token)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("更新应 200: %d %s", rec.Code, rec.Body)
 	}
 	// 非法 labels
-	if rec := do(t, h, "PUT", "/api/hosts/1", map[string]any{"Address": "10.0.0.12", "Labels": "not-json"}, &token); rec.Code != http.StatusBadRequest {
+	if rec := do(t, h, "PUT", "/api/hosts/1", map[string]any{"address": "10.0.0.12", "labels": "not-json"}, &token); rec.Code != http.StatusBadRequest {
 		t.Fatalf("非法 labels 应 400: %d", rec.Code)
 	}
 

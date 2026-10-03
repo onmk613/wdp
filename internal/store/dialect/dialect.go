@@ -112,20 +112,3 @@ func Get(name string) (Dialect, error) {
 
 // ErrNoColumn 在列存在性探测无法判定时返回（调用方应报错而非静默跳过）。
 var ErrNoColumn = errors.New("cannot determine column existence")
-
-// concatJoin 把 `a {{concat}} b {{concat}} c` 形式的片段按方言拼接。
-// MySQL 需要的是函数形式，因此这里的入参是**表达式切片**而不是 SQL 文本；
-// 各实现的 Rewrite 会先按 token 切分再调用。
-func concatJoin(parts []string, fn func(parts []string) string, op string) string {
-	if len(parts) == 1 {
-		return parts[0]
-	}
-	if fn != nil {
-		return fn(parts)
-	}
-	out := parts[0]
-	for _, p := range parts[1:] {
-		out += " " + op + " " + p
-	}
-	return out
-}

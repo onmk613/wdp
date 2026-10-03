@@ -42,7 +42,7 @@ func (c *Conn) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult,
 
 	// 脚本体 + 任务 stdin 一起经会话 stdin 投递（不进 argv，见 WrapScript）
 	sess.Stdin = strings.NewReader(WrapStdin(req, sudoPW))
-	var stdout, stderr capBuffer // 输出上限见 capout.go：防高输出命令打爆控制端
+	var stdout, stderr conn.CapWriter // 输出上限见 capout.go：防高输出命令打爆控制端
 	sess.Stdout = &stdout
 	sess.Stderr = &stderr
 
@@ -58,11 +58,11 @@ func (c *Conn) Exec(ctx context.Context, req conn.ExecRequest) (conn.ExecResult,
 				code = ee.ExitStatus()
 			}
 		}
-		return conn.ExecResult{Code: code, Stdout: stdout.string(), Stderr: stderr.string()}, nil
+		return conn.ExecResult{Code: code, Stdout: capped(&stdout), Stderr: capped(&stderr)}, nil
 	case <-ctx.Done():
 		_ = sess.Close()
 		<-done
-		return conn.ExecResult{Stdout: stdout.string(), Stderr: stderr.string()}, ctx.Err()
+		return conn.ExecResult{Stdout: capped(&stdout), Stderr: capped(&stderr)}, ctx.Err()
 	}
 }
 
@@ -79,7 +79,7 @@ func (c *Conn) execTo(ctx context.Context, script string, w io.Writer) error {
 	}
 	defer sess.Close()
 	sess.Stdout = w
-	var stderr capBuffer
+	var stderr conn.CapWriter
 	sess.Stderr = &stderr
 	done := make(chan error, 1)
 	go func() { done <- sess.Run(script) }()
@@ -87,7 +87,7 @@ func (c *Conn) execTo(ctx context.Context, script string, w io.Writer) error {
 	case err := <-done:
 		if err != nil {
 			if ee, ok := err.(*ssh.ExitError); ok {
-				return fmt.Errorf("remote exit %d: %s", ee.ExitStatus(), stderr.string())
+				return fmt.Errorf("remote exit %d: %s", ee.ExitStatus(), capped(&stderr))
 			}
 			return err
 		}
@@ -128,9 +128,12 @@ unset WDP_SUDO_PW
 	if req.BecomeUser != "" {
 		runner = fmt.Sprintf("sudo -n -u %s -- sh \"$T\" < \"$I\"", shellquote.Quote(req.BecomeUser))
 		// 先 chmod（此时属主还是登录用户）再用 sudo 收敛属主；chown 失败
-		// 即整条失败——不回落 0644（会泄露脚本内的敏感 env 给同机用户）
+		// 即整条失败——不回落 0644（会泄露脚本内的敏感 env 给同机用户）。
+		// 消息文案里的用户名同样经 Quote——裸值嵌在单引号字符串内，含
+		// 单引号的 BecomeUser 可闭合引号注入任意命令（chown 参数早已
+		// Quote，此处补齐同一口径）。
 		setPerm = fmt.Sprintf("chmod 700 \"$T\" && sudo -n -- chown %s \"$T\" || { echo 'wdp: cannot hand the script to %s (passwordless sudo to root required)' >&2; exit 95; }",
-			shellquote.Quote(req.BecomeUser), req.BecomeUser)
+			shellquote.Quote(req.BecomeUser), shellquote.Quote(req.BecomeUser))
 	}
 	return fmt.Sprintf(`T=$(mktemp /tmp/.wdp.XXXXXX) || exit 99
 B=$(mktemp /tmp/.wdp.XXXXXX) || exit 99

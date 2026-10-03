@@ -64,7 +64,7 @@ const activeTasks = reactive<Record<number, RunTask[]>>({})
 let pollTimer: number | undefined
 
 const labelOptions = computed(() => labels.value)
-const appById = (id: number) => apps.value.find((a) => a.ID === id)
+const appById = (id: number) => apps.value.find((a) => a.id === id)
 
 async function load(silent = false) {
   try {
@@ -89,10 +89,10 @@ function deriveScopeOptions() {
   const gs = new Set<string>()
   const ls = new Set<string>()
   for (const h of hosts.value) {
-    for (const p of h.Pools || []) ps.add(p)
-    for (const g of h.Groups || []) gs.add(g)
+    for (const p of h.pools || []) ps.add(p)
+    for (const g of h.groups || []) gs.add(g)
     try {
-      for (const k of Object.keys(JSON.parse(h.Labels || '{}'))) ls.add(k)
+      for (const k of Object.keys(JSON.parse(h.labels || '{}'))) ls.add(k)
     } catch {
       /* 忽略坏标签 */
     }
@@ -106,8 +106,8 @@ async function loadVersions(appID: number) {
   if (versionCache[appID]) return
   try {
     const r = await api<{ versions: AppVersion[] }>('GET', `/api/apps/${appID}`)
-    versionCache[appID] = r.versions.map((v) => v.Version)
-    for (const v of r.versions) phasesCache[`${appID}:${v.Version}`] = v.Phases && v.Phases.length ? v.Phases : LEGACY_PHASES
+    versionCache[appID] = r.versions.map((v) => v.version)
+    for (const v of r.versions) phasesCache[`${appID}:${v.version}`] = v.phases && v.phases.length ? v.phases : LEGACY_PHASES
   } catch {
     // 瞬时失败不落缓存：空数组也是 truthy，会让本会话对同一应用永不再重试
     delete versionCache[appID]
@@ -131,8 +131,8 @@ function addItem() {
     ElMessage.warning('先选择应用')
     return
   }
-  items.value.push({ app_id: app.ID, version: app.LatestVersion, phase: 'deploy' })
-  loadVersions(app.ID)
+  items.value.push({ app_id: app.id, version: app.latest_version, phase: 'deploy' })
+  loadVersions(app.id)
   pickAppId.value = null
 }
 
@@ -168,7 +168,7 @@ async function run() {
   }
   try {
     // 逐条目摘要（app@版本[相位]，同应用多次出现时也一目了然）
-    const parts = items.value.map((i) => `${appById(i.app_id)?.Name || i.app_id}@${i.version}[${i.phase}]`)
+    const parts = items.value.map((i) => `${appById(i.app_id)?.name || i.app_id}@${i.version}[${i.phase}]`)
     const digest = parts.length > 6 ? parts.slice(0, 6).join(' → ') + ' → …' : parts.join(' → ')
     await ElMessageBox.confirm(
       `按顺序执行 ${items.value.length} 个条目到【${label}】？\n${digest}`,
@@ -203,7 +203,7 @@ const lastSubmit = ref<{ items: Item[]; selector: Record<string, unknown> } | nu
 
 // activeRunActive：queued/running/cancelling 都算未收尾
 function runActive(r: Run): boolean {
-  return r.Status === 'running' || r.Status === 'queued' || r.Status === 'cancelling'
+  return r.status === 'running' || r.status === 'queued' || r.status === 'cancelling'
 }
 
 // cancelRun 取消一个进行中的 run：在途任务会执行完，已执行结果保留；
@@ -211,14 +211,14 @@ function runActive(r: Run): boolean {
 async function cancelRun(r: Run) {
   try {
     await ElMessageBox.confirm(
-      `取消 ${r.AppName}@${r.Version}[${r.Phase || 'deploy'}] 的执行？在途任务会执行完，已执行任务的结果保留，可重新发起。`,
+      `取消 ${r.app_name}@${r.version}[${r.phase || 'deploy'}] 的执行？在途任务会执行完，已执行任务的结果保留，可重新发起。`,
       '取消执行', { type: 'warning', confirmButtonText: '取消执行', cancelButtonText: '再想想' },
     )
   } catch {
     return
   }
   try {
-    await api('POST', `/api/runs/${r.ID}/cancel`, {})
+    await api('POST', `/api/runs/${r.id}/cancel`, {})
     ElMessage.success('已请求取消（在途任务执行完后生效）')
     pollSoon()
   } catch (e) {
@@ -239,7 +239,7 @@ async function rerunRun(r: Run) {
   }
   try {
     await ElMessageBox.confirm(
-      `重新执行 ${r.AppName}@${r.Version}[${r.Phase || 'deploy'}]（目标按上次提交快照）？`,
+      `重新执行 ${r.app_name}@${r.version}[${r.phase || 'deploy'}]（目标按上次提交快照）？`,
       '重新执行', { type: 'warning', confirmButtonText: '执行', cancelButtonText: '取消' },
     )
   } catch {
@@ -248,7 +248,7 @@ async function rerunRun(r: Run) {
   running.value = true
   try {
     const payload = {
-      items: [{ app_id: r.AppID, version: r.Version, phase: r.Phase || 'deploy' }],
+      items: [{ app_id: r.app_id, version: r.version, phase: r.phase || 'deploy' }],
       selector: lastSubmit.value.selector,
     }
     const resp = await api<{ run_ids: number[]; hosts: number }>('POST', '/api/runs', payload)
@@ -289,7 +289,7 @@ async function pollActive(runIDs: number[]) {
     const results = await Promise.allSettled(
       runIDs.map((id) => api<{ run: Run; tasks: RunTask[] }>('GET', `/api/runs/${id}`)),
     )
-    const prev = new Map(activeRuns.value.map((r) => [r.ID, r]))
+    const prev = new Map(activeRuns.value.map((r) => [r.id, r]))
     const out: Run[] = []
     let ok = 0
     results.forEach((r, i) => {
@@ -317,7 +317,7 @@ function anyRunning(): boolean {
   if (activeRuns.value.some(runActive)) return true
   // 有跟踪但从未成功拿到状态的 run（每轮都失败）：视为进行中继续轮询，
   // 否则其余 run 全部终态后轮询停摆，该 run 的输出与终态永远缺失
-  return trackedRunIDs.some((id) => !activeRuns.value.some((r) => r.ID === id))
+  return trackedRunIDs.some((id) => !activeRuns.value.some((r) => r.id === id))
 }
 
 // 事件驱动为主：run 事件（状态变化/任务落库）触发立即拉取详情；
@@ -411,7 +411,7 @@ onBeforeRouteLeave(async () => {
           </el-form-item>
           <el-form-item v-else-if="selKind === 'hosts'" label="主机">
             <el-select v-model="selHostIDs" multiple filterable placeholder="勾选主机" style="width: 100%">
-              <el-option v-for="h in hosts" :key="h.ID" :label="`${h.Name} (${h.Address})`" :value="h.ID" />
+              <el-option v-for="h in hosts" :key="h.id" :label="`${h.name} (${h.address})`" :value="h.id" />
             </el-select>
           </el-form-item>
           <template v-else-if="selKind === 'inline'">
@@ -435,14 +435,14 @@ onBeforeRouteLeave(async () => {
         <template #header><span>执行清单（按顺序）</span></template>
         <div class="pick-row">
           <el-select v-model="pickAppId" placeholder="选择应用（加入后取默认版本，可再改）" filterable style="flex: 1">
-            <el-option v-for="a in apps" :key="a.ID" :label="a.Name" :value="a.ID" />
+            <el-option v-for="a in apps" :key="a.id" :label="a.name" :value="a.id" />
           </el-select>
           <el-button type="primary" plain @click="addItem">加入</el-button>
         </div>
         <el-table :data="items" size="small" style="margin-top: 8px">
           <el-table-column label="#" type="index" width="44" />
           <el-table-column label="应用" min-width="120">
-            <template #default="{ row }">{{ appById(row.app_id)?.Name || row.app_id }}</template>
+            <template #default="{ row }">{{ appById(row.app_id)?.name || row.app_id }}</template>
           </el-table-column>
           <el-table-column label="版本" min-width="130">
             <template #default="{ row }">
@@ -477,7 +477,7 @@ onBeforeRouteLeave(async () => {
           <el-button :icon="Refresh" @click="load()">刷新</el-button>
           <div style="flex: 1" />
           <el-tooltip v-if="submitted && anyRunning()" placement="top"
-            :content="`正在执行：${activeRuns.filter(runActive).map((r) => `${r.AppName}@${r.Version}`).join('、') || '提交中…'}——完成或取消后再发起新执行`">
+            :content="`正在执行：${activeRuns.filter(runActive).map((r) => `${r.app_name}@${r.version}`).join('、') || '提交中…'}——完成或取消后再发起新执行`">
             <span>
               <el-button type="primary" :icon="CaretRight" disabled>执行</el-button>
             </span>
@@ -496,40 +496,40 @@ onBeforeRouteLeave(async () => {
           <span>本次执行输出</span>
           <span class="muted">
             {{ anyRunning()
-              ? `执行中：${activeRuns.filter(runActive).map((r) => `${r.AppName}@${r.Version}`).join('、') || '提交中…'}（实时刷新，可取消）`
+              ? `执行中：${activeRuns.filter(runActive).map((r) => `${r.app_name}@${r.version}`).join('、') || '提交中…'}（实时刷新，可取消）`
               : '已完成' }} · 完整历史见左侧菜单「执行记录」
           </span>
         </div>
       </template>
-      <div v-for="r in activeRuns" :key="r.ID" class="run-block" :class="{ 'run-active': runActive(r) }">
+      <div v-for="r in activeRuns" :key="r.id" class="run-block" :class="{ 'run-active': runActive(r) }">
         <div class="run-title">
-          <el-tag :type="runStatus(r.Status)" round size="small">{{ r.Status }}</el-tag>
-          <b style="margin-left: 8px">{{ r.AppName }}@{{ r.Version }}</b>
-          <el-tag size="small" type="info" effect="plain" style="margin-left: 6px">{{ r.Phase || 'deploy' }}</el-tag>
-          <span class="muted" style="margin-left: 8px">run #{{ r.ID }} · {{ r.Summary }}</span>
-          <span class="muted" style="margin-left: 8px">已执行 {{ (activeTasks[r.ID] || []).length }} 条任务</span>
+          <el-tag :type="runStatus(r.status)" round size="small">{{ r.status }}</el-tag>
+          <b style="margin-left: 8px">{{ r.app_name }}@{{ r.version }}</b>
+          <el-tag size="small" type="info" effect="plain" style="margin-left: 6px">{{ r.phase || 'deploy' }}</el-tag>
+          <span class="muted" style="margin-left: 8px">run #{{ r.id }} · {{ r.summary }}</span>
+          <span class="muted" style="margin-left: 8px">已执行 {{ (activeTasks[r.id] || []).length }} 条任务</span>
           <div style="flex: 1" />
-          <el-button v-if="runActive(r) && r.Status !== 'cancelling' && can('run:execute')" size="small" type="warning" plain @click="cancelRun(r)">
+          <el-button v-if="runActive(r) && r.status !== 'cancelling' && can('run:execute')" size="small" type="warning" plain @click="cancelRun(r)">
             取消执行
           </el-button>
           <el-button v-else-if="!runActive(r) && can('run:execute')" size="small" plain @click="rerunRun(r)">
             重新执行
           </el-button>
         </div>
-        <el-table :data="activeTasks[r.ID] || []" size="small">
-          <el-table-column prop="Task" label="任务" min-width="160" />
-          <el-table-column prop="Module" label="模块" width="90" />
-          <el-table-column prop="Host" label="主机" min-width="110" />
+        <el-table :data="activeTasks[r.id] || []" size="small">
+          <el-table-column prop="task" label="任务" min-width="160" />
+          <el-table-column prop="module" label="模块" width="90" />
+          <el-table-column prop="host" label="主机" min-width="110" />
           <el-table-column label="状态" width="120">
             <template #default="{ row }">
-              <el-tag size="small" :type="taskStatus(row.Status)">
-                {{ row.Status }}{{ row.Changed ? '·changed' : '' }}
+              <el-tag size="small" :type="taskStatus(row.status)">
+                {{ row.status }}{{ row.changed ? '·changed' : '' }}
               </el-tag>
             </template>
           </el-table-column>
           <el-table-column label="输出" min-width="260">
             <template #default="{ row }">
-              <pre class="out">{{ (row.Detail || '(无输出)').slice(0, 2000) }}</pre>
+              <pre class="out">{{ (row.detail || '(无输出)').slice(0, 2000) }}</pre>
             </template>
           </el-table-column>
         </el-table>

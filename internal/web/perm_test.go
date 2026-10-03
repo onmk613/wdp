@@ -84,7 +84,7 @@ func TestRBACRoleAndScope(t *testing.T) {
 	if rec = do(t, h, "GET", "/api/hosts", nil, &viewer); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"hb"`) {
 		t.Fatalf("viewer 应看到全部主机: %d %s", rec.Code, rec.Body)
 	}
-	if rec = do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", hostID["ha"]), map[string]any{"Address": "127.0.0.1"}, &viewer); rec.Code != http.StatusForbidden {
+	if rec = do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", hostID["ha"]), map[string]any{"address": "127.0.0.1"}, &viewer); rec.Code != http.StatusForbidden {
 		t.Fatalf("viewer 改主机应 403: %d", rec.Code)
 	}
 	if rec = do(t, h, "GET", "/api/audit", nil, &viewer); rec.Code != http.StatusForbidden {
@@ -95,10 +95,10 @@ func TestRBACRoleAndScope(t *testing.T) {
 	}
 
 	// scoped：改 pool-a 主机过、pool-b 拒
-	if rec = do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", hostID["ha"]), map[string]any{"Address": "127.0.0.1", "Pools": []string{"pool-a"}}, &scoped); rec.Code != http.StatusOK {
+	if rec = do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", hostID["ha"]), map[string]any{"address": "127.0.0.1", "pools": []string{"pool-a"}}, &scoped); rec.Code != http.StatusOK {
 		t.Fatalf("scoped 改 pool-a 主机应 200: %d %s", rec.Code, rec.Body)
 	}
-	if rec = do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", hostID["hb"]), map[string]any{"Address": "127.0.0.1"}, &scoped); rec.Code != http.StatusForbidden {
+	if rec = do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", hostID["hb"]), map[string]any{"address": "127.0.0.1"}, &scoped); rec.Code != http.StatusForbidden {
 		t.Fatalf("scoped 改 pool-b 主机应 403: %d", rec.Code)
 	}
 
@@ -149,22 +149,22 @@ func TestHostUpdateScopeWrite(t *testing.T) {
 	}, &admin)
 
 	// 授权外目标池：403（写入校验，matchScope"任一命中"不够）
-	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "Pools": []string{"pool-b"}}, &scoped); rec.Code != http.StatusForbidden {
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"address": "127.0.0.1", "pools": []string{"pool-b"}}, &scoped); rec.Code != http.StatusForbidden {
 		t.Fatalf("scoped 挪出授权池应 403: %d %s", rec.Code, rec.Body)
 	}
 	// 授权外标签键同样拒绝（labels 驱动 label 型授权面）
-	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "Pools": []string{"pool-a"}, "Labels": `{"zone":"dmz"}`}, &scoped); rec.Code != http.StatusForbidden {
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"address": "127.0.0.1", "pools": []string{"pool-a"}, "labels": `{"zone":"dmz"}`}, &scoped); rec.Code != http.StatusForbidden {
 		t.Fatalf("scoped 打授权外标签应 403: %d %s", rec.Code, rec.Body)
 	}
 	// 授权内目标值放行
-	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "Pools": []string{"pool-a"}}, &scoped); rec.Code != http.StatusOK {
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"address": "127.0.0.1", "pools": []string{"pool-a"}}, &scoped); rec.Code != http.StatusOK {
 		t.Fatalf("授权内改动应 200: %d %s", rec.Code, rec.Body)
 	}
 	// allow_plaintext 是通道信任模型开关：host:edit 不带 host:enroll 不可改
-	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "allow_plaintext": true}, &scoped); rec.Code != http.StatusForbidden {
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"address": "127.0.0.1", "allow_plaintext": true}, &scoped); rec.Code != http.StatusForbidden {
 		t.Fatalf("scoped 置 allow_plaintext 应 403: %d %s", rec.Code, rec.Body)
 	}
-	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"Address": "127.0.0.1", "allow_plaintext": true}, &admin); rec.Code != http.StatusOK {
+	if rec := do(t, h, "PUT", fmt.Sprintf("/api/hosts/%d", haID), map[string]any{"address": "127.0.0.1", "allow_plaintext": true}, &admin); rec.Code != http.StatusOK {
 		t.Fatalf("admin 置 allow_plaintext 应 200: %d %s", rec.Code, rec.Body)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"wdp/internal/conn"
 )
 
 // TestBecomeCmdPasswordOnlyOnStdin 提权密码只经 stdin 传递，绝不进 argv；
@@ -134,8 +136,8 @@ func TestRunScriptOutputTruncation(t *testing.T) {
 	if resp.Code != 0 {
 		t.Fatalf("脚本应成功: %+v", resp)
 	}
-	if int64(len(resp.Stdout)) > maxExecOutputBytes+64 {
-		t.Fatalf("输出应被截断到 ~%d 字节，实际 %d", maxExecOutputBytes, len(resp.Stdout))
+	if int64(len(resp.Stdout)) > conn.MaxExecOutputBytes+64 {
+		t.Fatalf("输出应被截断到 ~%d 字节，实际 %d", conn.MaxExecOutputBytes, len(resp.Stdout))
 	}
 	if len(resp.Stdout) == 0 {
 		t.Fatal("截断后仍应有内容")

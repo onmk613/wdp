@@ -4,6 +4,7 @@
 // router.isReady()：初始导航挂起时 push 会打断守卫自己的重定向，形成
 // 无限循环（/api/me 的探测因此不走会派发本事件的 api()）。
 import { onMounted, onUnmounted } from 'vue'
+import zhCn from 'element-plus/dist/locale/zh-cn.mjs'
 import { resetAuth } from './auth'
 import { router } from './router'
 
@@ -22,7 +23,13 @@ onUnmounted(() => window.removeEventListener('wdp-unauthorized', onUnauthorized)
 </script>
 
 <template>
-  <router-view />
+  <!-- element-plus 按需引入后，原 app.use(ElementPlus, { locale }) 的全局
+       locale 迁到这里：ConfigProvider 首次挂载会把配置写进模块级
+       globalConfig，ElMessage/ElMessageBox 等脱离组件树渲染的命令式 API
+       也从这里兜底取（分页文案、确认框默认按钮字等） -->
+  <el-config-provider :locale="zhCn">
+    <router-view />
+  </el-config-provider>
 </template>
 
 <style>

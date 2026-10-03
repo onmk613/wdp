@@ -16,10 +16,10 @@ import (
 	"net/http"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"wdp/internal/store"
+	"wdp/internal/worker"
 )
 
 // ---- 池 / 组 / 标签注册表（同构 CRUD 收敛）----
@@ -284,9 +284,11 @@ type BatchResult struct {
 	Retired bool   `json:"retired,omitempty"`
 }
 
-// batchProbeConcurrency 批量探活的并发度（信号量）：逐台串行时单台最坏
-// 10s 超时随台数线性累加，百台批量的总时长不可用。
-const batchProbeConcurrency = 8
+// batchConcurrency 批量探活/批量删除的并发度：逐台串行时单台最坏 10s
+// 超时随台数线性累加，百台批量的总时长不可用。固定 worker 池
+// （worker.BoundedForeach）：逐台起 goroutine 只约束工作并发、约束不了
+// goroutine 创建，大批量会驻留海量阻塞在信号量上的协程。
+const batchConcurrency = 8
 
 func (s *Server) handleBatchHosts(w http.ResponseWriter, r *http.Request) {
 	var req BatchRequest
@@ -377,7 +379,9 @@ func (s *Server) batchResolveHost(p *userPerms, needVerb string, id int64) (*sto
 // 探活挂 background ctx 脱离请求生命周期（对齐 exec/upgrade/sshinstall
 // 的 background() 口径，动机见 httpx.background 注释）：r.Context() 会随
 // 客户端断连取消，把整批探活拦腰打断——而探活结果本来就要落库，不随
-// 断连作废。结果按请求顺序返回（槽位预分配，goroutine 只回填自己的槽）。
+// 断连作废。结果按请求顺序返回（槽位预分配，worker 只回填自己的槽）。
+// 落库前判 ctx.Err()（与 worker.Prober 同口径）：server 关停瞬间在途
+// 探测以失败收场，据此写库会把整批标成离线。
 func (s *Server) batchProbeHosts(p *userPerms, needVerb string, req *BatchRequest) []BatchResult {
 	results := make([]BatchResult, len(req.IDs))
 	var (
@@ -394,83 +398,74 @@ func (s *Server) batchProbeHosts(p *userPerms, needVerb string, req *BatchReques
 		pending = append(pending, h)
 		slots = append(slots, i)
 	}
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, batchProbeConcurrency)
 	ctx := s.background()
-	for k, h := range pending {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			pr := probeHost(ctx, h, s.probeClientFor(h))
-			_ = s.st.SetHostStatus(h.ID, pr.Status, pr.Build, probeModulesJSON(pr))
-			res := &results[slots[k]]
-			res.OK = pr.Status == "online"
-			res.Detail = pr.Status + " " + pr.Error
-		}()
-	}
-	wg.Wait()
+	_ = worker.BoundedForeach(ctx, pending, batchConcurrency, func(ctx context.Context, k int, h *store.Host) error {
+		pr := probeHost(ctx, h, s.probeClientFor(h))
+		res := &results[slots[k]]
+		res.OK = pr.Status == "online"
+		res.Detail = pr.Status + " " + pr.Error
+		if ctx.Err() != nil {
+			return nil // 关停不落库（响应槽位照填，尽力给到结论）
+		}
+		_ = s.st.SetHostStatus(h.ID, pr.Status, pr.Build, probeModulesJSON(pr))
+		return nil
+	})
 	return results
 }
 
 // batchDeleteHosts delete 动作（执行）：退役 agent（不可达仅告警）→ 删
 // 台账 → 回收差分快照与闸门锁。retireAgent 保持挂请求 ctx 不动（与单删
-// handleDeleteHost 同口径：退役是尽力而为的附带动作，不脱离请求执行）。
+// handleDeleteHost 同口径：退役是尽力而为的附带动作，不脱离请求执行）；
+// 因此 BoundedForeach 的取消截断也按请求生命周期生效——客户端断连后
+// 余下主机不再继续删（原实现"先起满 goroutine"的断连续删是派发副产品
+// 而非承诺，半批删除用户不可见反而更难对账，重试批次对已删台会得到
+// 「已被其他请求删除」的 OK）。
 func (s *Server) batchDeleteHosts(r *http.Request, p *userPerms, needVerb string, req *BatchRequest) []BatchResult {
-	// 有界并发（8）：retire 对不可达主机要等满连接超时，此前逐台串行
-	// 让百台级批量删除卡到分钟级——实测 120 台不可达主机无法在请求
-	// 超时内完成。结果按 ID 声明序回填（并发完成序不影响响应次序）。
-	type slot struct {
-		res BatchResult
-		// resolve 失败的占位（失败行不参与并发，直接落位）
-		failed bool
-	}
-	slots := make([]slot, len(req.IDs))
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 8)
+	// 有界并发（batchConcurrency）：retire 对不可达主机要等满连接超时，
+	// 此前逐台串行让百台级批量删除卡到分钟级——实测 120 台不可达主机
+	// 无法在请求超时内完成。结果按 ID 声明序回填（并发完成序不影响响应
+	// 次序）。
+	results := make([]BatchResult, len(req.IDs))
+	var (
+		pending []*store.Host // 待删除主机
+		slots   []int         // 对应 results 下标
+	)
 	for k, id := range req.IDs {
 		h, fail, ok := s.batchResolveHost(p, needVerb, id)
 		if !ok {
-			slots[k] = slot{res: fail, failed: true}
+			results[k] = fail
 			continue
 		}
-		slots[k].res = BatchResult{ID: id, Name: h.Name}
-		wg.Add(1)
-		go func(k int, id int64, h *store.Host) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			res := slots[k].res
-			// 单台退役限时 10s：不可达不该拖垮整批（退役本就是尽力而为）
-			rctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-			defer cancel()
-			retired, warn := s.retireAgent(rctx, h)
-			if err := s.st.DeleteHost(id); err != nil {
-				// 同单删：并发把行删掉时 ErrNotFound 不算失败，「已被删除」
-				if errors.Is(err, store.ErrNotFound) {
-					slots[k].res = BatchResult{ID: id, Name: h.Name, OK: true, Detail: "已被其他请求删除"}
-					return
-				}
-				slots[k].res = BatchResult{ID: id, Name: h.Name, Detail: err.Error()}
-				return
-			}
-			// 同单删：回收差分快照与闸门锁
-			s.monitor.Forget(id)
-			s.gate.Forget(id)
-			res.OK = true
-			res.Retired = retired
-			if warn != "" {
-				res.Detail = "agent 退役失败: " + warn
-			}
-			slots[k].res = res
-		}(k, id, h)
+		results[k] = BatchResult{ID: id, Name: h.Name}
+		pending = append(pending, h)
+		slots = append(slots, k)
 	}
-	wg.Wait()
-	results := make([]BatchResult, 0, len(req.IDs))
-	for k := range slots {
-		results = append(results, slots[k].res)
-	}
+	_ = worker.BoundedForeach(r.Context(), pending, batchConcurrency, func(ctx context.Context, k int, h *store.Host) error {
+		id := h.ID
+		// 单台退役限时 10s：不可达不该拖垮整批（退役本就是尽力而为）
+		rctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		retired, warn := s.retireAgent(rctx, h)
+		res := &results[slots[k]]
+		if err := s.st.DeleteHost(id); err != nil {
+			// 同单删：并发把行删掉时 ErrNotFound 不算失败，「已被删除」
+			if errors.Is(err, store.ErrNotFound) {
+				*res = BatchResult{ID: id, Name: h.Name, OK: true, Detail: "已被其他请求删除"}
+				return nil
+			}
+			*res = BatchResult{ID: id, Name: h.Name, Detail: err.Error()}
+			return nil
+		}
+		// 同单删：回收差分快照与闸门锁
+		s.monitor.Forget(id)
+		s.gate.Forget(id)
+		res.OK = true
+		res.Retired = retired
+		if warn != "" {
+			res.Detail = "agent 退役失败: " + warn
+		}
+		return nil
+	})
 	return results
 }
 

@@ -13,23 +13,28 @@ import (
 
 // Host 是纳管主机台账行。labels 为 JSON 对象字符串（前端展开）；
 // status 由 server 探活循环维护（unknown/online/offline）。
+//
+// 命名口径：JSON tag 统一 snake_case（此前 API 响应按 Go 导出名序列化成
+// PascalCase，与 users/exec/settings 等既有 snake_case 端点两套混用，现
+// 全目录统一）；Go 字段名不动，SQL 列名由语句决定、与 json tag 无关，
+// 请求解码大小写不敏感故请求侧不受影响。
 type Host struct {
-	ID         int64
-	Name       string
-	Address    string
-	AgentPort  int
-	Pools      []string // 多值：一台主机可属多个池（用户/权限分配的基础）
-	Groups     []string // 多值：同上
-	Labels     string   // JSON 对象（天然多值）
-	Status     string
-	AgentBuild string // 最近一次在线探活上报的 build（升级门控用；离线不清空=保留最后已知）
+	ID         int64    `json:"id"`
+	Name       string   `json:"name"`
+	Address    string   `json:"address"`
+	AgentPort  int      `json:"agent_port"`
+	Pools      []string `json:"pools"`  // 多值：一台主机可属多个池（用户/权限分配的基础）
+	Groups     []string `json:"groups"` // 多值：同上
+	Labels     string   `json:"labels"` // JSON 对象（天然多值）
+	Status     string   `json:"status"`
+	AgentBuild string   `json:"agent_build"` // 最近一次在线探活上报的 build（升级门控用；离线不清空=保留最后已知）
 	// AgentModules 是 agent /info 上报的内置模块集（JSON 数组串；'' = 未知
 	// ——老 agent 无该端点或尚未探活。执行受理期与应用版本的模块清单对账，
 	// 缺模块在受理期拒绝，未知按放行兼容存量）。
-	AgentModules string
-	LastSeenAt   string
-	CreatedAt    string
-	UpdatedAt    string
+	AgentModules string `json:"agent_modules"`
+	LastSeenAt   string `json:"last_seen_at"`
+	CreatedAt    string `json:"created_at"`
+	UpdatedAt    string `json:"updated_at"`
 	// AllowPlaintext 声明该主机的 agent 未启用 mTLS（明文 HTTP，仅限可信
 	// 内网）。默认 false：CA 启用时一律按 mTLS 建连，避免"探测失败即降级
 	// 明文"这种可被中间人触发的通道降级。
@@ -325,7 +330,34 @@ func (s *Store) UpsertHostByName(name, address string, agentPort int) (int64, er
 	return id, nil
 }
 
-// HostIDs 返回全部主机 id（探活遍历）。
+// AllHosts 一次查询取全部主机的标量列（Pools/Groups 为 nil）。周期扫描
+// （Prober 探活 / Monitor 采样）原先每轮 HostIDs() 后逐台 GetHost()——
+// 千台台账即每分钟 2×1000 次单行查询（N+1），本方法把整轮主机读取收敛
+// 为一次查询。不复用 ListHosts：它的池/组 group_concat 是逐行相关子查询
+// 且按 name 排序，扫描路径两样都不消费，全量台账上是纯开销；需要多值
+// 归属的调用方仍走 ListHosts/GetHost。
+func (s *Store) AllHosts() ([]*Host, error) {
+	rows, err := s.query(`SELECT id, name, address, agent_port, labels, status, agent_build, agent_modules, last_seen_at, created_at, updated_at, allow_plaintext FROM hosts`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Host{} // 非 nil：空台账编码为 []（与 ListHosts 同口径）
+	for rows.Next() {
+		h := &Host{}
+		var plaintext int
+		if err := rows.Scan(&h.ID, &h.Name, &h.Address, &h.AgentPort, &h.Labels, &h.Status, &h.AgentBuild, &h.AgentModules, &h.LastSeenAt, &h.CreatedAt, &h.UpdatedAt, &plaintext); err != nil {
+			return nil, err
+		}
+		h.AllowPlaintext = plaintext != 0
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// HostIDs 返回全部主机 id。周期扫描已改走 AllHosts（HostIDs + 逐台
+// GetHost 是每轮 2×N 次单行查询的 N+1）；保留给仅需 id 的调用方与存量
+// 测试装配。
 func (s *Store) HostIDs() ([]int64, error) {
 	rows, err := s.query(`SELECT id FROM hosts`)
 	if err != nil {

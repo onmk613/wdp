@@ -73,8 +73,8 @@ async function loadVersions(appID: number, force = false) {
 }
 
 function onExpandChange(row: App, rows: App[]) {
-  expanded.value = rows.map((r) => r.ID)
-  if (rows.some((r) => r.ID === row.ID)) loadVersions(row.ID)
+  expanded.value = rows.map((r) => r.id)
+  if (rows.some((r) => r.id === row.id)) loadVersions(row.id)
 }
 
 function toggleExpand(row: App) {
@@ -103,7 +103,7 @@ async function batchDelete() {
   } catch {
     return
   }
-  const ids = selection.value.map((a) => a.ID)
+  const ids = selection.value.map((a) => a.id)
   try {
     const r = await api<{ ok: number; failed: number }>('POST', '/api/apps/batch', { ids, action: 'delete' })
     if (r.failed === 0) ElMessage.success(`已删除 ${r.ok} 个应用`)
@@ -142,7 +142,7 @@ async function submitAddVersion() {
   }
   verLoading.value = true
   try {
-    await upload(`/api/apps/${appSel.value.ID}/versions/upload`, { note: verForm.note }, verFile.value)
+    await upload(`/api/apps/${appSel.value.id}/versions/upload`, { note: verForm.note }, verFile.value)
     ElMessage.success('新版本已上传（版本号取自 chart.yaml，已置为最新）')
     verVisible.value = false
     await load()
@@ -156,8 +156,8 @@ async function submitAddVersion() {
 // ---- 版本操作 ----
 async function setLatest(app: App, v: AppVersion) {
   try {
-    await api('POST', `/api/apps/${app.ID}/versions/${v.ID}/latest`, {})
-    ElMessage.success(`已将 ${v.Version} 设为默认版本（latest）`)
+    await api('POST', `/api/apps/${app.id}/versions/${v.id}/latest`, {})
+    ElMessage.success(`已将 ${v.version} 设为默认版本（latest）`)
     await load()
   } catch (e) {
     ElMessage.error((e as Error).message)
@@ -167,7 +167,7 @@ async function setLatest(app: App, v: AppVersion) {
 async function deleteVersion(app: App, v: AppVersion) {
   try {
     await ElMessageBox.confirm(
-      `删除 ${app.Name} 的版本 ${v.Version}？该版本 tgz 制品一并删除（不可恢复）。`,
+      `删除 ${app.name} 的版本 ${v.version}？该版本 tgz 制品一并删除（不可恢复）。`,
       '删除版本', { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
   } catch {
@@ -176,7 +176,7 @@ async function deleteVersion(app: App, v: AppVersion) {
   try {
     // 版本列表不再消费 DELETE 响应：load() 会对展开行强制重拉版本
     //（loadVersions(id, true)），此处再赋值就是同一份数据拉两遍
-    await api<AppVersion[]>('DELETE', `/api/apps/${app.ID}/versions/${v.ID}`)
+    await api<AppVersion[]>('DELETE', `/api/apps/${app.id}/versions/${v.id}`)
     ElMessage.success('已删除')
     await load()
   } catch (e) {
@@ -185,14 +185,14 @@ async function deleteVersion(app: App, v: AppVersion) {
 }
 
 function editFromVersion(app: App, v: AppVersion) {
-  void router.push({ path: '/apps/ide', query: { app: String(app.ID), ...(v.Version ? { base: v.Version } : {}) } })
+  void router.push({ path: '/apps/ide', query: { app: String(app.id), ...(v.version ? { base: v.version } : {}) } })
 }
 
 // 下载版本制品：attachment 响应直接触发浏览器下载（不走 api() —— 它
 // 会把响应体按 JSON 解析）
 function downloadVersion(app: App, v: AppVersion) {
   const a = document.createElement('a')
-  a.href = appDownloadURL(app.ID, v.Version)
+  a.href = appDownloadURL(app.id, v.version)
   a.download = ''
   document.body.appendChild(a)
   a.click()
@@ -207,22 +207,22 @@ const scopeApp = ref<App | null>(null)
 const scopeVer = ref('')
 const scopeForm = reactive({ pools: [] as string[], groups: [] as string[] })
 const scopeLabels = ref<Record<string, string>>({})
-const labelKeys = computed(() => labels.value.map((l) => l.Key))
-const poolNames = computed(() => pools.value.map((p) => p.Name))
-const groupNames = computed(() => groups.value.map((g) => g.Name))
+const labelKeys = computed(() => labels.value.map((l) => l.key))
+const poolNames = computed(() => pools.value.map((p) => p.name))
+const groupNames = computed(() => groups.value.map((g) => g.name))
 
 // 打开即按该版本回填（spec 端点返回版本自己的 scope）；读取失败回退应用级
 async function openScope(app: App, v: AppVersion) {
   scopeApp.value = app
-  scopeVer.value = v.Version
+  scopeVer.value = v.version
   scopeForm.pools = []
   scopeForm.groups = []
-  scopeLabels.value = parseLabels(app.Labels)
+  scopeLabels.value = parseLabels(app.labels)
   scopeVisible.value = true
   scopeLoading.value = true
   try {
     const spec = await api<{ pools: string[] | null; groups: string[] | null; labels: string }>(
-      'GET', `/api/apps/${app.ID}/spec?version=${encodeURIComponent(v.Version)}`,
+      'GET', `/api/apps/${app.id}/spec?version=${encodeURIComponent(v.version)}`,
     )
     scopeForm.pools = spec.pools || []
     scopeForm.groups = spec.groups || []
@@ -241,13 +241,13 @@ async function submitScope() {
   if (!scopeApp.value) return
   scopeSaving.value = true
   try {
-    await api('PUT', `/api/apps/${scopeApp.value.ID}/scope`, {
+    await api('PUT', `/api/apps/${scopeApp.value.id}/scope`, {
       version: scopeVer.value,
       pools: scopeForm.pools,
       groups: scopeForm.groups,
       labels: JSON.stringify(scopeLabels.value || {}),
     })
-    ElMessage.success(`已变更 ${scopeApp.value.Name}@${scopeVer.value} 的作用域（未升版本）`)
+    ElMessage.success(`已变更 ${scopeApp.value.name}@${scopeVer.value} 的作用域（未升版本）`)
     scopeVisible.value = false
     await load()
   } catch (e) {
@@ -282,7 +282,7 @@ onMounted(() => load())
         ref="tableRef"
         :data="apps"
         v-loading="loading"
-        row-key="ID"
+        row-key="id"
         style="width: 100%"
         @selection-change="onSelectionChange"
         @expand-change="onExpandChange"
@@ -293,27 +293,27 @@ onMounted(() => load())
             <div class="versions">
               <div class="versions-head">
                 <span class="muted">
-                  共 {{ versions[row.ID]?.length ?? row.VersionCount }} 个版本 ·
-                  默认版本 <b>{{ row.LatestVersion }}</b>（latest）
+                  共 {{ versions[row.id]?.length ?? row.version_count }} 个版本 ·
+                  默认版本 <b>{{ row.latest_version }}</b>（latest）
                 </span>
                 <div style="flex: 1" />
                 <el-button v-if="can('app:upload')" size="small" :icon="Upload" @click="openAddVersion(row)">上传新版本</el-button>
               </div>
-              <el-table :data="versions[row.ID] || []" size="small" v-loading="loadingVersions[row.ID]">
+              <el-table :data="versions[row.id] || []" size="small" v-loading="loadingVersions[row.id]">
                 <el-table-column label="版本" min-width="140">
                   <template #default="{ row: v }">
-                    <el-tag v-if="v.Version === row.LatestVersion" type="success" size="small" effect="dark">latest</el-tag>
-                    <span class="ver">{{ v.Version }}</span>
+                    <el-tag v-if="v.version === row.latest_version" type="success" size="small" effect="dark">latest</el-tag>
+                    <span class="ver">{{ v.version }}</span>
                   </template>
                 </el-table-column>
-                <el-table-column prop="Note" label="备注" min-width="160">
-                  <template #default="{ row: v }"><span class="muted">{{ v.Note || '-' }}</span></template>
+                <el-table-column prop="note" label="备注" min-width="160">
+                  <template #default="{ row: v }"><span class="muted">{{ v.note || '-' }}</span></template>
                 </el-table-column>
                 <el-table-column label="大小" width="90">
-                  <template #default="{ row: v }">{{ (v.Size / 1024).toFixed(0) }} KB</template>
+                  <template #default="{ row: v }">{{ (v.size / 1024).toFixed(0) }} KB</template>
                 </el-table-column>
-                <el-table-column prop="CreatedAt" label="修改时间" min-width="165">
-                  <template #default="{ row: v }"><span class="muted">{{ fmtTime(v.CreatedAt) }}</span></template>
+                <el-table-column prop="created_at" label="修改时间" min-width="165">
+                  <template #default="{ row: v }"><span class="muted">{{ fmtTime(v.created_at) }}</span></template>
                 </el-table-column>
                 <el-table-column label="操作" width="360" fixed="right">
                   <template #default="{ row: v }">
@@ -321,7 +321,7 @@ onMounted(() => load())
                     <el-button link :icon="Download" @click="downloadVersion(row, v)">下载</el-button>
                     <el-button v-if="can('app:scope')" link :icon="PriceTag" @click="openScope(row, v)">作用域</el-button>
                     <el-button
-                      v-if="v.Version !== row.LatestVersion"
+                      v-if="v.version !== row.latest_version"
                       link
                       type="primary"
                       :icon="Star"
@@ -340,37 +340,37 @@ onMounted(() => load())
         </el-table-column>
         <el-table-column label="应用" min-width="160">
           <template #default="{ row }">
-            <el-button link type="primary" @click="toggleExpand(row)">{{ row.Name }}</el-button>
+            <el-button link type="primary" @click="toggleExpand(row)">{{ row.name }}</el-button>
           </template>
         </el-table-column>
         <el-table-column label="默认版本" min-width="120">
           <template #default="{ row }">
-            <el-tag type="success" effect="plain">{{ row.LatestVersion || '-' }}</el-tag>
+            <el-tag type="success" effect="plain">{{ row.latest_version || '-' }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="版本数" width="80" prop="VersionCount" />
+        <el-table-column label="版本数" width="80" prop="version_count" />
         <el-table-column label="池" min-width="120">
           <template #default="{ row }">
-            <el-tag v-for="p in row.Pools || []" :key="p" type="warning" effect="plain" size="small" class="tag">{{ p }}</el-tag>
-            <span v-if="!(row.Pools || []).length" class="muted">-</span>
+            <el-tag v-for="p in row.pools || []" :key="p" type="warning" effect="plain" size="small" class="tag">{{ p }}</el-tag>
+            <span v-if="!(row.pools || []).length" class="muted">-</span>
           </template>
         </el-table-column>
         <el-table-column label="组" min-width="100">
           <template #default="{ row }">
-            <el-tag v-for="g in row.Groups || []" :key="g" type="info" effect="plain" size="small" class="tag">{{ g }}</el-tag>
-            <span v-if="!(row.Groups || []).length" class="muted">-</span>
+            <el-tag v-for="g in row.groups || []" :key="g" type="info" effect="plain" size="small" class="tag">{{ g }}</el-tag>
+            <span v-if="!(row.groups || []).length" class="muted">-</span>
           </template>
         </el-table-column>
         <el-table-column label="标签" min-width="140">
           <template #default="{ row }">
-            <el-tag v-for="(v, k) in parseLabels(row.Labels)" :key="k" size="small" effect="plain" class="tag">
+            <el-tag v-for="(v, k) in parseLabels(row.labels)" :key="k" size="small" effect="plain" class="tag">
               {{ v ? `${k}=${v}` : k }}
             </el-tag>
-            <span v-if="!Object.keys(parseLabels(row.Labels)).length" class="muted">-</span>
+            <span v-if="!Object.keys(parseLabels(row.labels)).length" class="muted">-</span>
           </template>
         </el-table-column>
-        <el-table-column prop="UpdatedAt" label="最近修改" min-width="170">
-          <template #default="{ row }"><span class="muted">{{ fmtTime(row.UpdatedAt) }}</span></template>
+        <el-table-column prop="updated_at" label="最近修改" min-width="170">
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.updated_at) }}</span></template>
         </el-table-column>
         <template #empty>
           <el-empty description="还没有应用：上传 chart.tgz 创建，或在「新建应用」用 IDE 从零搭建" />
@@ -379,7 +379,7 @@ onMounted(() => load())
     </el-card>
 
     <!-- 版本作用域就地变更（不升版本） -->
-    <el-dialog v-model="scopeVisible" :title="`作用域变更 · ${scopeApp?.Name || ''}@${scopeVer}`" width="560px">
+    <el-dialog v-model="scopeVisible" :title="`作用域变更 · ${scopeApp?.name || ''}@${scopeVer}`" width="560px">
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 14px"
         title="就地变更该版本的池/组/标签，不产生新版本（后期的权限调整）；默认版本会同步应用级作用域。" />
       <el-form label-width="90px" v-loading="scopeLoading">
@@ -404,7 +404,7 @@ onMounted(() => load())
     </el-dialog>
 
     <!-- 上传新版本 -->
-    <el-dialog v-model="verVisible" :title="`上传新版本 · ${appSel?.Name || ''}`" width="480px">
+    <el-dialog v-model="verVisible" :title="`上传新版本 · ${appSel?.name || ''}`" width="480px">
       <el-alert type="info" :closable="false" show-icon style="margin-bottom: 12px"
         title="版本号取自 chart.yaml 的 version：与已有版本重复会被拒绝（版本不可覆盖），请先改 chart.yaml。" />
       <el-form label-width="90px">

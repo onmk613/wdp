@@ -82,6 +82,30 @@ func TestLocalExec(t *testing.T) {
 	})
 }
 
+// TestLocalExecOutputTruncation 单流输出超 1MiB 截断（防内存放大）——
+// 回归：local 通道此前用无界 bytes.Buffer，是三通道里唯一漏掉输出上限的。
+func TestLocalExecOutputTruncation(t *testing.T) {
+	l := newLocal()
+	res, err := l.Exec(context.Background(), conn.ExecRequest{
+		Script: "head -c 1572864 /dev/zero | tr '\\0' 'x'",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Code != 0 {
+		t.Fatalf("脚本应成功: %+v", res)
+	}
+	if int64(len(res.Stdout)) > conn.MaxExecOutputBytes+64 {
+		t.Fatalf("输出应被截断到 ~%d 字节，实际 %d", conn.MaxExecOutputBytes, len(res.Stdout))
+	}
+	if len(res.Stdout) == 0 {
+		t.Fatal("截断后仍应有内容")
+	}
+	if !strings.Contains(res.Stdout, "[wdp-local] output exceeded 1MiB and was truncated") {
+		t.Fatalf("截断后应带 local 标记: %q 尾部", res.Stdout[len(res.Stdout)-80:])
+	}
+}
+
 // TestLocalUploadFile 覆盖 UploadFile：内容校验、默认/显式权限位、
 // 目标父目录自动创建与临时文件原子改名（无残留）。
 func TestLocalUploadFile(t *testing.T) {

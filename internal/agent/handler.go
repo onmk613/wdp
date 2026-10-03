@@ -171,6 +171,11 @@ func (s *Server) handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		mode = fs.FileMode(n)
 	}
+	if !s.filePathAllowed(path) {
+		s.logWarn("upload refused: path %s outside allowed file roots", path)
+		http.Error(w, "path outside allowed file roots", http.StatusForbidden)
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		http.Error(w, "failed to create directory: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -232,6 +237,11 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing path parameter", http.StatusBadRequest)
 		return
 	}
+	if !s.filePathAllowed(path) {
+		s.logWarn("download refused: path %s outside allowed file roots", path)
+		http.Error(w, "path outside allowed file roots", http.StatusForbidden)
+		return
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		http.Error(w, "failed to open file: "+err.Error(), http.StatusNotFound)
@@ -258,6 +268,11 @@ func (s *Server) handleArchive(w http.ResponseWriter, r *http.Request) {
 	dest := r.URL.Query().Get("dest")
 	if src == "" || dest == "" {
 		http.Error(w, "missing src/dest parameter", http.StatusBadRequest)
+		return
+	}
+	if !s.filePathAllowed(src) || !s.filePathAllowed(dest) {
+		s.logWarn("extract refused: %s -> %s outside allowed file roots", src, dest)
+		http.Error(w, "path outside allowed file roots", http.StatusForbidden)
 		return
 	}
 	s.logInfo("extract %s -> %s", src, dest)

@@ -14,7 +14,7 @@ export { controlKeys }
 export function playKeysSet(meta: SchemaMeta | null): Set<string> {
   const s = new Set<string>()
   if (!meta) return s
-  for (const sec of meta.play) for (const f of sec.Fields) s.add(f.Name)
+  for (const sec of meta.play) for (const f of sec.fields) s.add(f.name)
   s.add('tasks')
   s.add('handlers')
   return s

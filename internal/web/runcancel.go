@@ -98,6 +98,17 @@ func (s *Server) handleCancelRun(w http.ResponseWriter, r *http.Request) {
 		s.writeStoreErr(w, err)
 		return
 	}
+	// 越权取消守卫：与详情（run:view 裁剪）和 exec 流（run:execute 交集）
+	// 同口径——此前路由只要求全局 run:execute，持作用域权限的用户可取消
+	// 任意用户对任意主机的在途 run（干扰级越权），是权限模型里唯一漏掉
+	// 可见性判定的变更类端点。
+	if allowed := s.hostScopeSet(r, verbRunExec); allowed != nil {
+		vc := &runViewCtx{allowedIDs: allowed}
+		if !vc.runVisible(run) {
+			permRun403(w)
+			return
+		}
+	}
 	if run.Status != "queued" && run.Status != "running" {
 		writeError(w, http.StatusConflict, fmt.Sprintf("run 已结束（%s），无需取消", run.Status))
 		return

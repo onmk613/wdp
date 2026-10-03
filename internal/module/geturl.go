@@ -249,7 +249,11 @@ func (m *GetURLModule) remoteScript(url, dest, wantSum string, mode fs.FileMode,
 		fmt.Fprintf(&b, "[ \"$sum\" = %s ] || { rm -f \"$tmp\"; echo 'checksum mismatch' >&2; exit 42; }\n", q(wantSum))
 	}
 	fmt.Fprintf(&b, "chmod %#o \"$tmp\" && mv -f \"$tmp\" %s\n", mode.Perm(), q(dest))
-	b.WriteString("sum=\"\"\nif command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum \"$dest\" 2>/dev/null | awk '{print $1}'); else sum=$(shasum -a 256 \"$dest\" 2>/dev/null | awk '{print $1}'); fi\n")
+	// 回归：此处曾引用未定义的 shell 变量 $dest（脚本其余位置都用 q(dest)
+	// 字面量），sha256sum "" 在 2>/dev/null 下静默失败、wdp_sum 恒空 →
+	// 上层"内容未变"判定（newSum == ""）恒判 changed，幂等/notify/审计
+	// 计数全部失真；单测曾以 mock conn 直接喂 wdp_sum=abc 掩盖了它。
+	fmt.Fprintf(&b, "sum=\"\"\nif command -v sha256sum >/dev/null 2>&1; then sum=$(sha256sum %s 2>/dev/null | awk '{print $1}'); else sum=$(shasum -a 256 %s 2>/dev/null | awk '{print $1}'); fi\n", q(dest), q(dest))
 	b.WriteString("echo \"wdp_sum=$sum\"\n")
 	b.WriteString("rm -f \"$tmp\" 2>/dev/null\nexit 0\n")
 	return b.String()

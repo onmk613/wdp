@@ -23,11 +23,13 @@
 |---|---|
 | Deployment | `run`、`plan`、`apply`、`adhoc` |
 | Package | `schema`、`module`、`render`、`lint`、`package` |
+| Repository | `repo` |
 | Security | `ca` |
 | Agent | `agent`、`agentctl` |
+| Console | `server` |
 | Operations | `drift`、`release`、`inv`（别名 `inventory`） |
 
-共 5 个分组，与 `wdp --help` 的分类一致。`plan`/`apply` 的自治执行语义见 [15 自治执行](15-自治执行改造方案.md)。
+共 7 个分组，与 `wdp --help` 的分类一致。`plan`/`apply` 的自治执行语义见 [15 自治执行](15-自治执行改造方案.md)。
 
 版本信息用框架自带的 `wdp --version`。
 
@@ -168,7 +170,7 @@ wdp schema [host|task|chart] [--json]
 
 **YAML 结构字段速查**（写 inventory / playbook / chart 前的骨架参考，区别于具体模块的参数文档）：
 
-- `wdp schema host` — 主机条目可用的全部连接参数键（地址/SSH 认证/TLS/提权口令/agent 与 push 专属），未列出的键一律视为主机变量
+- `wdp schema host` — 主机条目可用的全部连接参数键（地址/SSH 认证/TLS/提权口令/agent 等通道专属），未列出的键一律视为主机变量
 - `wdp schema task` — 任务控制属性全表（条件/循环/重试/提权/委托/结果判定/容错块），按语义分组附可粘贴示例
 - `wdp schema chart` — `chart.yaml` 全部字段（标识/values 契约/marker 与预演/phases）**加相位属性全表**（`release`/`record`/`clears_marker`/`values_from`，含缺省值与推导规则），按语义分组附示例
 - `--json` 机器可读（编辑器插件/脚本）；无参打总览
@@ -214,6 +216,73 @@ wdp package <chart目录> [-o/--out-dir 输出目录]
 
 先加载校验再打包为 `<name>-<version>.tgz`（包内顶层 `<name>/` 前缀，可直接 `wdp run`）。
 
+## wdp server
+
+启动 Web 控制台（Console 分组，web-console 方向的组合根）：主机台账与探活、
+agent 纳管（token 脚本拉取 / SSH 推装两种引导）、远程执行、chart 版本化管理。
+运维脚本 `scripts/server.sh`（start/stop/restart/status/log）以后台进程方式
+拉起本命令，并把常用 flag 暴露为环境变量（`WDP_ADDR` / `WDP_ADVERTISE` /
+`WDP_DATA` / `WDP_DB` / `WDP_ADMIN_USER` / `WDP_ADMIN_PASS` /
+`WDP_ALLOW_PLAINTEXT_ENROLL`）。
+
+```
+wdp server [--addr 127.0.0.1:7603] [--data wdp-data] [--db <地址>]
+           [--admin-user admin] [--admin-pass <密码> | --admin-pass-env <变量>]
+           [--advertise <基址>] [--ca-days 3650]
+           [--tls-cert <证书> --tls-key <私钥>] [--trust-proxy <IP/CIDR>（可多次）]
+           [--allow-plaintext-enroll]
+           [--runs-retention-days 90] [--audit-retention-days 180] [--drafts-retention-days 30]
+```
+
+| flag | 默认 | 说明 |
+|---|---|---|
+| `--addr` | 127.0.0.1:7603 | 监听地址（保持在回环地址，或置于 TLS 反向代理之后；目标机纳管需回连时显式 `0.0.0.0:端口`） |
+| `--data` | wdp-data | 存放 wdp.db 与纳管 CA 的数据目录（建议绝对路径；相对默认值随工作目录漂移）。0700 创建 |
+| `--db` | `<data>/wdp.db` | 数据库地址，缺省即本地 SQLite 文件（纯 Go 驱动，零外部依赖，单文件随数据目录整体备份/搬迁）。也接受 `postgres://user:pass@host:5432/db`、`mysql://user:pass@host:3306/db`、`sqlite:///path` 或裸文件路径；密码建议写 `${VAR}` 由环境变量注入（wdp 在解析时插值），日志与报错里的地址一律遮掉密码 |
+| `--admin-user` | admin | 控制台管理员账号名 |
+| `--admin-pass` | 空 | 管理员密码：每次启动都确保账号密码与该值一致（改值后重启即改密，幂等）。经命令行传参对同机用户可见（ps）且进 shell 历史，启动时打印告警——建议改用 `--admin-pass-env` |
+| `--admin-pass-env` | 空 | 存放管理员密码的环境变量名 |
+| `--advertise` | 空（按请求 Host 推导） | 纳管脚本回连 server 的外部可达基址，须为 https://（明文 http:// 仅在 `--allow-plaintext-enroll` 豁免下可用）。目标机需回连时与 `--addr 0.0.0.0` 配套给出 |
+| `--ca-days` | 3650 | 纳管 CA 有效期（天，仅首启自举时生效；缺省 10 年） |
+| `--tls-cert` / `--tls-key` | 空 | 控制台原生 TLS 证书/私钥文件（用原生 TLS 替代反向代理；证书可用 `wdp ca issue` 签发） |
+| `--trust-proxy` | 空 | 可信反向代理的 IP/CIDR（可多次）：其 X-Forwarded-For 用于审计/客户端 IP（回环地址始终可信；直连客户端无法伪造） |
+| `--allow-plaintext-enroll` | false | 允许在明文 HTTP 下生成纳管命令（仅限可信网络；脚本在目标机以 root 执行）。SSH 推装凭据的提交是同一门禁口径 |
+| `--runs-retention-days` | 90 | 清理超过此天数的已完成 run（含任务明细与脚本证据；0 = 永久保留） |
+| `--audit-retention-days` | 180 | 清理超过此天数的审计日志条目（0 = 永久保留） |
+| `--drafts-retention-days` | 30 | 清理超过此天数的废弃编辑器草稿（0 = 永久保留） |
+
+行为要点：
+
+- **管理员账号**：显式给出 `--admin-pass` / `--admin-pass-env` 时，每次启动确保
+  账号密码与之一致（幂等，改值重启即改密）；均未给出则仅首启随机生成并打印
+  一次（在日志开头——`scripts/server.sh` 已把日志收敛为 0600）。
+- **首启自举纳管信任链**（`<data>/ca`）：根 CA（`--ca-days`，缺省 10 年）+
+  控制端客户端证书。根 CA 私钥默认明文（0600）落盘；设 `WDP_CA_PASS` 环境
+  变量后首启自举的根 CA 私钥以口令加密（此后每次启动都需同一环境变量）。
+- **主机纳管**：控制台生成一次性 token（默认 30 分钟有效），在目标机执行下发
+  的一键命令即完成安装——脚本按目标机架构从 server 拉取 wdp 二进制（server
+  须运行在 build.sh 产出的多架构 bin 目录中，bin/ 必须与运行中的 server 二进制
+  一起保留）、`wdp agent gencsr` 在目标机本地生成私钥并领取逐主机证书（CSR
+  流程，见 [20 CSR 纳管](20-CSR纳管改造方案.md)）、装配 systemd 常驻 agent，
+  全程 mTLS。目标机无法回连时改用 SSH 推装（凭据仅内存态使用，不落库）。
+- **应用库**：同时以 Helm 兼容 chart 仓库暴露（`/charts/index.yaml` 与
+  `/charts/<name>-<version>.tgz`，会话/Basic 认证），CLI 侧 `wdp repo` 与
+  `wdp run --repo` 消费。
+- **明文闸门**：下发的纳管脚本以 root 执行，默认拒绝在明文 HTTP 下生成一键
+  命令（脚本内嵌的 CA 指纹与脚本同源，挡不住主动中间人）；确需在可信内网
+  明文引导时显式加 `--allow-plaintext-enroll`。
+- **数据库选择**：多副本部署选 PostgreSQL/MySQL——本地数据目录排他锁只在
+  SQLite 下生效（SQLite 单写者，双开会静默互踩，锁就是挡这个的），网络库的
+  并发由数据库自身的事务与约束保证。
+- 公网暴露请置于反向代理 TLS 之后，或用 `--tls-cert/--tls-key` 启用原生 TLS。
+
+```sh
+wdp server                                        # 本机体验，浏览器开 http://127.0.0.1:7603
+wdp server --addr 0.0.0.0:7603 --advertise https://10.0.0.5:7603 --admin-pass-env WDP_ADMIN_PASS
+wdp server --addr 0.0.0.0:7603 --tls-cert /etc/wdp/console.crt --tls-key /etc/wdp/console.key
+./scripts/server.sh start                         # 运维封装：后台运行 + 日志 + 就绪探测
+```
+
 ## wdp repo（chart 仓库客户端）
 
 `wdp server` 把应用库以 **Helm 兼容仓库**暴露在 `/charts` 下
@@ -229,11 +298,17 @@ wdp repo pull nginx --tgz                  # 保留 .tgz 包（lint/plan/render 
 wdp repo push app-1.2.0.tgz --repo …       # 登录后走应用上传（chart.yaml 定名/版本）
 ```
 
-- 拉取/推送都做 **sha256 digest 校验**（索引 digest 即入库校验和）；
+| 子命令 | 说明 |
+|---|---|
+| `list` | 列出仓库中的 chart 与版本（每个 chart 最多示近三版，全量看 `show`） |
+| `show <name>` [--version] | chart 详情：描述 / 创建时间 / digest / 相位 / URL；`--version` 缺省最新版并附全部版本列表 |
+| `pull <name>` [--version] [--dest] [--tgz] | 从仓库下载并按索引 **sha256 digest 校验**；`--dest`（默认 `./charts`）下默认解包为 `<name>/` 目录，`--tgz` 改存 `<name>-<version>.tgz` 包；`--version` 缺省最新 |
+| `push <chart.tgz>` | 上传 chart 包到控制台应用库（**必须** `--repo-auth` 凭据：登录换会话后复用 Web 上传端点） |
+
 - `pull` 默认解包到 `./charts/<name>/`——与裸 playbook 的 chart 引用
   解析根一致，拉完即可 `wdp run`；
 - `push` 复用 Web 上传端点：权限（`app:upload`）、审计、「版本发布后
-  不可覆盖」口径完全一致。
+  不可覆盖」口径完全一致（入库时算得的 sha256 即索引 digest，供拉取侧校验）。
 
 ### run 直接引用仓库 chart
 
@@ -326,7 +401,7 @@ wdp ca show   <证书路径> [--key <私钥路径>]
 | `--san` | 追加额外 SAN（可多次）：裸值按 IP/DNS 自动识别；`uri:spiffe://…` 与 `email:a@b.c` 前缀签 URI/Email SAN——多地址/NAT/端口转发主机一张证书覆盖全部可达地址，`renew` 续期时全量继承（含 URI/Email） |
 | `renew` | **更新延期，全显式无命名约定**：`--cert` 旧证书必填；保留私钥模式 `--key` 必填（会校验与证书公钥配对，不配对拒绝），`--new-key` 换钥则无需旧钥；位置参数 = **新证书输出路径**（缺省当前目录，新私钥为同目录同名 `.key`）；身份字段（CN/SAN 四类/EKU/密钥算法）全部继承，`--days` 为在当前到期上**增加**的天数（默认 30，钳制到 CA 到期）。**新旧同目录时**旧证书/私钥先改名 `*.old.<时间戳>` 备份；输出到别处则旧件原地不动 |
 | `--ca-cert/--ca-key` | 指定**根 CA（签发者）**的证书与私钥——用它给新证书**签名**，不是要生成/续期的证书本身（新证书输出到 `<输出目录>/<name>.crt\|.key`，输出目录为位置参数）。默认 `<dir>/ca.crt`/`<dir>/ca.key`；可指向任意**自制根 CA**（openssl 等，明文 SEC1 EC / PKCS8 私钥）——复用组织既有信任链就靠这对 flag，无需导入步骤。校验：必须是 CA 证书、未过期、与私钥匹配 |
-| `show` | `<证书路径>` 为位置参数；`--key <私钥路径>` 校验证书与私钥是否配对（配对打印 verified，不配对错误退出非零——接手外部证书/排查错配时先验再用）。查看证书携带的信息：主题/签发者（自签标注）、序列号、有效期（剩余天数/已过期）、CA 角色与 PathLen、签名算法、公钥算法、密钥用途、扩展用途（ServerAuth/ClientAuth）、SAN（DNS/IP/URI/Email）、SHA256 指纹——接手外部根 CA、检视 push 会话证书或排查证书问题时先看清内容再信任 |
+| `show` | `<证书路径>` 为位置参数；`--key <私钥路径>` 校验证书与私钥是否配对（配对打印 verified，不配对错误退出非零——接手外部证书/排查错配时先验再用）。查看证书携带的信息：主题/签发者（自签标注）、序列号、有效期（剩余天数/已过期）、CA 角色与 PathLen、签名算法、公钥算法、密钥用途、扩展用途（ServerAuth/ClientAuth）、SAN（DNS/IP/URI/Email）、SHA256 指纹——接手外部根 CA、检视 agent 纳管证书或排查证书问题时先看清内容再信任 |
 
 证书角色：agent 在目标机上是 TLS **服务端**（默认的 server 档案，含 SAN）；
 控制端连接 agent 时是 TLS **客户端**，`--profile client` 签的就是控制端身份证书
@@ -352,7 +427,7 @@ wdp agent [--listen 127.0.0.1:7602]
           [--pin-client-fp sha256:<指纹>（可多次）]
           [--allow-no-auth] [--cleanup-on-shutdown]
           [--systemd-unit wdp-agent]
-          [--idle-timeout 0] [--max-request-mb 0]
+          [--idle-timeout 0] [--max-request-mib 0]
           [--log-level info] [--log-file <路径>]
 ```
 
@@ -362,14 +437,14 @@ wdp agent [--listen 127.0.0.1:7602]
 | `--ca/--cert/--key` | mTLS 三件套 |
 | `--pin-client-fp` | 客户端证书指纹准许名单（精确吊销：移除指纹重启即拒收） |
 | `--allow-no-auth` | 显式允许无认证对外监听（仅限可信内网） |
-| `--cleanup-on-shutdown` | **空闲超时退出**时自清理（push 临时 agent 用）；`/shutdown` 显式信号无论该开关与否总是自清理 |
+| `--cleanup-on-shutdown` | **空闲超时退出**时自清理（临时托管 agent 用）；`/shutdown` 显式信号无论该开关与否总是自清理 |
 | `--systemd-unit` | 自清理时停用的 systemd 单元名（默认 `wdp-agent`；按实际部署名指定，否则 `Restart=always` 可能在二进制删除后循环重启失败） |
-| `--idle-timeout` | 超过该时长无**已认证**请求即自动退出（配合 --cleanup-on-shutdown 完成自清理）；`/health` 免认证探测与执行中的长任务不计入（0 = 永不；最小 1m；push 临时 agent 由 `wdp.cfg [agent].idle_timeout_min` 控制注入，默认 60m） |
-| `--max-request-mb` | 请求体大小上限 MiB（0 = 内置默认 64；`/exec`、`/file` 上传等全部端点的请求体超过即拒绝 413） |
+| `--idle-timeout` | 超过该时长无**已认证**请求即自动退出（配合 --cleanup-on-shutdown 完成自清理；时长写法如 `30m`）；`/health` 免认证探测与执行中的长任务不计入（0 = 永不；最小 1m——CLI 层校验，防手滑配短把常驻 agent 秒杀） |
+| `--max-request-mib` | 请求体大小上限 MiB（0 = 内置默认 512；`/exec`、`/file` 上传等全部端点的请求体超过即拒绝 413） |
 | `--log-level` | 日志级别 `trace\|debug\|info\|warn\|error`（默认 info）。info=执行的命令、传输的文件、解压、换证、收到停止信号等必要运行记录；debug=每次操作完整细节 + 逐请求访问日志；trace=debug 之上再对每个请求/响应做 httpdump（敏感字段遮蔽） |
 | `--log-file` | 日志同时追加写入该文件（自动建父目录，0600）；**自清理不删除该文件**，退役后保留供审计；控制端可经 `agentctl logs` 或 `GET /file` 拉取 |
 
-子命令 `wdp agent gencsr --key <私钥路径> --csr <CSR 输出路径>`：**在本机**生成（或幂等复用已有）agent 私钥并产出 CSR——server 纳管脚本/SSH 推装调用，私钥留在目标机本地、只把 CSR 交给 server 签发（CSR 不带 Subject，身份由 server 侧纳管记录决定）。已有私钥但解析失败时显式报错，绝不静默覆盖。
+子命令 `wdp agent gencsr [--key /etc/wdp/agent.key] [--csr /tmp/wdp-agent.csr]`：**在本机**生成（或幂等复用已有）agent 私钥并产出 CSR——server 纳管脚本/SSH 推装调用，私钥留在目标机本地、只把 CSR 交给 server 签发（CSR 不带 Subject，身份由 server 侧纳管记录决定）。已有私钥但解析失败时显式报错，绝不静默覆盖。
 
 端点：`/exec`（命令执行）、`/file`（读写）、`/archive`（原生解压，不依赖目标机工具链）、`/health`（探活 + `cert_not_after` 证书到期时刻 + `idle_timeout_sec`/`idle_left_sec`，供批量巡检）、`/shutdown`（退出并自清理：请求体空或空 JSON `{}` 即默认清理——删自身二进制、证书材料含 CA、best-effort 停用 systemd 单元；也可 `{"systemd_unit":"...","files":[...]}` 指定单元名与额外文件/目录一并清理；无认证模式直接执行，mTLS 模式经证书校验后执行）、`/logs`（拉取近期日志：内存环形缓冲约 512KiB，`agentctl logs` 逐主机落盘即"日志传输到控制端"；完整历史走 `--log-file`）。
 敏感操作（换证/远程清理/空闲自动退出）输出事件日志到 stderr（systemd 托管时进 journal，可追溯）。
@@ -381,7 +456,7 @@ wdp agent [--listen 127.0.0.1:7602]
 wdp agent --listen 0.0.0.0:7602 --ca ca.crt --cert <IP>.crt --key <IP>.key
 ```
 
-生产建议 systemd 托管（单元内容 `ExecStart=… agent --listen 0.0.0.0:<agent 端口> --ca <dir>/ca.crt --cert <dir>/agent.crt --key <dir>/agent.key --log-file /var/log/wdp-agent.log`、`Restart=always`、`RestartSec=3`）——仓库内没有预置的 unit 示例文件，手写时可参照上面的 `wdp agent` 启动命令；安装上线将由 server 纳管流程（规划中）下发脚本承接。
+生产建议 systemd 托管（单元内容 `ExecStart=… agent --listen 0.0.0.0:<agent 端口> --ca <dir>/ca.crt --cert <dir>/agent.crt --key <dir>/agent.key --log-file /var/log/wdp-agent.log`、`Restart=always`、`RestartSec=3`）——仓库内没有预置的 unit 示例文件，手写时可参照上面的 `wdp agent` 启动命令。日常无需手工安装：`wdp server` 的纳管流程已承接上线（token 脚本拉取 / SSH 推装两种引导，脚本自动装配 systemd 常驻单元，见 `wdp server` 章节与 [04 连接与认证](04-连接与认证.md)）。
 
 ## wdp agentctl
 

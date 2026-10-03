@@ -85,8 +85,8 @@ ldflags() {
   -X 'wdp/internal/buildinfo.Tier=${1}'"
 }
 
-# darwin/amd64 对齐 CI cross-build 矩阵（此前矩阵验证了一个 build.sh
-# 缺省不产出的目标，矩阵与产线集合脱节）
+# 目标机全集：纳管对象含 Intel Mac（darwin/amd64），全平台交叉编译由
+# CI 的 build-script 任务经本脚本缺省路径整体覆盖
 ALL_TARGETS="linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64"
 
 # ---- 参数解析 ----

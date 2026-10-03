@@ -9,15 +9,17 @@ import (
 // ---- 操作审计 ----
 
 // AuditLog 是一条控制台操作记录（谁在何时对什么做了什么）。
+// 命名口径：JSON tag 统一 snake_case（全目录 API 统一决策，见 hosts.go
+// Host 的注释）。
 type AuditLog struct {
-	ID        int64  `json:"ID"`
-	User      string `json:"User"`
-	Action    string `json:"Action"` // create / update / delete / import / install / login / logout / set_latest / upload / run
-	Object    string `json:"Object"` // host / pool / group / label / app / version / run / chart
-	Name      string `json:"Name"`
-	Detail    string `json:"Detail"`
-	IP        string `json:"IP"`
-	CreatedAt string `json:"CreatedAt"`
+	ID        int64  `json:"id"`
+	User      string `json:"user"`
+	Action    string `json:"action"` // create / update / delete / import / install / login / logout / set_latest / upload / run
+	Object    string `json:"object"` // host / pool / group / label / app / version / run / chart
+	Name      string `json:"name"`
+	Detail    string `json:"detail"`
+	IP        string `json:"ip"`
+	CreatedAt string `json:"created_at"`
 }
 
 // CreateAuditLog 写一条操作审计（失败不阻断业务，由调用方决定是否记日志）。

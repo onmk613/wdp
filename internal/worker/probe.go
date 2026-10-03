@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"wdp/internal/store"
@@ -154,49 +153,35 @@ type Prober struct {
 // 一多就拖慢整轮，不能串行。
 func (p *Prober) Run(ctx context.Context) {
 	probe := func() {
-		ids, err := p.Store.HostIDs()
+		// 一次查询取全量主机：此前 HostIDs()+逐台 GetHost() 是每轮 1+N 次
+		// 单行查询（N+1），千台台账每分钟多打上千次库
+		hosts, err := p.Store.AllHosts()
 		if err != nil {
 			p.Logger.Error("probe: list hosts", "err", err)
 			return
 		}
-		sem := make(chan struct{}, 8)
-		var wg sync.WaitGroup
-		for _, id := range ids {
+		_ = BoundedForeach(ctx, hosts, sweepConcurrency, func(ctx context.Context, _ int, h *store.Host) error {
+			res := p.Probe(ctx, h)
+			// ctx 已取消（server 关停）：已派发的探测以超时/连接中断收场，
+			// 把该结论写库会把全网标成离线——关停不应污染主机状态，下一轮
+			// 探活自会给出真实结论
 			if ctx.Err() != nil {
-				break
+				return nil
 			}
-			h, err := p.Store.GetHost(id)
-			if err != nil {
-				p.Logger.Warn("probe: get host", "id", id, "err", err)
-				continue
+			// 模块集序列化：nil（agent 未上报）传空串，SetHostStatus 按
+			// 「保留最后已知」处理（与 build 同口径）
+			modulesJSON := ""
+			if res.Modules != nil {
+				if b, err := json.Marshal(res.Modules); err == nil {
+					modulesJSON = string(b)
+				}
 			}
-			wg.Add(1)
-			go func(id int64, h *store.Host) {
-				defer wg.Done()
-				sem <- struct{}{}
-				defer func() { <-sem }()
-				res := p.Probe(ctx, h)
-				// ctx 已取消（server 关停）：已派发 goroutine 的探测以超时/
-				// 连接中断收场，把该结论写库会把全网标成离线——关停不应
-				// 污染主机状态，下一轮探活自会给出真实结论
-				if ctx.Err() != nil {
-					return
-				}
-				// 模块集序列化：nil（agent 未上报）传空串，SetHostStatus 按
-				// 「保留最后已知」处理（与 build 同口径）
-				modulesJSON := ""
-				if res.Modules != nil {
-					if b, err := json.Marshal(res.Modules); err == nil {
-						modulesJSON = string(b)
-					}
-				}
-				if err := p.Store.SetHostStatus(id, res.Status, res.Build, modulesJSON); err != nil {
-					p.Logger.Error("probe: set status", "host", h.Name, "err", err)
-				}
-				p.Logger.Debug("probe done", "host", h.Name, "status", res.Status, "err", res.Error)
-			}(id, h)
-		}
-		wg.Wait()
+			if err := p.Store.SetHostStatus(h.ID, res.Status, res.Build, modulesJSON); err != nil {
+				p.Logger.Error("probe: set status", "host", h.Name, "err", err)
+			}
+			p.Logger.Debug("probe done", "host", h.Name, "status", res.Status, "err", res.Error)
+			return nil
+		})
 	}
 	probe() // 启动即先探一轮
 	t := time.NewTicker(p.Every)

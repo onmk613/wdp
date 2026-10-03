@@ -168,9 +168,9 @@ type ScopeRow = { verb: string; kind: string; value: string }
 const scopeRows = ref<ScopeRow[]>([])
 
 const scopeValueOptions = computed(() => ({
-  pool: pools.value.map((p) => p.Name),
-  group: groups.value.map((g) => g.Name),
-  label: labels.value.map((l) => l.Key),
+  pool: pools.value.map((p) => p.name),
+  group: groups.value.map((g) => g.name),
+  label: labels.value.map((l) => l.key),
 }))
 
 function openScopes(row: User) {

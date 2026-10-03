@@ -81,36 +81,36 @@ onUnmounted(() => window.clearTimeout(searchTimer))
 
     <el-card shadow="never">
       <el-table :data="logs" v-loading="loading" style="width: 100%">
-        <el-table-column prop="CreatedAt" label="时间" width="170">
-          <template #default="{ row }"><span class="muted">{{ fmtTime(row.CreatedAt) }}</span></template>
+        <el-table-column prop="created_at" label="时间" width="170">
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.created_at) }}</span></template>
         </el-table-column>
         <el-table-column label="用户" width="100">
-          <template #default="{ row }">{{ row.User || '-' }}</template>
+          <template #default="{ row }">{{ row.user || '-' }}</template>
         </el-table-column>
         <el-table-column label="动作" width="110">
           <template #default="{ row }">
-            <el-tooltip :content="row.Action" :disabled="actionLabel(row.Action) === row.Action" placement="top">
-              <el-tag :type="actionType(row.Action)" size="small" effect="light" round>{{ actionLabel(row.Action) }}</el-tag>
+            <el-tooltip :content="row.action" :disabled="actionLabel(row.action) === row.action" placement="top">
+              <el-tag :type="actionType(row.action)" size="small" effect="light" round>{{ actionLabel(row.action) }}</el-tag>
             </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="对象" width="110">
           <template #default="{ row }">
-            <el-tag size="small" effect="plain">{{ row.Object }}</el-tag>
+            <el-tag size="small" effect="plain">{{ row.object }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="名称" min-width="150" show-overflow-tooltip>
-          <template #default="{ row }">{{ row.Name || '-' }}</template>
+          <template #default="{ row }">{{ row.name || '-' }}</template>
         </el-table-column>
         <el-table-column label="详情" min-width="260">
           <template #default="{ row }">
-            <el-tooltip :content="row.Detail || '-'" :disabled="!row.Detail" placement="top" :show-after="300">
-              <span class="muted detail-text">{{ row.Detail || '-' }}</span>
+            <el-tooltip :content="row.detail || '-'" :disabled="!row.detail" placement="top" :show-after="300">
+              <span class="muted detail-text">{{ row.detail || '-' }}</span>
             </el-tooltip>
           </template>
         </el-table-column>
         <el-table-column label="来源 IP" width="130">
-          <template #default="{ row }"><span class="muted">{{ row.IP || '-' }}</span></template>
+          <template #default="{ row }"><span class="muted">{{ row.ip || '-' }}</span></template>
         </el-table-column>
         <template #empty><el-empty description="暂无操作记录" /></template>
       </el-table>

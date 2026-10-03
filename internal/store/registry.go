@@ -9,30 +9,32 @@ import (
 )
 
 // ---- 池 / 组 / 标签注册表 ----
+// 命名口径：JSON tag 统一 snake_case（全目录 API 统一决策，见 hosts.go
+// Host 的注释）；Go 字段名与 SQL 列名映射不动。
 
 // Pool 是主机池（按名引用，一台主机可属多个池）。
 type Pool struct {
-	ID        int64
-	Name      string
-	Note      string
-	Members   int // 池内主机数（列表查询附带）
-	CreatedAt string
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Note      string `json:"note"`
+	Members   int    `json:"members"` // 池内主机数（列表查询附带）
+	CreatedAt string `json:"created_at"`
 }
 
 // GroupEntry 是组注册表项（成员关系在 host_group_map 映射表，按名引用）。
 type GroupEntry struct {
-	ID        int64
-	Name      string
-	Note      string
-	CreatedAt string
+	ID        int64  `json:"id"`
+	Name      string `json:"name"`
+	Note      string `json:"note"`
+	CreatedAt string `json:"created_at"`
 }
 
 // LabelDef 是标签键注册表项（hosts.labels JSON 按键引用）。
 type LabelDef struct {
-	ID        int64
-	Key       string
-	Note      string
-	CreatedAt string
+	ID        int64  `json:"id"`
+	Key       string `json:"key"`
+	Note      string `json:"note"`
+	CreatedAt string `json:"created_at"`
 }
 
 // CreatePool 新建池并可同时把已有主机划入（hostIDs 为台账 id）。

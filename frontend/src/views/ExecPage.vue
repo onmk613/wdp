@@ -27,14 +27,14 @@ const doneCount = computed(() => results.value.filter((r) => !r.pending).length)
 // 而非台账全量——资源显示与执行权限同口径）
 const restricted = ref(false)
 
-const pools = computed(() => [...new Set(hosts.value.flatMap((h) => h.Pools || []))])
+const pools = computed(() => [...new Set(hosts.value.flatMap((h) => h.pools || []))])
 const poolFilter = ref('')
 // 搜索与池过滤都是纯前端过滤（数据源就一页 /api/exec/targets），不随击键发请求
 const shown = computed(() => {
   let list = hosts.value
   const q = search.value.trim().toLowerCase()
-  if (q) list = list.filter((h) => h.Name.toLowerCase().includes(q) || h.Address.toLowerCase().includes(q))
-  if (poolFilter.value) list = list.filter((h) => (h.Pools || []).includes(poolFilter.value))
+  if (q) list = list.filter((h) => h.name.toLowerCase().includes(q) || h.address.toLowerCase().includes(q))
+  if (poolFilter.value) list = list.filter((h) => (h.pools || []).includes(poolFilter.value))
   return list
 })
 
@@ -72,21 +72,21 @@ function finishRun(ok: number, failed: number) {
 // 或流断开后的兜底轮询收敛）。Detail 是截断快照，展示口径从简
 async function fillFromStore(id: number, final = false) {
   try {
-    const r = await api<{ run: { Status: string }; tasks: RunTask[] }>('GET', `/api/runs/${id}`)
-    const byName = new Map(r.tasks.map((t) => [t.Host, t]))
+    const r = await api<{ run: { status: string }; tasks: RunTask[] }>('GET', `/api/runs/${id}`)
+    const byName = new Map(r.tasks.map((t) => [t.host, t]))
     for (const [i, res] of results.value.entries()) {
       if (!res.pending) continue
       const t = byName.get(res.name)
       if (!t) continue
       results.value[i] = {
         id: res.id, name: res.name,
-        code: t.Status === 'ok' ? 0 : 1,
-        stdout: t.Detail || '', stderr: '',
-        err: t.Status === 'unreachable' ? t.Detail : '',
+        code: t.status === 'ok' ? 0 : 1,
+        stdout: t.detail || '', stderr: '',
+        err: t.status === 'unreachable' ? t.detail : '',
       }
     }
     if (final) {
-      const ok = r.tasks.filter((t) => t.Status === 'ok').length
+      const ok = r.tasks.filter((t) => t.status === 'ok').length
       finishRun(ok, r.tasks.length - ok)
     }
   } catch { /* 兜底失败：保持现状等下一轮 */ }
@@ -98,8 +98,8 @@ function pollFallback(id: number) {
   pollTimer = window.setTimeout(async () => {
     if (!running.value) return
     try {
-      const r = await api<{ Status: string }>('GET', `/api/runs/${id}`)
-      if (r.Status !== 'running') {
+      const r = await api<{ status: string }>('GET', `/api/runs/${id}`)
+      if (r.status !== 'running') {
         await fillFromStore(id, true)
         return
       }
@@ -120,10 +120,10 @@ async function run() {
   const targets = [...selection.value]
   running.value = true
   // 选择序占位：全部 pending，事件到达原位填充（大批量时逐台可见）
-  results.value = targets.map((h) => ({ id: h.ID, name: h.Name, code: 0, stdout: '', stderr: '', pending: true }))
+  results.value = targets.map((h) => ({ id: h.id, name: h.name, code: 0, stdout: '', stderr: '', pending: true }))
   try {
     const r = await api<{ run_id: number }>('POST', '/api/exec', {
-      host_ids: targets.map((h) => h.ID), script: script.value, timeout_sec: timeoutSec.value,
+      host_ids: targets.map((h) => h.id), script: script.value, timeout_sec: timeoutSec.value,
     })
     runID.value = r.run_id
     stopStream?.()
@@ -182,18 +182,18 @@ onBeforeUnmount(() => {
             <el-table-column type="selection" width="44" />
             <el-table-column label="状态" width="84">
               <template #default="{ row }">
-                <el-tag :type="row.Status === 'online' ? 'success' : row.Status === 'offline' ? 'danger' : 'info'" round>
-                  {{ row.Status }}
+                <el-tag :type="row.status === 'online' ? 'success' : row.status === 'offline' ? 'danger' : 'info'" round>
+                  {{ row.status }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column prop="Name" label="主机名" min-width="120" />
+            <el-table-column prop="name" label="主机名" min-width="120" />
             <el-table-column label="地址" min-width="150">
-              <template #default="{ row }">{{ row.Address }}:{{ row.AgentPort }}</template>
+              <template #default="{ row }">{{ row.address }}:{{ row.agent_port }}</template>
             </el-table-column>
             <el-table-column label="池" min-width="100">
               <template #default="{ row }">
-                <el-tag v-for="p in row.Pools || []" :key="p" type="warning" effect="plain" size="small">{{ p }}</el-tag>
+                <el-tag v-for="p in row.pools || []" :key="p" type="warning" effect="plain" size="small">{{ p }}</el-tag>
               </template>
             </el-table-column>
           </el-table>

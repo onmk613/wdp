@@ -53,7 +53,7 @@ func assertNoDeps(t *testing.T, deps []string, forbidden []string, build string)
 	t.Helper()
 	for _, d := range deps {
 		for _, f := range forbidden {
-			if d == f {
+			if d == f || strings.HasPrefix(d, f+"/") {
 				t.Errorf("%s 依赖了 %s——%s 的功能面被拖回，依赖边界已破（分层方案 P1 锁边）", build, f, build)
 			}
 		}

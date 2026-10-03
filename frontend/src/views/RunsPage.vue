@@ -1,6 +1,7 @@
 <script setup lang="ts">
-// 执行记录：应用执行（kind=app，多应用按序各一行 run）与远程命令（kind=exec）
-// 的统一审计视图。列表 SSE 事件驱动即时刷新；轮询兜底（收到事件前 5s、
+// 执行记录：应用执行（kind=app，多应用按序各一行 run）、远程命令
+// （kind=exec）与 agent 升级（kind=upgrade，每台主机一行）的统一审计
+// 视图。列表 SSE 事件驱动即时刷新；轮询兜底（收到事件前 5s、
 // 收到后放缓到 30s 慢档）。点击行查看任务明细与逐任务输出。
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -53,18 +54,25 @@ function clearSelection() {
   tableRef.value?.clearSelection()
 }
 
+// run 的显示名：升级 run 的 app_name 即主机名（后端已填）；兜底文案只对
+// exec 与历史空行生效
+function runLabel(r: Run | null): string {
+  if (!r) return ''
+  return r.app_name || (r.kind === 'upgrade' ? 'agent 升级' : '远程命令')
+}
+
 async function removeRun(r: Run) {
   try {
-    await ElMessageBox.confirm(`删除执行记录 run #${r.ID}（${r.AppName || '远程命令'}）？任务明细一并删除，不可恢复。`, '删除记录', {
+    await ElMessageBox.confirm(`删除执行记录 run #${r.id}（${runLabel(r)}）？任务明细一并删除，不可恢复。`, '删除记录', {
       type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消',
     })
   } catch {
     return
   }
   try {
-    await api('DELETE', `/api/runs/${r.ID}`)
+    await api('DELETE', `/api/runs/${r.id}`)
     ElMessage.success('已删除')
-    if (detailRun.value?.ID === r.ID) detailVisible.value = false
+    if (detailRun.value?.id === r.id) detailVisible.value = false
     load()
   } catch (e) {
     ElMessage.error((e as Error).message)
@@ -82,7 +90,7 @@ async function batchDelete() {
   }
   try {
     const r = await api<{ ok: number; failed: number }>('POST', '/api/runs/batch', {
-      ids: selection.value.map((x) => x.ID),
+      ids: selection.value.map((x) => x.id),
     })
     if (r.failed === 0) ElMessage.success(`已删除 ${r.ok} 条记录`)
     else ElMessage.warning(`删除完成：${r.ok} 成功 / ${r.failed} 失败`)
@@ -107,14 +115,14 @@ const taskFilter = ref<TaskFilter>('all')
 const taskCounts = computed(() => {
   const c = { all: detailTasks.value.length, failed: 0, unreachable: 0, skipped: 0 }
   for (const t of detailTasks.value) {
-    if (t.Status === 'failed') c.failed++
-    else if (t.Status === 'unreachable') c.unreachable++
-    else if (t.Status === 'skipped') c.skipped++
+    if (t.status === 'failed') c.failed++
+    else if (t.status === 'unreachable') c.unreachable++
+    else if (t.status === 'skipped') c.skipped++
   }
   return c
 })
 const filteredTasks = computed(() =>
-  taskFilter.value === 'all' ? detailTasks.value : detailTasks.value.filter((t) => t.Status === taskFilter.value),
+  taskFilter.value === 'all' ? detailTasks.value : detailTasks.value.filter((t) => t.status === taskFilter.value),
 )
 
 async function openRun(r: Run) {
@@ -126,10 +134,10 @@ async function openRun(r: Run) {
   detailScriptSHA.value = ''
   taskFilter.value = 'all'
   try {
-    const d = await api<{ run: Run; tasks: RunTask[]; script?: string; script_sha256?: string }>('GET', `/api/runs/${r.ID}`)
+    const d = await api<{ run: Run; tasks: RunTask[]; script?: string; script_sha256?: string }>('GET', `/api/runs/${r.id}`)
     // 竞态守卫：等待期间用户可能已点开另一条 run（慢响应后到会整体
     // 替换抽屉内容，且 refreshDetail 之后一直刷错的那条）
-    if (detailRun.value?.ID !== r.ID) return
+    if (detailRun.value?.id !== r.id) return
     detailRun.value = d.run
     detailTasks.value = d.tasks
     detailScript.value = d.script || ''
@@ -148,14 +156,14 @@ const RUN_TERMINAL = new Set(['succeeded', 'failed', 'cancelled'])
 async function cancelRun(r: Run) {
   try {
     await ElMessageBox.confirm(
-      `取消 run #${r.ID}（${r.AppName || '远程命令'}）？在途任务会执行完，已执行任务的结果保留，幂等应用可重新发起续跑。`,
+      `取消 run #${r.id}（${runLabel(r)}）？在途任务会执行完，已执行任务的结果保留，幂等应用可重新发起续跑。`,
       '取消执行', { type: 'warning', confirmButtonText: '取消执行', cancelButtonText: '再想想' },
     )
   } catch {
     return
   }
   try {
-    await api('POST', `/api/runs/${r.ID}/cancel`, {})
+    await api('POST', `/api/runs/${r.id}/cancel`, {})
     ElMessage.success('已请求取消（在途任务执行完后生效）')
     refreshDetail()
   } catch (e) {
@@ -164,13 +172,13 @@ async function cancelRun(r: Run) {
 }
 async function refreshDetail() {
   if (!detailVisible.value || !detailRun.value) return
-  if (RUN_TERMINAL.has(detailRun.value.Status)) return
-  const id = detailRun.value.ID
+  if (RUN_TERMINAL.has(detailRun.value.status)) return
+  const id = detailRun.value.id
   try {
     const d = await api<{ run: Run; tasks: RunTask[]; script?: string; script_sha256?: string }>('GET', `/api/runs/${id}`)
     // 竞态守卫（与 openRun 同口径）：慢响应回来时用户可能已点开另一条
     // run——迟到响应整体覆盖抽屉内容后，后续轮询会一直刷错的那条
-    if (detailRun.value?.ID !== id) return
+    if (detailRun.value?.id !== id) return
     detailRun.value = d.run
     detailTasks.value = d.tasks
     detailScript.value = d.script || ''
@@ -226,6 +234,7 @@ onUnmounted(() => {
       <el-select v-model="kindFilter" placeholder="全部类型" clearable style="width: 130px">
         <el-option label="app（应用）" value="app" />
         <el-option label="exec（命令）" value="exec" />
+        <el-option label="upgrade（升级）" value="upgrade" />
       </el-select>
       <el-button :icon="Refresh" @click="load()">刷新</el-button>
     </div>
@@ -241,46 +250,46 @@ onUnmounted(() => {
         ref="tableRef"
         :data="filteredRuns"
         v-loading="loading"
-        row-key="ID"
+        row-key="id"
         style="width: 100%"
         @selection-change="onSelectionChange"
       >
         <el-table-column type="selection" width="44" reserve-selection />
-        <el-table-column label="run" width="70" prop="ID" />
+        <el-table-column label="run" width="70" prop="id" />
         <el-table-column label="类型" width="80">
           <template #default="{ row }">
-            <el-tag size="small" :type="row.Kind === 'exec' ? 'info' : 'primary'" effect="plain">{{ row.Kind }}</el-tag>
+            <el-tag size="small" :type="row.kind === 'exec' ? 'info' : row.kind === 'upgrade' ? 'warning' : 'primary'" effect="plain">{{ row.kind }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column label="应用 / 命令" min-width="150">
           <template #default="{ row }">
-            {{ row.AppName || (row.Kind === 'exec' ? '远程命令' : '-') }}
-            <el-tag v-if="row.Seq" size="small" type="info" effect="plain" style="margin-left: 6px">#{{ row.Seq + 1 }}</el-tag>
+            {{ row.app_name || (row.kind === 'exec' ? '远程命令' : row.kind === 'upgrade' ? 'agent 升级' : '-') }}
+            <el-tag v-if="row.seq" size="small" type="info" effect="plain" style="margin-left: 6px">#{{ row.seq + 1 }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="Version" label="版本" min-width="90" />
+        <el-table-column prop="version" label="版本" min-width="90" />
         <el-table-column label="相位" width="90">
           <template #default="{ row }">
-            <el-tag v-if="row.Phase" size="small" type="info" effect="plain">{{ row.Phase }}</el-tag>
+            <el-tag v-if="row.phase" size="small" type="info" effect="plain">{{ row.phase }}</el-tag>
             <span v-else class="muted">-</span>
           </template>
         </el-table-column>
         <el-table-column label="操作者" width="90">
-          <template #default="{ row }">{{ row.User || '-' }}</template>
+          <template #default="{ row }">{{ row.user || '-' }}</template>
         </el-table-column>
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
-            <el-tag :type="runStatus(row.Status)" round>{{ row.Status }}</el-tag>
+            <el-tag :type="runStatus(row.status)" round>{{ row.status }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="Summary" label="摘要" min-width="200">
-          <template #default="{ row }"><span class="muted">{{ row.Summary }}</span></template>
+        <el-table-column prop="summary" label="摘要" min-width="200">
+          <template #default="{ row }"><span class="muted">{{ row.summary }}</span></template>
         </el-table-column>
-        <el-table-column prop="StartedAt" label="开始" min-width="165">
-          <template #default="{ row }"><span class="muted">{{ fmtTime(row.StartedAt) }}</span></template>
+        <el-table-column prop="started_at" label="开始" min-width="165">
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.started_at) }}</span></template>
         </el-table-column>
-        <el-table-column prop="FinishedAt" label="结束" min-width="165">
-          <template #default="{ row }"><span class="muted">{{ fmtTime(row.FinishedAt) }}</span></template>
+        <el-table-column prop="finished_at" label="结束" min-width="165">
+          <template #default="{ row }"><span class="muted">{{ fmtTime(row.finished_at) }}</span></template>
         </el-table-column>
         <el-table-column label="操作" width="130" fixed="right">
           <template #default="{ row }">
@@ -297,19 +306,19 @@ onUnmounted(() => {
     <!-- destroy-on-close：关闭即卸载内容。曾出现关闭动画被打断（标签页
          后台化/渲染节流）时 leave 过渡不完结、遮罩残留且整页点击失效，
          只能刷新恢复——销毁式关闭把残留窗口压到最小 -->
-    <el-drawer v-model="detailVisible" :title="detailRun ? `run #${detailRun.ID} · ${detailRun.AppName || '远程命令'}${detailRun.Version ? '@' + detailRun.Version : ''}` : '执行详情'" size="760px" destroy-on-close>
+    <el-drawer v-model="detailVisible" :title="detailRun ? `run #${detailRun.id} · ${runLabel(detailRun)}${detailRun.version ? '@' + detailRun.version : ''}` : '执行详情'" size="760px" destroy-on-close>
       <el-descriptions :column="2" border size="small" style="margin-bottom: 12px">
         <el-descriptions-item label="状态">
-          <el-tag :type="runStatus(detailRun?.Status || '')" round>{{ detailRun?.Status }}</el-tag>
+          <el-tag :type="runStatus(detailRun?.status || '')" round>{{ detailRun?.status }}</el-tag>
         </el-descriptions-item>
-        <el-descriptions-item label="摘要">{{ detailRun?.Summary || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="摘要">{{ detailRun?.summary || '-' }}</el-descriptions-item>
         <el-descriptions-item label="目标选择器">
-          <span class="muted">{{ selectorLabel(detailRun?.Selector) }}</span>
+          <span class="muted">{{ selectorLabel(detailRun?.selector) }}</span>
         </el-descriptions-item>
-        <el-descriptions-item label="操作者">{{ detailRun?.User || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="时间">{{ fmtTime(detailRun?.StartedAt) }} → {{ detailRun?.FinishedAt ? fmtTime(detailRun?.FinishedAt) : '进行中' }}</el-descriptions-item>
+        <el-descriptions-item label="操作者">{{ detailRun?.user || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="时间">{{ fmtTime(detailRun?.started_at) }} → {{ detailRun?.finished_at ? fmtTime(detailRun?.finished_at) : '进行中' }}</el-descriptions-item>
       </el-descriptions>
-      <div v-if="detailRun && !RUN_TERMINAL.has(detailRun.Status) && can('run:execute')" style="margin-bottom: 10px">
+      <div v-if="detailRun && !RUN_TERMINAL.has(detailRun.status) && can('run:execute')" style="margin-bottom: 10px">
         <el-button size="small" type="warning" plain @click="cancelRun(detailRun)">取消执行</el-button>
       </div>
       <div class="task-filter">
@@ -321,19 +330,19 @@ onUnmounted(() => {
         </el-radio-group>
       </div>
       <el-table :data="filteredTasks" size="small" v-loading="detailLoading">
-        <el-table-column prop="Play" label="Play" min-width="110" />
-        <el-table-column prop="Task" label="任务" min-width="150" />
-        <el-table-column prop="Module" label="模块" width="90" />
-        <el-table-column prop="Host" label="主机" min-width="110" />
+        <el-table-column prop="play" label="Play" min-width="110" />
+        <el-table-column prop="task" label="任务" min-width="150" />
+        <el-table-column prop="module" label="模块" width="90" />
+        <el-table-column prop="host" label="主机" min-width="110" />
         <el-table-column label="状态" width="110">
           <template #default="{ row }">
-            <el-tag size="small" :type="taskStatus(row.Status)">
-              {{ row.Status }}{{ row.Changed ? '·changed' : '' }}
+            <el-tag size="small" :type="taskStatus(row.status)">
+              {{ row.status }}{{ row.changed ? '·changed' : '' }}
             </el-tag>
           </template>
         </el-table-column>
       </el-table>
-      <el-collapse v-if="detailRun?.Kind === 'exec' && detailScript" style="margin-top: 10px">
+      <el-collapse v-if="detailRun?.kind === 'exec' && detailScript" style="margin-top: 10px">
         <el-collapse-item title="执行脚本（审计证据，超长已截断）">
           <pre class="out">{{ detailScript }}</pre>
           <div v-if="detailScriptSHA" class="muted" style="margin-top: 4px; font-size: 12px">
@@ -342,8 +351,8 @@ onUnmounted(() => {
         </el-collapse-item>
       </el-collapse>
       <el-collapse style="margin-top: 10px">
-        <el-collapse-item v-for="t in filteredTasks" :key="t.ID" :title="`${t.Task} @ ${t.Host} — ${t.Status}`">
-          <TailPre v-if="t.Detail" :text="t.Detail" />
+        <el-collapse-item v-for="t in filteredTasks" :key="t.id" :title="`${t.task} @ ${t.host} — ${t.status}`">
+          <TailPre v-if="t.detail" :text="t.detail" />
           <div v-else class="muted">(无输出)</div>
         </el-collapse-item>
       </el-collapse>

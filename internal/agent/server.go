@@ -72,6 +72,10 @@ type Server struct {
 	plans      *planManager
 	planActive atomic.Bool
 	runsDir    string // 自治执行持久化根（空 = 内置默认 /var/lib/wdp/runs）
+
+	// /file、/archive 的领地根目录（opt-in 收紧，见 filepathallow.go；
+	// 启动期 SetFilePathRoots 设置后只读，空 = 不限制）
+	fileRoots []string
 }
 
 // tlsMaterial 是一次生效的 mTLS 材料快照

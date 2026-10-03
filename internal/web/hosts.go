@@ -59,10 +59,10 @@ func (s *Server) handleListHosts(w http.ResponseWriter, r *http.Request) {
 // createHostReq 是 POST /api/hosts 的请求体。不再裸解码 store.Host：
 // 整体解码会让客户端注入 ID/Status/CreatedAt/AllowPlaintext 等服务端
 // 字段（AllowPlaintext 是通道信任开关，注入即绕过 handleUpdateHost 的
-// host:enroll 门控）。字段不带 json tag：本 API 响应序列化 store.Host 为
-// PascalCase（AgentPort 等），请求侧同口径；编码器大小写不敏感，既有的
-// 小写 name/address 形态同样命中。ID/状态/时间戳/AllowPlaintext 一律
-// 服务端自定，新建主机恒为明文关闭，开启只能走 PUT 的 host:enroll 门。
+// host:enroll 门控）。字段不带 json tag：响应序列化已统一 snake_case，
+// 请求侧同口径；编码器大小写不敏感，既有的小写 name/address 形态同样
+// 命中。ID/状态/时间戳/AllowPlaintext 一律服务端自定，新建主机恒为明文
+// 关闭，开启只能走 PUT 的 host:enroll 门。
 type createHostReq struct {
 	Name      string
 	Address   string

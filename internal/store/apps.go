@@ -14,32 +14,34 @@ import (
 // ---- 应用与版本 ----
 
 // App 是一个应用（chart 的版本集合）。
+// 命名口径：JSON tag 统一 snake_case（全目录 API 统一决策，见 hosts.go
+// Host 的注释）；Go 字段名不动，SQL 列名映射不受影响。
 type App struct {
-	ID            int64
-	Name          string
-	Note          string
-	LatestVersion string   `json:"LatestVersion"`
-	Pools         []string `json:"Pools"`
-	Groups        []string `json:"Groups"`
-	Labels        string   `json:"Labels"`
-	VersionCount  int      `json:"VersionCount"`
-	CreatedAt     string   `json:"CreatedAt"`
-	UpdatedAt     string   `json:"UpdatedAt"`
+	ID            int64    `json:"id"`
+	Name          string   `json:"name"`
+	Note          string   `json:"note"`
+	LatestVersion string   `json:"latest_version"`
+	Pools         []string `json:"pools"`
+	Groups        []string `json:"groups"`
+	Labels        string   `json:"labels"`
+	VersionCount  int      `json:"version_count"`
+	CreatedAt     string   `json:"created_at"`
+	UpdatedAt     string   `json:"updated_at"`
 }
 
 // AppVersion 是应用的一个不可变版本（tgz 制品在磁盘，库只存元信息）。
 // Phases 是该版本 chart 实际具备的相位（创建时提取，前端执行清单行级
 // 相位下拉的数据源；迁移前旧行为 nil，调用方自行回退）。
 type AppVersion struct {
-	ID        int64
-	AppID     int64
-	Version   string
-	TgzPath   string `json:"-"`
-	Sha256    string
-	Size      int64
-	Note      string
-	Phases    []string `json:"Phases"`
-	CreatedAt string
+	ID        int64    `json:"id"`
+	AppID     int64    `json:"app_id"`
+	Version   string   `json:"version"`
+	TgzPath   string   `json:"-"`
+	Sha256    string   `json:"sha256"`
+	Size      int64    `json:"size"`
+	Note      string   `json:"note"`
+	Phases    []string `json:"phases"`
+	CreatedAt string   `json:"created_at"`
 }
 
 func setAppScopes(q execer, id int64, pools, groups []string) error {

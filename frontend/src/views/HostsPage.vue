@@ -6,7 +6,8 @@ import {
   Coin, Collection, Plus, Position, PriceTag, Refresh, Search, WarningFilled,
 } from '@element-plus/icons-vue'
 import {
-  api, type BatchResponse, type GroupEntry, type Host, type HostAlert, type LabelDef, type Pool, type ProbeResult,
+  api, listUpgradeRuns, upgradeAgentRun, upgradeAgentsBatch,
+  type BatchResponse, type GroupEntry, type Host, type HostAlert, type LabelDef, type Pool, type ProbeResult, type Run, type UpgradeRunRef,
 } from '../api'
 import SSHInstallDialog from '../components/hosts/SSHInstallDialog.vue'
 import PoolGroupLabelDialog from '../components/hosts/PoolGroupLabelDialog.vue'
@@ -14,7 +15,7 @@ import EditHostDialog from '../components/hosts/EditHostDialog.vue'
 import BatchAssignDialog from '../components/hosts/BatchAssignDialog.vue'
 import ManualAddDialog from '../components/hosts/ManualAddDialog.vue'
 import { can, serverBuild, serverBuildUnversioned } from '../auth'
-import { parseLabels, statusType, fmtTime } from '../lib/format'
+import { parseLabels, statusType, fmtTime, runStatus } from '../lib/format'
 import type { PagedResp } from '../lib/usePaging'
 import Pager from '../components/Pager.vue'
 
@@ -49,7 +50,7 @@ async function loadHosts(silent = false) {
       api<PagedResp<Host>>('GET', `/api/hosts?${params}`),
       api<HostAlert[]>('GET', '/api/alerts').then((list) => {
         const m: Record<number, HostAlert[]> = {}
-        for (const a of list) (m[a.HostID] ||= []).push(a)
+        for (const a of list) (m[a.host_id] ||= []).push(a)
         return m
       }).catch(() => ({})),
     ])
@@ -72,13 +73,19 @@ async function loadHosts(silent = false) {
 
 function hostAlertLevel(id: number): 'crit' | 'warn' | '' {
   const list = alertsByHost.value[id] || []
-  if (list.some((a) => a.Level === 'crit')) return 'crit'
+  if (list.some((a) => a.level === 'crit')) return 'crit'
   if (list.length) return 'warn'
   return ''
 }
 
 function gotoDetail(h: Host) {
-  void router.push(`/hosts/${h.ID}`)
+  void router.push(`/hosts/${h.id}`)
+}
+
+// 升级进度对话框 → 执行记录页（run 深链无路由参数，列表页按 kind 过滤
+// 最快定位）
+function gotoRuns() {
+  void router.push('/runs')
 }
 
 // 升级门控：agent build 与 server build 一致 = 已是最新。旧版 agent
@@ -88,33 +95,108 @@ function gotoDetail(h: Host) {
 // 相等不能证明同版本，按可升级放行（点击后由后端重推二进制兜底）
 function upgradable(h: Host): boolean {
   if (!serverBuild.value || serverBuildUnversioned.value) return true
-  return !h.AgentBuild || h.AgentBuild !== serverBuild.value
+  return !h.agent_build || h.agent_build !== serverBuild.value
 }
 
-// ---- agent 远程升级 ----
-const upgrading = ref(false)
+// ---- agent 远程升级（后台 run + 轮询）----
+// 提交即返回 run_id（后端逐台建 kind=upgrade 的 run，并发 3 后台推进），
+// 进度靠轮询 /api/runs?kind=upgrade 对齐——此前同步等响应，单台最长约
+// 7 分钟、批量几十分钟，挂起请求被反代/浏览器掐断后进度无从恢复。
+// 断连/刷新后本页状态丢失，但 run 都在「执行记录」里可回看
+interface UpgradeTrack {
+  runId: number
+  hostId: number
+  name: string
+  target: string
+  status: string
+  summary: string
+}
+const upgradeTracks = ref<UpgradeTrack[]>([])
+const upgradeVisible = ref(false)
+let upgradeTimer: number | undefined
+
+// 升级按钮占用中：任一跟踪中的 run 未到终态（闸门在后端也会 409 兜底）
+const upgrading = computed(() => upgradeTracks.value.some((t) => !runTerminal(t.status)))
+
+function runTerminal(s: string): boolean {
+  return s === 'succeeded' || s === 'failed' || s === 'cancelled'
+}
+
+function trackUpgrades(refs: UpgradeRunRef[]) {
+  upgradeTracks.value = refs.map((x) => ({
+    runId: x.run_id, hostId: x.host_id, name: x.name,
+    target: serverBuild.value || '-', status: 'queued', summary: '',
+  }))
+  upgradeVisible.value = true
+  scheduleUpgradePoll(300)
+}
+
+function scheduleUpgradePoll(delay = 3000) {
+  window.clearTimeout(upgradeTimer)
+  upgradeTimer = window.setTimeout(pollUpgrades, delay)
+}
+
+async function pollUpgrades() {
+  if (!upgradeTracks.value.some((t) => !runTerminal(t.status))) return finishUpgrades()
+  try {
+    // 一次列表请求覆盖全部在途 run（逐台详情请求随主机数线性放大）
+    const runs = await listUpgradeRuns(100)
+    const byId = new Map(runs.map((r) => [r.id, r]))
+    for (const t of upgradeTracks.value) {
+      if (runTerminal(t.status)) continue
+      const r = byId.get(t.runId)
+      if (r) {
+        t.status = r.status
+        t.summary = r.summary || ''
+        if (r.version) t.target = r.version
+      }
+    }
+    // 列表 limit 封顶 100：更大批次里不在响应中的 run 单条补拉，否则
+    // 它们永远停在 queued、轮询也不收敛
+    const missing = upgradeTracks.value.filter((t) => !runTerminal(t.status) && !byId.has(t.runId))
+    for (const t of missing) {
+      try {
+        const d = await api<{ run: Run }>('GET', `/api/runs/${t.runId}`)
+        t.status = d.run.status
+        t.summary = d.run.summary || ''
+        if (d.run.version) t.target = d.run.version
+      } catch { /* 单条失败：下一轮再试 */ }
+    }
+  } catch { /* 列表请求失败（网络抖动）：保持现状等下一轮 */ }
+  if (upgradeTracks.value.some((t) => !runTerminal(t.status))) scheduleUpgradePoll()
+  else finishUpgrades()
+}
+
+function finishUpgrades() {
+  window.clearTimeout(upgradeTimer)
+  if (!upgradeTracks.value.length) return
+  const ok = upgradeTracks.value.filter((t) => t.status === 'succeeded').length
+  if (upgradeTracks.value.length === 1) {
+    const t = upgradeTracks.value[0]
+    if (ok) ElMessage.success(`${t.name}：${t.summary}`)
+    else ElMessage.error(`${t.name}：${t.summary}`)
+  } else {
+    const bad = upgradeTracks.value.length - ok
+    if (bad === 0) ElMessage.success(`全部升级完成（${ok} 台）`)
+    else ElMessage.warning(`升级结束：成功 ${ok} / 失败或取消 ${bad}（明细见对话框与执行记录）`)
+  }
+  loadHosts(true) // 终态已即时回写 AgentBuild，刷新「已最新」门控
+}
 
 async function upgradeHost(row: Host) {
   try {
     await ElMessageBox.confirm(
-      `升级主机 ${row.Name} 的 agent？将推送当前 server 配套的二进制并重启 agent 服务（执行中的任务会中断，耗时约半分钟）。`,
+      `升级主机 ${row.name} 的 agent？将推送当前 server 配套的二进制并重启 agent 服务（执行中的任务会中断）。提交后在后台执行，关闭页面不影响。`,
       '升级 agent', { type: 'warning', confirmButtonText: '升级', cancelButtonText: '取消' },
     )
   } catch {
     return
   }
-  upgrading.value = true
   try {
-    const r = await api<{ ok: boolean; from: string; to: string; detail: string }>(
-      'POST', `/api/hosts/${row.ID}/upgrade`, {},
-    )
-    if (r.ok) ElMessage.success(`${row.Name}：${r.detail}`)
-    else ElMessage.error(`${row.Name}：${r.detail}`)
-    loadHosts(true)
+    const r = await upgradeAgentRun(row.id)
+    trackUpgrades([{ run_id: r.run_id, host_id: row.id, name: row.name }])
   } catch (e) {
     ElMessage.error((e as Error).message)
-  } finally {
-    upgrading.value = false
   }
 }
 
@@ -122,28 +204,18 @@ async function batchUpgrade() {
   const n = selection.value.length
   try {
     await ElMessageBox.confirm(
-      `升级选中的 ${n} 台主机的 agent？并发 3 台逐台推送二进制并重启（每台约半分钟，执行中的任务会中断）。`,
+      `升级选中的 ${n} 台主机的 agent？每台一个后台任务，并发 3 台逐台推送二进制并重启（每台约半分钟，执行中的任务会中断）。提交后可随时关闭页面，进度在「执行记录」可回看。`,
       '批量升级 agent', { type: 'warning', confirmButtonText: '升级', cancelButtonText: '取消' },
     )
   } catch {
     return
   }
-  upgrading.value = true
   try {
-    const r = await api<{ results: { name: string; ok: boolean; detail: string }[]; ok: number; failed: number }>(
-      'POST', '/api/hosts/upgrade', { ids: selection.value.map((x) => x.ID) },
-    )
-    if (r.failed === 0) ElMessage.success(`全部升级完成（${r.ok} 台）`)
-    else {
-      const bad = r.results.filter((x) => !x.ok).map((x) => `${x.name}：${x.detail}`).join('\n')
-      await ElMessageBox.alert(bad, `升级完成：成功 ${r.ok} / 失败 ${r.failed}`, { type: 'warning' })
-    }
+    const r = await upgradeAgentsBatch(selection.value.map((x) => x.id))
     clearSelection()
-    loadHosts(true)
+    trackUpgrades(r.hosts)
   } catch (e) {
     ElMessage.error((e as Error).message)
-  } finally {
-    upgrading.value = false
   }
 }
 
@@ -191,7 +263,7 @@ function doBatchNotify(n: number, verb: string): (r: BatchResponse) => void {
 }
 
 async function batchProbe() {
-  const ids = selection.value.map((h) => h.ID)
+  const ids = selection.value.map((h) => h.id)
   const rec = doBatchNotify(ids.length, '探活')
   try {
     const r = await api<BatchResponse>('POST', '/api/hosts/batch', { ids, action: 'probe' })
@@ -213,7 +285,7 @@ async function batchDelete() {
   } catch {
     return
   }
-  const ids = selection.value.map((h) => h.ID)
+  const ids = selection.value.map((h) => h.id)
   const rec = doBatchNotify(ids.length, '删除')
   try {
     const r = await api<BatchResponse>('POST', '/api/hosts/batch', { ids, action: 'delete' })
@@ -269,7 +341,7 @@ function reloadAll() {
 // ---- 单机操作 ----
 async function probe(row: Host) {
   try {
-    const r = await api<ProbeResult>('POST', `/api/hosts/${row.ID}/probe`, {})
+    const r = await api<ProbeResult>('POST', `/api/hosts/${row.id}/probe`, {})
     if (r.status === 'online') {
       // 版本优先取 build（二进制发布版本，形如 1.2.3-abc123）；version 是
       // 协议版本（v1），不但信息量低还会跟手写的 v 前缀叠成 "vv1"
@@ -289,7 +361,7 @@ async function probe(row: Host) {
 async function removeHost(row: Host) {
   try {
     await ElMessageBox.confirm(
-      `删除主机 ${row.Name}？其 agent 将被通知自清理退役（删除二进制、证书与 systemd 单元）；agent 不可达时仅从台账移除。`,
+      `删除主机 ${row.name}？其 agent 将被通知自清理退役（删除二进制、证书与 systemd 单元）；agent 不可达时仅从台账移除。`,
       '确认删除',
       { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
     )
@@ -297,9 +369,9 @@ async function removeHost(row: Host) {
     return
   }
   try {
-    const r = await api<{ warning?: string }>('DELETE', `/api/hosts/${row.ID}`)
+    const r = await api<{ warning?: string }>('DELETE', `/api/hosts/${row.id}`)
     if (r.warning) ElMessage.warning(r.warning)
-    else ElMessage.success(`已删除 ${row.Name}（agent 已退役）`)
+    else ElMessage.success(`已删除 ${row.name}（agent 已退役）`)
     loadHosts()
   } catch (e) {
     ElMessage.error((e as Error).message)
@@ -362,9 +434,9 @@ function openSSHInstall() {
   sshVisible.value = true
 }
 
-const poolNames = computed(() => pools.value.map((p) => p.Name))
-const groupNames = computed(() => groups.value.map((g) => g.Name))
-const labelKeys = computed(() => labelDefs.value.map((l) => l.Key))
+const poolNames = computed(() => pools.value.map((p) => p.name))
+const groupNames = computed(() => groups.value.map((g) => g.name))
+const labelKeys = computed(() => labelDefs.value.map((l) => l.key))
 
 onMounted(() => {
   const q = route.query.search
@@ -388,6 +460,7 @@ onUnmounted(() => {
   window.clearInterval(pollTimer)
   window.clearTimeout(searchTimer)
   window.clearTimeout(copiedTimer)
+  window.clearTimeout(upgradeTimer)
 })
 </script>
 
@@ -437,27 +510,27 @@ onUnmounted(() => {
             ref="tableRef"
             :data="hosts"
             v-loading="loadingHosts"
-            row-key="ID"
+            row-key="id"
             style="width: 100%"
             @selection-change="onSelectionChange"
           >
             <el-table-column type="selection" width="44" reserve-selection />
             <el-table-column label="状态" width="130">
               <template #default="{ row }">
-                <el-tag :type="statusType(row.Status)" effect="light" round>{{ row.Status }}</el-tag>
-                <el-popover v-if="hostAlertLevel(row.ID)" placement="right" :width="380" trigger="click">
+                <el-tag :type="statusType(row.status)" effect="light" round>{{ row.status }}</el-tag>
+                <el-popover v-if="hostAlertLevel(row.id)" placement="right" :width="380" trigger="click">
                   <template #reference>
                     <el-icon
                       :size="17" style="vertical-align: -3px; cursor: pointer; margin-left: 4px"
-                      :color="hostAlertLevel(row.ID) === 'crit' ? '#f56c6c' : '#e6a23c'"
+                      :color="hostAlertLevel(row.id) === 'crit' ? '#f56c6c' : '#e6a23c'"
                     ><WarningFilled /></el-icon>
                   </template>
-                  <div v-for="a in alertsByHost[row.ID] || []" :key="a.Kind + '-' + a.UpdatedAt" class="alert-item">
-                    <el-tag size="small" :type="a.Level === 'crit' ? 'danger' : 'warning'" round>
-                      {{ a.Level === 'crit' ? '严重' : '警告' }}
+                  <div v-for="a in alertsByHost[row.id] || []" :key="a.kind + '-' + a.updated_at" class="alert-item">
+                    <el-tag size="small" :type="a.level === 'crit' ? 'danger' : 'warning'" round>
+                      {{ a.level === 'crit' ? '严重' : '警告' }}
                     </el-tag>
-                    {{ a.Detail }}
-                    <span class="muted">（{{ a.UpdatedAt }}）</span>
+                    {{ a.detail }}
+                    <span class="muted">（{{ a.updated_at }}）</span>
                   </div>
                   <div class="muted" style="margin-top: 6px">点击主机名进入详情页查看趋势</div>
                 </el-popover>
@@ -465,28 +538,28 @@ onUnmounted(() => {
             </el-table-column>
             <el-table-column label="主机名" min-width="130">
               <template #default="{ row }">
-                <el-link type="primary" :underline="false" style="font-weight: 600" @click="gotoDetail(row)">{{ row.Name }}</el-link>
+                <el-link type="primary" :underline="false" style="font-weight: 600" @click="gotoDetail(row)">{{ row.name }}</el-link>
               </template>
             </el-table-column>
             <el-table-column label="地址" min-width="160">
-              <template #default="{ row }">{{ row.Address }}:{{ row.AgentPort }}</template>
+              <template #default="{ row }">{{ row.address }}:{{ row.agent_port }}</template>
             </el-table-column>
             <el-table-column label="池" min-width="130">
               <template #default="{ row }">
-                <el-tag v-for="p in row.Pools || []" :key="p" type="warning" effect="plain" class="label-tag">{{ p }}</el-tag>
-                <span v-if="!(row.Pools || []).length" class="muted">-</span>
+                <el-tag v-for="p in row.pools || []" :key="p" type="warning" effect="plain" class="label-tag">{{ p }}</el-tag>
+                <span v-if="!(row.pools || []).length" class="muted">-</span>
               </template>
             </el-table-column>
             <el-table-column label="组" min-width="110">
               <template #default="{ row }">
-                <el-tag v-for="g in row.Groups || []" :key="g" type="info" effect="plain" class="label-tag">{{ g }}</el-tag>
-                <span v-if="!(row.Groups || []).length" class="muted">-</span>
+                <el-tag v-for="g in row.groups || []" :key="g" type="info" effect="plain" class="label-tag">{{ g }}</el-tag>
+                <span v-if="!(row.groups || []).length" class="muted">-</span>
               </template>
             </el-table-column>
             <el-table-column label="标签" min-width="180">
               <template #default="{ row }">
                 <el-tag
-                  v-for="(v, k) in parseLabels(row.Labels)"
+                  v-for="(v, k) in parseLabels(row.labels)"
                   :key="k"
                   size="small"
                   type="primary"
@@ -495,12 +568,12 @@ onUnmounted(() => {
                 >
                   {{ v ? `${k}=${v}` : k }}
                 </el-tag>
-                <span v-if="!Object.keys(parseLabels(row.Labels)).length" class="muted">-</span>
+                <span v-if="!Object.keys(parseLabels(row.labels)).length" class="muted">-</span>
               </template>
             </el-table-column>
             <el-table-column label="最近在线" min-width="170">
               <template #default="{ row }">
-                <span class="muted">{{ fmtTime(row.LastSeenAt) }}</span>
+                <span class="muted">{{ fmtTime(row.last_seen_at) }}</span>
               </template>
             </el-table-column>
             <el-table-column label="操作" width="270" fixed="right">
@@ -550,6 +623,35 @@ onUnmounted(() => {
           </div>
         </el-card>
 
+    <!-- agent 升级进度（后台 run 轮询）：关闭对话框只停止展示、不停止
+         后台任务与轮询；断连/刷新后可从「执行记录」（kind=upgrade）恢复
+         查看，逐步明细在 run 详情里 -->
+    <el-dialog v-model="upgradeVisible" title="agent 升级进度" width="700px">
+      <el-table :data="upgradeTracks" size="small" max-height="420">
+        <el-table-column prop="name" label="主机" min-width="120" />
+        <el-table-column prop="target" label="目标版本" min-width="130" />
+        <el-table-column label="状态" width="100">
+          <template #default="{ row }">
+            <el-tag :type="runStatus(row.status)" round>{{ row.status }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="结果 / 摘要" min-width="220">
+          <template #default="{ row }">
+            <span class="muted">{{ row.summary || (runTerminal(row.status) ? '' : '升级中…') }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="run" width="80">
+          <template #default="{ row }">
+            <el-link type="primary" :underline="false" @click="gotoRuns">#{{ row.runId }}</el-link>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <span class="muted" style="margin-right: 12px">升级在服务端后台执行，关闭页面不影响；每台的逐步明细在「执行记录」详情里查看</span>
+        <el-button @click="upgradeVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 手动添加（多行 / CSV 批量）：见 components/hosts/ManualAddDialog.vue -->
     <ManualAddDialog v-model="addVisible" @imported="reloadAll" />
 
@@ -566,7 +668,7 @@ onUnmounted(() => {
     <!-- 批量设置：见 components/hosts/BatchAssignDialog.vue -->
     <BatchAssignDialog
       v-model="batchVisible"
-      :ids="selection.map((h) => h.ID)"
+      :ids="selection.map((h) => h.id)"
       :pool-names="poolNames"
       :group-names="groupNames"
       :label-keys="labelKeys"

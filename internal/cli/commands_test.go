@@ -36,7 +36,7 @@ func TestCommandTreeStructure(t *testing.T) {
 	}
 	for _, name := range []string{
 		"run", "plan", "apply", "adhoc", "schema", "module", "render", "lint", "package",
-		"ca", "agent", "agentctl", "drift", "release", "inv",
+		"repo", "server", "ca", "agent", "agentctl", "drift", "release", "inv",
 	} {
 		if !top[name] {
 			t.Fatalf("缺少顶层命令 %q", name)
@@ -79,7 +79,7 @@ func TestCommandTreeStructure(t *testing.T) {
 	}
 }
 
-// TestRootPersistentFlags 断言根命令持久 flag：-i 可重复、--forks/--output/--lang 默认值。
+// TestRootPersistentFlags 断言根命令持久 flag：-i 可重复、--forks/--output 默认值。
 func TestRootPersistentFlags(t *testing.T) {
 	root := NewRootCmd()
 	pf := root.PersistentFlags()

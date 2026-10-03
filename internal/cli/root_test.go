@@ -97,8 +97,8 @@ func TestConfigMissingFile(t *testing.T) {
 	}
 }
 
-// TestRootHelpGrouped 根帮助按命令组分类展示（部署/应用包/安全/代理/运维/其它），
-// 且每个命令都归属某个组。
+// TestRootHelpGrouped 根帮助按命令组分类展示（部署/应用包/仓库/安全/
+// 代理/控制台/运维共 7 组），且每个命令都归属某个组。
 func TestRootHelpGrouped(t *testing.T) {
 	root := NewRootCmd()
 	var buf bytes.Buffer
@@ -111,7 +111,7 @@ func TestRootHelpGrouped(t *testing.T) {
 
 	// 组标题全部出现（version 已由 cobra 内置 --version 提供，不再有 other 组）
 	for _, title := range []string{
-		"Deployment", "Package", "Security", "Agent", "Operations",
+		"Deployment", "Package", "Repository", "Security", "Agent", "Console", "Operations",
 	} {
 		if !strings.Contains(out, title) {
 			t.Fatalf("帮助缺少分组标题 %q:\n%s", title, out)
@@ -147,10 +147,11 @@ func TestRootHelpGrouped(t *testing.T) {
 	want := map[string]string{
 		"run": "deploy", "adhoc": "deploy",
 		"schema": "chart", "module": "chart", "render": "chart", "lint": "chart", "package": "chart",
-		"ca":       "security",
-		"scan-ssh": "security",
-		"agent":    "agent",
-		"drift":    "ops", "release": "ops", "inventory": "ops",
+		"repo":   "repo",
+		"ca":     "security",
+		"agent":  "agent",
+		"server": "console",
+		"drift":  "ops", "release": "ops", "inventory": "ops",
 	}
 	for _, c := range root.Commands() {
 		gid, ok := want[c.Name()]

@@ -2,7 +2,6 @@ package dialect
 
 import (
 	"strings"
-	"unicode"
 )
 
 // 词法单元（token）与括号深度：MySQL 要把 `a || b` 折成 CONCAT(a, b)，而
@@ -138,11 +137,6 @@ func tokenize(sql string) []token {
 func isDollarQuoteStart(sql string, i int) bool {
 	_, ok := dollarQuotedEnd(sql, i)
 	return ok
-}
-
-// isWordRune 报告字符是否属于 SQL 标识符/关键字字符。
-func isWordRune(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '$'
 }
 
 // trimSpaceLeft/Right 返回去掉空白后的下标（用于把 token 边界对齐到可见文本）。

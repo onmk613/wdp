@@ -339,7 +339,7 @@ onMounted(async () => {
       api<ModuleMeta[]>('GET', '/api/modules'),
       api<Pool[]>('GET', '/api/pools'),
       api<GroupEntry[]>('GET', '/api/groups'),
-      api<{ Name: string }[]>('GET', '/api/hosts').catch(() => null),
+      api<{ name: string }[]>('GET', '/api/hosts').catch(() => null),
     ])
     if (disposed) return
     schemaMeta.value = schema
@@ -347,16 +347,16 @@ onMounted(async () => {
     pools.value = ps
     groups.value = gs
     hostGroups.value = hosts
-      ? { hosts: hosts.map((h) => h.Name), groups: gs.map((g) => g.Name) }
+      ? { hosts: hosts.map((h) => h.name), groups: gs.map((g) => g.name) }
       : null
 
     // 加载内容：编辑模式读 spec；新建模式脚手架
     if (!isCreate.value) {
-      const detail = await api<{ app: { LatestVersion: string }; versions: { Version: string }[] }>(
+      const detail = await api<{ app: { latest_version: string }; versions: { version: string }[] }>(
         'GET', `/api/apps/${props.appId}`,
       )
       if (disposed) return
-      existingVersions.value = (detail.versions || []).map((v) => v.Version)
+      existingVersions.value = (detail.versions || []).map((v) => v.version)
       const q = props.baseVersion ? `?version=${encodeURIComponent(props.baseVersion)}` : ''
       const spec = await api<AppSpec>('GET', `/api/apps/${props.appId}/spec${q}`)
       if (disposed) return

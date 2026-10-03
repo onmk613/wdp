@@ -15,9 +15,9 @@ const props = defineProps<{ kind: 'pool' | 'group' | 'label' }>()
 const router = useRouter()
 
 const kindMeta = {
-  pool: { label: '池', labelPlural: '池', nameKey: 'Name', createBody: (name: string, note: string) => ({ name, note }) },
-  group: { label: '组', labelPlural: '组', nameKey: 'Name', createBody: (name: string, note: string) => ({ name, note }) },
-  label: { label: '标签', labelPlural: '标签', nameKey: 'Key', createBody: (name: string, note: string) => ({ key: name, note }) },
+  pool: { label: '池', labelPlural: '池', nameKey: 'name', createBody: (name: string, note: string) => ({ name, note }) },
+  group: { label: '组', labelPlural: '组', nameKey: 'name', createBody: (name: string, note: string) => ({ name, note }) },
+  label: { label: '标签', labelPlural: '标签', nameKey: 'key', createBody: (name: string, note: string) => ({ key: name, note }) },
 } as const
 const meta = computed(() => kindMeta[props.kind])
 
@@ -45,27 +45,27 @@ function memberOf(kind: 'pool' | 'group' | 'label', name: string, list: string[]
 const entries = computed<Entry[]>(() => {
   const reg: { id: number; name: string; note: string }[] =
     props.kind === 'pool'
-      ? pools.value.map((p) => ({ id: p.ID, name: p.Name, note: p.Note }))
+      ? pools.value.map((p) => ({ id: p.id, name: p.name, note: p.note }))
       : props.kind === 'group'
-        ? groups.value.map((g) => ({ id: g.ID, name: g.Name, note: g.Note }))
-        : labelDefs.value.map((l) => ({ id: l.ID, name: l.Key, note: l.Note }))
+        ? groups.value.map((g) => ({ id: g.id, name: g.name, note: g.note }))
+        : labelDefs.value.map((l) => ({ id: l.id, name: l.key, note: l.note }))
   // 标签 JSON 每台主机/每个应用只解析一次：成员判定对每个 (条目 × 主机)
   // 都要读标签，循环内反复 parse 是纯浪费
-  const hostsParsed = hosts.value.map((h) => ({ h, labels: parseLabels(h.Labels) }))
-  const appsParsed = apps.value.map((a) => ({ a, labels: parseLabels(a.Labels) }))
+  const hostsParsed = hosts.value.map((h) => ({ h, labels: parseLabels(h.labels) }))
+  const appsParsed = apps.value.map((a) => ({ a, labels: parseLabels(a.labels) }))
   const used = new Set<string>()
   for (const { h, labels } of hostsParsed) {
     if (props.kind === 'label') {
       Object.keys(labels).forEach((k) => used.add(k))
     } else {
-      ;((props.kind === 'pool' ? h.Pools : h.Groups) || []).forEach((n) => used.add(n))
+      ;((props.kind === 'pool' ? h.pools : h.groups) || []).forEach((n) => used.add(n))
     }
   }
   for (const { a, labels } of appsParsed) {
     if (props.kind === 'label') {
       Object.keys(labels).forEach((k) => used.add(k))
     } else {
-      ;((props.kind === 'pool' ? a.Pools : a.Groups) || []).forEach((n) => used.add(n))
+      ;((props.kind === 'pool' ? a.pools : a.groups) || []).forEach((n) => used.add(n))
     }
   }
   const all = [...reg]
@@ -76,9 +76,9 @@ const entries = computed<Entry[]>(() => {
   return all.map((r) => ({
     ...r,
     hosts: hostsParsed
-      .filter(({ h, labels }) => memberOf(props.kind, r.name, props.kind === 'pool' ? h.Pools : h.Groups, labels))
-      .map(({ h, labels }) => ({ name: h.Name, value: labels[r.name] ?? '' })),
-    apps: appsParsed.filter(({ a, labels }) => memberOf(props.kind, r.name, props.kind === 'pool' ? a.Pools : a.Groups, labels)).map(({ a }) => a),
+      .filter(({ h, labels }) => memberOf(props.kind, r.name, props.kind === 'pool' ? h.pools : h.groups, labels))
+      .map(({ h, labels }) => ({ name: h.name, value: labels[r.name] ?? '' })),
+    apps: appsParsed.filter(({ a, labels }) => memberOf(props.kind, r.name, props.kind === 'pool' ? a.pools : a.groups, labels)).map(({ a }) => a),
   }))
 })
 
@@ -158,7 +158,7 @@ function gotoHost(name: string) {
 function gotoApp(app: App) {
   // 应用编辑器路由是 /apps/ide（query 传 app id）——此前误写 /apps/:id/edit，
   // 该路由不存在，会被兜底路由甩到主机列表
-  void router.push({ path: '/apps/ide', query: { app: String(app.ID) } })
+  void router.push({ path: '/apps/ide', query: { app: String(app.id) } })
 }
 </script>
 
@@ -192,9 +192,9 @@ function gotoApp(app: App) {
                 <span class="members-label">应用（{{ row.apps.length }}）</span>
                 <template v-if="row.apps.length">
                   <el-tag
-                    v-for="a in row.apps" :key="a.ID" class="member-chip" type="warning" effect="plain"
+                    v-for="a in row.apps" :key="a.id" class="member-chip" type="warning" effect="plain"
                     @click="gotoApp(a)"
-                  >{{ a.Name }}@{{ a.LatestVersion }}</el-tag>
+                  >{{ a.name }}@{{ a.latest_version }}</el-tag>
                 </template>
                 <span v-else class="muted">无</span>
               </div>

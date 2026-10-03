@@ -72,14 +72,16 @@ func (s *Store) PruneMetrics(before int64) error {
 }
 
 // HostAlert 是一条主机健康告警（页面标记用；真正的告警走 Prometheus）。
+// 命名口径：JSON tag 统一 snake_case（全目录 API 统一决策，见 hosts.go
+// Host 的注释）。
 type HostAlert struct {
-	HostID    int64   `json:"HostID"`
-	HostName  string  `json:"HostName"`
-	Kind      string  `json:"Kind"`  // cpu / mem / fs / offline
-	Level     string  `json:"Level"` // warn / crit
-	Detail    string  `json:"Detail"`
-	Value     float64 `json:"Value"`
-	UpdatedAt string  `json:"UpdatedAt"`
+	HostID    int64   `json:"host_id"`
+	HostName  string  `json:"host_name"`
+	Kind      string  `json:"kind"`  // cpu / mem / fs / offline
+	Level     string  `json:"level"` // warn / crit
+	Detail    string  `json:"detail"`
+	Value     float64 `json:"value"`
+	UpdatedAt string  `json:"updated_at"`
 }
 
 // SetHostAlert upsert 一条告警。

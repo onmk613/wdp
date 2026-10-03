@@ -190,13 +190,13 @@ export function useDraftFlow(opts: DraftFlowOptions) {
       // 3) 保存
       const body = fs.toSaveBody(v.version)
       if (opts.isCreate()) {
-        const app = await api<{ ID: number; Name: string }>('POST', '/api/apps/spec', { ...body, name: fs.name })
-        ElMessage.success(`应用 ${app.Name}@${v.version} 已创建`)
+        const app = await api<{ id: number; name: string }>('POST', '/api/apps/spec', { ...body, name: fs.name })
+        ElMessage.success(`应用 ${app.name}@${v.version} 已创建`)
         await draftStore.clear()
         fs.markSaved(v.version)
         existingVersions.value.push(v.version)
         // URL 修正为编辑态（同路由 query 变化触发一次重建，重载新版本）
-        void router.replace({ path: '/apps/ide', query: { app: String(app.ID), base: v.version } })
+        void router.replace({ path: '/apps/ide', query: { app: String(app.id), base: v.version } })
       } else {
         await api('PUT', `/api/apps/${opts.appId()}/spec`, body)
         ElMessage.success(`已保存版本 ${v.version}`)

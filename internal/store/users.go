@@ -115,6 +115,24 @@ func (s *Store) ListUsers() ([]*User, error) {
 	return out, rows.Err()
 }
 
+// lockActiveAdminRows 在事务起点锁住全部活跃 admin 行（**含目标自身**，
+// 排除目标的锁集会在"双 admin 并发互降"时锁到不相交的行集、彼此不阻塞，
+// 形同虚设）。多连接方言（postgres/mysql 的 READ COMMITTED）下 SELECT
+// 不加锁，两条并发事务可在彼此提交前各自 COUNT 到对方、双双通过守卫；
+// 先锁后数，后来者阻塞至先来者提交、重判时已见不到对方。SQLite 单连接
+// 模型语句与事务天然互斥，且不支持 FOR UPDATE 语法，跳过。
+func (s *Store) lockActiveAdminRows(q execer) error {
+	if s.d.Name() == "sqlite" {
+		return nil
+	}
+	rows, err := q.Query(`SELECT id FROM users WHERE role = 'admin' AND disabled = 0 FOR UPDATE`)
+	if err != nil {
+		return err
+	}
+	// 行锁持有至事务结束，结果集可即刻释放
+	return rows.Close()
+}
+
 // UpdateUser 更新角色/禁用态（空字段保持不变；role 非空时须为合法枚举）。
 // 最后一个活跃 admin 的降级/禁用在此原子拒绝：预检若只放 web 层
 // （CountAdmins 与 UPDATE 分离），并发双降级会同时通过预检、事后系统
@@ -127,6 +145,9 @@ func (s *Store) UpdateUser(id int64, role string, disabled *bool) error {
 		return Bizf("invalid role %q (admin | operator | viewer)", role)
 	}
 	return s.tx(func(q execer) error {
+		if err := s.lockActiveAdminRows(q); err != nil {
+			return err
+		}
 		var curRole string
 		var curDisabled bool
 		if err := q.QueryRow(`SELECT role, disabled FROM users WHERE id = ?`, id).Scan(&curRole, &curDisabled); err != nil {
@@ -163,6 +184,9 @@ func (s *Store) UpdateUser(id int64, role string, disabled *bool) error {
 func (s *Store) DeleteUser(id int64) error {
 	// 账号与授权同事务：账号删掉而授权残留即为指向不存在账号的孤儿行
 	return s.tx(func(q execer) error {
+		if err := s.lockActiveAdminRows(q); err != nil {
+			return err
+		}
 		var curRole string
 		var curDisabled bool
 		if err := q.QueryRow(`SELECT role, disabled FROM users WHERE id = ?`, id).Scan(&curRole, &curDisabled); err != nil {

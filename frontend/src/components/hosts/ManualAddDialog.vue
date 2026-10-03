@@ -50,8 +50,8 @@ async function submit() {
     emit('imported')
     if (r.failed > 0) {
       const bad = r.results
-        .filter((x) => !x.OK)
-        .map((x) => `第 ${rs[(x.Row ?? 1) - 1]?.line ?? '?'} 行 ${x.Name}：${x.Detail}`)
+        .filter((x) => !x.ok)
+        .map((x) => `第 ${rs[(x.row ?? 1) - 1]?.line ?? '?'} 行 ${x.name}：${x.detail}`)
         .join('\n')
       await ElMessageBox.alert(bad, `导入完成：成功 ${r.ok} 台，失败 ${r.failed} 台`, { type: 'warning' })
     } else {

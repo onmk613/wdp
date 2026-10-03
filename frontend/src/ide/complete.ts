@@ -44,8 +44,8 @@ function docMarkdown(m: ModuleMeta): string {
 }
 
 function fieldDoc(sec: SchemaMeta['task'][number] | SchemaMeta['play'][number], name: string): string {
-  const f = sec.Fields.find((x) => x.Name === name)
-  return f ? `${f.Desc}${f.Default && f.Default !== '-' ? `（默认 \`${f.Default}\`，类型 ${f.Type}）` : `（类型 ${f.Type}）`}` : ''
+  const f = sec.fields.find((x) => x.name === name)
+  return f ? `${f.desc}${f.default && f.default !== '-' ? `（默认 \`${f.default}\`，类型 ${f.type}）` : `（类型 ${f.type}）`}` : ''
 }
 
 // 常用模块置顶
@@ -271,11 +271,11 @@ export function registerProviders(monaco: MonacoNs, deps: CompleteDeps): Monaco.
 
       if (ctx.level === 'play') {
         for (const sec of meta.play) {
-          for (const f of sec.Fields) {
-            if (ctx.existing.has(f.Name)) continue
-            suggestions.push(makeItem(f.Name, K.Field, `${f.Name}: `, range, {
-              detail: `play · ${f.Type}`,
-              doc: fieldDoc(sec, f.Name), sort: '1' + f.Name,
+          for (const f of sec.fields) {
+            if (ctx.existing.has(f.name)) continue
+            suggestions.push(makeItem(f.name, K.Field, `${f.name}: `, range, {
+              detail: `play · ${f.type}`,
+              doc: fieldDoc(sec, f.name), sort: '1' + f.name,
             }))
           }
         }
@@ -316,13 +316,13 @@ export function registerProviders(monaco: MonacoNs, deps: CompleteDeps): Monaco.
       // 控制键（task 级；moduleArgs 级不给）
       if (ctx.level === 'task') {
         for (const sec of meta.task) {
-          for (const f of sec.Fields) {
-            if (MODULE_POSITION.has(f.Name)) continue
-            if (ctx.existing.has(f.Name)) continue
-            if (['block', 'rescue', 'always'].includes(f.Name)) continue
-            suggestions.push(makeItem(f.Name, K.Field, `${f.Name}: `, range, {
-              detail: `控制键 · ${f.Type}`,
-              doc: fieldDoc(sec, f.Name), sort: '2' + f.Name,
+          for (const f of sec.fields) {
+            if (MODULE_POSITION.has(f.name)) continue
+            if (ctx.existing.has(f.name)) continue
+            if (['block', 'rescue', 'always'].includes(f.name)) continue
+            suggestions.push(makeItem(f.name, K.Field, `${f.name}: `, range, {
+              detail: `控制键 · ${f.type}`,
+              doc: fieldDoc(sec, f.name), sort: '2' + f.name,
             }))
           }
         }

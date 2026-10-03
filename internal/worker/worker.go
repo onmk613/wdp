@@ -6,4 +6,7 @@
 // 依赖全部由构造方注入（store/logger/回调），不 import web——传输层的
 // mTLS 客户端与 scheme 选择留在 web，经 Fetch/Probe 回调传入。Run 挂在
 // server 生命周期 ctx 上，取消即退出。
+//
+// 本包另承载 BoundedForeach：周期扫描与 web 批量操作共用的有界并发遍历
+// helper。放在 worker 是依赖方向使然——web 可 import worker，反之不行。
 package worker
